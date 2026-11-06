@@ -1,0 +1,20 @@
+import { _electron as electron } from 'playwright';
+import { resolve } from 'node:path';
+import { readdirSync } from 'node:fs';
+const app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--profile=test'] });
+const win = await app.firstWindow();
+win.on('console', (m) => console.log('console', m.type(), m.text()));
+const assets = readdirSync('dist/assets');
+const rw = assets.find((f) => f.startsWith('render.worker')), ew = assets.find((f) => f.startsWith('edit.worker'));
+await win.waitForTimeout(500);
+console.log(await win.evaluate(async ([rw, ew]) => {
+  const out = [];
+  const call = (w, method, args, t = 15000) => new Promise((res) => { const to = setTimeout(() => res('TIMEOUT'), t); w.onmessage = (e) => { clearTimeout(to); res(JSON.stringify(e.data).slice(0, 200)); }; w.onerror = (e) => { clearTimeout(to); res('ERR ' + e.message); }; w.postMessage({ id: 1, method, args }); });
+  const wasm = await (await fetch('./pdfium.wasm')).arrayBuffer();
+  const r = new Worker('./assets/' + rw, { type: 'module' });
+  out.push('render start: ' + await call(r, 'start', [wasm]));
+  const e = new Worker('./assets/' + ew, { type: 'module' }); await new Promise((r) => setTimeout(r, 4000));
+  out.push('edit init: ' + await call(e, 'init', [new Uint8Array(10)]));
+  return out.join('\n');
+}, [rw, ew]));
+await app.close();

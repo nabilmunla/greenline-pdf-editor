@@ -1,0 +1,222 @@
+{
+  "0.9.1": {
+    "New features": [
+      "Updates can also come from a web address - the public download page on GitHub - with the same signature and checksum checks; there, Report a problem opens a GitHub issue with your text"
+    ],
+    "General polishing": [
+      "Built-in browser (Electron) brought to 44.10.2 with its security fixes - this version installs with its setup (run it once on each PC)"
+    ],
+    "Fixes": [
+      "Print: a paper picked in the panel (A3, A2...) is now the paper the printer uses - A3 came out on A4 with only part of the drawing",
+      "Print: \"Printer preferences...\" opens the settings of the printer picked in the panel, not those of Windows' default printer",
+      "Count: Backspace pressed right after quick clicks took back the mark before the last one"
+    ]
+  },
+  "0.9.0": {
+    "General polishing": [
+      "Built-in browser (Electron) brought to 44.10.2 with its security fixes - this version installs with its setup (run it once on each PC)"
+    ],
+    "Fixes": [
+      "Print: a paper picked in the panel (A3, A2...) is now the paper the printer uses - A3 came out on A4 with only part of the drawing",
+      "Print: \"Printer preferences...\" opens the settings of the printer picked in the panel, not those of Windows' default printer",
+      "Count: Backspace pressed right after quick clicks took back the mark before the last one"
+    ]
+  },
+  "0.8.9": {
+    "New features": [
+      "Area gives the perimeter too (one tool instead of Area + Perimeter); Totals and To Excel list the perimeters apart",
+      "Drawing by points: Ctrl+Z / Backspace take back the last point, Ctrl+Y puts it back; Esc cancels and Ctrl+Z brings the shape back; Shift+C closes it; a bar at the foot of the page shows the length / area so far",
+      "Corners: drag the middle dot of an edge to add one, Alt+click (or right-click) to delete one; right-click > Continue this line"
+    ],
+    "General polishing": [
+      "A corner you drag snaps to line work, other markups and the shape's own corners (Shift: straight edge); a click on a corner no longer counts as an edit",
+      "Dialogs can be dragged by their title; Calibrate keeps the drawing visible behind it",
+      "Count: Backspace takes back the last mark; the tip shows each segment's direction"
+    ],
+    "Fixes": [
+      "Ctrl+Z while drawing an area or a line took back the markup made before instead of the last point"
+    ]
+  },
+  "0.8.8": {
+    "New features": [
+      "Text boxes, callouts and typewriter text: bold, italic, underline, colour, size and font for the selected words only, like a word processor (Ctrl+B / Ctrl+I / Ctrl+U too) - with nothing selected the whole box changes, as before"
+    ],
+    "General polishing": [
+      "The formatting is saved the standard way, so other PDF programs show it and keep it; Ctrl+Z / Ctrl+Y while typing take back a style as well as typing",
+      "Bold or coloured words in comments made in other PDF programs stay that way when you edit them here"
+    ]
+  },
+  "0.8.7": {
+    "Fixes": [
+      "Updates no longer stop with \"didn't finish\" when PDF Editor takes a moment to close: the update waits for it (takes effect once this version's setup has been run on the PC)"
+    ]
+  },
+  "0.8.6": {
+    "Fixes": [
+      "Explorer > Combine with PDF Editor works with many files at once (dozens of large drawings): the Merge window opens - it sometimes never came",
+      "Print offers Windows' default printer at every start (it could offer the first printer of the list, or the one used last time); a printer you pick is kept until PDF Editor is closed"
+    ],
+    "General polishing": [
+      "Files sent with Combine while another window is open (Settings, a password) say so, and open in Merge when it closes"
+    ]
+  },
+  "0.8.5": {
+    "New features": [
+      "Area and Perimeter draw as corners, a rectangle or a circle (strip at the foot of the page, keys P / R / O); circles measure exactly",
+      "Type a length while measuring (4200, 4.2 m) and press Enter: the next point goes that far towards the mouse",
+      "Counts & totals panel (Measure > Totals): every count and the measurements added up, by name and page - no Excel needed",
+      "Count by tag (Measure > By tag…): door tags such as D01, D02 found on the drawing and counted in one go",
+      "Print: Send as Auto / As they are / Pictures - heavy scans and dense drawings go as one picture per sheet, a far lighter job for the printer"
+    ],
+    "General polishing": [
+      "A rectangle measurement keeps its square corners when a corner is dragged (Alt: the corner alone); a circle has one handle for its size",
+      "The print panel counts the seconds while the printer takes the job",
+      "Tabs of drawings from one set show the part of the name that differs; the left panel can't push the page out of view",
+      "The text box bar fits narrow windows and sits clear of a turned text box; Black & white shows in the print preview",
+      "The page box understands page labels (iii, A-2); Undo while typing in a new text box removes the box"
+    ],
+    "Fixes": [
+      "Switching tabs keeps each file where you left it - it used to jump to the top of page 1, sometimes zoomed into its left side",
+      "Text box bar: the font and size lists open again",
+      "Measurements pasted, duplicated or moved to another page, file or viewport show the number for their new place, and a later scale change updates them (some kept their old number)",
+      "Count numbers carry on after the highest one - deleting #2 no longer gives a second #3",
+      "Pages extracted, inserted or merged keep their scale; a viewport follows its page when the page is turned",
+      "A pencil stroke is kept when you press Escape, pick another tool or save straight after it",
+      "Number boxes (copies, scale %, header size...) can be emptied and typed over",
+      "Markups on a layer that is turned off are not printed or made visible by Flatten",
+      "Files of 2 GB or more: said plainly (they can't be opened here); a merge that big is kept where you choose",
+      "Square feet worked out exactly; an area whose sides cross is pointed out"
+    ]
+  },
+  "0.8.4": {
+    "New features": [
+      "Rectangle area (Measure tab): drag from corner to corner, or click the two corners; Shift for a square"
+    ],
+    "General polishing": [
+      "Measurements to Excel: the number in its own column as a real number, the unit in the next column, the drawing's label beside them"
+    ]
+  },
+  "0.8.3": {
+    "General polishing": [
+      "Updates install without the antivirus stopping them (0.8.2's update was blocked on some PCs)",
+      "A future version that needs its setup says so - PDF Editor never starts a downloaded setup by itself"
+    ],
+    "Fixes": [
+      "Everything from 0.8.2 (search all open files, insert and replace pages, bookmarks, links, pictures, table area to Excel) is in this version"
+    ]
+  },
+  "0.8.2": {
+    "New features": [
+      "Search all open files at once: results grouped by file, a click opens the right tab",
+      "Insert pages from another open tab, and Replace pages with revised sheets (bookmarks and links kept)",
+      "Bookmarks you can add, rename, move and delete",
+      "Table area to Excel: drag a box around a table on a drawing, only that goes to Excel",
+      "Save pages as pictures (PNG/JPG), and a new PDF from pictures or scans",
+      "Links: make, change and delete them; a web link always asks before it opens",
+      "Comments list to a PDF summary, with a picture of each markup"
+    ],
+    "General polishing": [
+      "Extract pages: type the pages like in Print, remove them from the original, save or open as a tab",
+      "The Pages panel keeps its place for each tab",
+      "Merging a very big set works, with progress and Stop",
+      "Large page inserts are many times faster; long sessions stay quick to mark up"
+    ],
+    "Fixes": [
+      "Deleting or moving pages no longer loses the file's form fields or measurement scales",
+      "Excel export of steel section tables (decimal commas, split columns)",
+      "Updates are checked for a valid signature before they are installed",
+      "A link to another file no longer jumps to a page of this one"
+    ]
+  },
+  "0.8.1": {
+    "General polishing": [
+      "Ribbon pop-ups (colours, Tool Chest, Flatten) open in full, no longer cut off",
+      "OCR: one run is one undo step; Redo leaves pages with real text alone",
+      "AI: Stop works at any moment; a mistyped new key keeps the old one; translations carry on after a failure",
+      "The same file by another name (mapped drive or network path) goes to its open tab"
+    ],
+    "Fixes": [
+      "Remove password: the password no longer comes back at the next save",
+      "Text and page numbers added after OCR show on the page",
+      "Merge, Split and Extract keep markups, form fields and links",
+      "Digitally signed files: asked before a save that would break the signature",
+      "Print: the printer list was empty",
+      "A damaged settings file can no longer wipe your settings",
+      "Batch jobs never write over a file that is open"
+    ]
+  },
+  "0.8.0": {
+    "New features": [
+      "Export to Word and Excel (File tab): tables, numbers as numbers, one sheet per bill",
+      "Scans exported too: read with OCR, stamps and coloured ink left out",
+      "Tabs: drag to reorder, drag out to a window of its own, drag back to join",
+      "Many files open: tabs shrink to fit; the list button shows them all"
+    ],
+    "General polishing": [
+      "Bills over many pages join into one sheet, header once",
+      "Word: headings, lists, page numbers, headers and footers kept"
+    ],
+    "Fixes": [
+      "OCR'd scans: text selection and highlights sit on the words, not above them"
+    ]
+  },
+  "0.7.0": {
+    "New features": [
+      "Stamp from a scan or photo: background removed, straightened, real size",
+      "Copy a stamp to all pages (same corner on every sheet size)",
+      "Stamp from a page: box a stamp on a scanned page"
+    ],
+    "General polishing": [
+      "Signatures from a scan cleaned the same way",
+      "Stamps keep their shape when resized (Shift to stretch)",
+      "Messages show above open dialogs; names under Your stamps"
+    ],
+    "Fixes": [
+      "Picture stamps no longer squash when resized",
+      "Picture stamps upright on turned pages",
+      "Callouts on pages turned 270° keep their pointer"
+    ]
+  },
+  "0.6.1": {
+    "General polishing": [
+      "Measurement numbers a bit bigger; Ctrl+Z right after a ribbon list or box"
+    ],
+    "Fixes": [
+      "Measurement arrows sized to the number, not huge",
+      "Selected shapes: colour, width and ends from the ribbon",
+      "Antivirus blocking an update: the app stays open and points to the setup"
+    ]
+  },
+  "0.6.0": {
+    "New features": [
+      "Combine PDFs from Explorer: select, right-click > Combine with PDF Editor",
+      "Measurements: decimals and unit, before or after measuring (m: 3, mm: 0)",
+      "Measurement numbers: one size for the whole file, sized to your zoom",
+      "Separate X and Y scales for stretched drawings and sections",
+      "What's new: File tab, any time"
+    ],
+    "General polishing": [
+      "Text cursor over text when highlighting",
+      "Decimals (m) on the Measure ribbon",
+      "Clear messages: file open in Excel, folder gone, files that can't be merged"
+    ],
+    "Fixes": [
+      "Very heavy drawings now open",
+      "Other programs' text boxes no longer garble when rotated",
+      "Setup no longer stuck on a green screen",
+      "Fewer false crash reports; a page too heavy to draw says so"
+    ]
+  },
+  "0.5.0": [
+    "Arabic in text boxes, callouts, typewriter and edited page text - joined letters, right to left, searchable",
+    "Fonts from this PC for markups and text (Calibri, Times, Arial, Tahoma...), bold and italic - included in the saved file",
+    "Report a problem (File tab); crashes are noted by themselves",
+    "Many fixes: counts numbered right, review status kept, cut and paste of markups, edits made while saving, password-protected files, printing of hidden layers and replies"
+  ],
+  "0.4.0": [
+    "One-file installer: just you (no admin) or everyone on the PC, shortcuts, Open with",
+    "Updates from the company's shared folder - asks before downloading, quiet away from the office",
+    "Settings > Updates: check now, change the folder, go back to the previous version",
+    "Settings > About > Licences"
+  ]
+}

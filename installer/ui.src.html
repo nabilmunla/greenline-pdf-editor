@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>PDF Editor Setup</title>
+<style>
+@font-face { font-family: 'Inter Variable'; font-style: normal; font-weight: 100 900; font-display: block; src: url(data:font/woff2;base64,{{INTER}}) format('woff2'); }
+:root {
+  --frame: #09302f; --frame-2: #124543; --frame-text: #e7f0ee; --frame-dim: #9dbab6;
+  --paper: #ffffff; --surface-2: #f5f8f7; --surface-3: #e6eeec; --border: #dde5e3; --border-strong: #b9cac6;
+  --text: #10201f; --text-2: #475957; --text-3: #7c8d8a;
+  --accent: #b07741; --accent-strong: #924a22; --accent-soft: rgba(214, 175, 103, 0.22); --focus: #c79a45;
+  --primary: #09302f; --primary-text: #ffffff; --primary-hover: #145553;
+  --danger: #b42318; --danger-text: #ffffff; --ok: #157f54;
+  --brand-gradient: linear-gradient(100deg, #f8e189 0%, #d6af67 35%, #b07741 70%, #924a22 100%);
+  --font-ui: 'Inter Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-brand: 'Bahnschrift', 'Segoe UI', sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --frame: #020d0c; --frame-2: #0c2423; --frame-text: #dce8e6; --frame-dim: #7f9b97;
+    --paper: #0b1f1e; --surface-2: #0e2423; --surface-3: #173a38; --border: #1a3b39; --border-strong: #2a5652;
+    --text: #e4edeb; --text-2: #a5b9b6; --text-3: #6f8a87;
+    --accent: #e0bd78; --accent-strong: #f0d08e; --accent-soft: rgba(224, 189, 120, 0.2); --focus: #e0bd78;
+    --primary: #d6af67; --primary-text: #0a1f1e; --primary-hover: #e3bf79;
+    --danger: #ff7a6b; --danger-text: #2a0d09; --ok: #3ccf8e;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body { font: 13.5px/1.5 var(--font-ui); color: var(--text); background: var(--paper); user-select: none; -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
+button, input { font: inherit; color: inherit; }
+
+/* ---------- title band (drag to move) ---------- */
+header { flex: none; height: 64px; background: var(--frame); display: flex; align-items: center; gap: 12px; padding: 0 8px 0 20px; position: relative; }
+header::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--brand-gradient); }
+header img { width: 38px; height: 30px; display: block; }
+.word { font-family: var(--font-brand); font-size: 22px; letter-spacing: 0.01em; color: var(--frame-text); white-space: nowrap; }
+.word b { font-weight: 600; background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.ver:empty { display: none; }
+.ver { margin-left: 2px; font-size: 11.5px; color: var(--frame-dim); border: 1px solid rgba(255,255,255,0.16); border-radius: 999px; padding: 1px 8px; letter-spacing: 0.02em; }
+.wbtns { margin-left: auto; display: flex; gap: 2px; align-self: flex-start; margin-top: 8px; }
+.wbtn { width: 34px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--frame-dim); display: grid; place-items: center; cursor: pointer; }
+.wbtn:hover { background: var(--frame-2); color: var(--frame-text); }
+.wbtn.x:hover { background: #c42b1c; color: #fff; }
+.wbtn:disabled { opacity: 0.35; pointer-events: none; }
+
+/* ---------- body ---------- */
+main { flex: 1; min-height: 0; position: relative; }
+.view { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 26px 30px 20px; opacity: 0; transform: translateX(14px); pointer-events: none; transition: opacity 0.16s ease, transform 0.18s ease; }
+.view.on { opacity: 1; transform: none; pointer-events: auto; }
+.view.back { transform: translateX(-14px); }
+h1 { margin: 0 0 6px; font-family: var(--font-brand); font-weight: 600; font-size: 25px; letter-spacing: 0.005em; line-height: 1.2; }
+p { margin: 0; color: var(--text-2); }
+.lead { font-size: 14px; max-width: 470px; }
+.grow { flex: 1; min-height: 8px; }
+.foot { display: flex; align-items: center; gap: 10px; }
+.foot .sp { flex: 1; }
+
+.btn { height: 34px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--paper); cursor: pointer; font-weight: 550; white-space: nowrap; }
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--primary); color: var(--primary-text); border-color: transparent; min-width: 132px; font-weight: 650; }
+.btn.primary:hover { background: var(--primary-hover); }
+.btn.danger { background: var(--danger); color: var(--danger-text); border-color: transparent; min-width: 120px; }
+.btn.danger:hover { filter: brightness(1.08); }
+.btn:focus-visible, .seg button:focus-visible, .link:focus-visible, .chk input:focus-visible { outline: 2px solid color-mix(in srgb, var(--focus) 60%, transparent); outline-offset: 2px; }
+.field input:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-soft); }
+.btn.sm { height: 30px; padding: 0 12px; font-size: 12.5px; }
+.link { border: 0; background: none; padding: 0; color: var(--accent-strong); cursor: pointer; font-weight: 600; }
+.link:hover { text-decoration: underline; }
+
+/* summary of what will happen */
+.card { margin-top: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); padding: 4px 0; }
+.row { display: flex; gap: 12px; align-items: flex-start; padding: 8px 14px; }
+.row + .row { border-top: 1px solid var(--border); }
+.row svg { flex: none; width: 18px; height: 18px; color: var(--accent); margin-top: 1px; }
+.row .t { min-width: 0; }
+.row .k { font-weight: 600; color: var(--text); }
+.row .v { color: var(--text-3); font-size: 12.5px; word-break: break-all; }
+
+/* options */
+.form { display: grid; grid-template-columns: 104px 1fr; gap: 11px 14px; align-items: center; margin-top: 12px; }
+.form .lab { color: var(--text-2); font-weight: 550; }
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 9px; padding: 2px; gap: 2px; background: var(--surface-2); }
+.seg button { border: 0; background: transparent; border-radius: 7px; padding: 5px 12px; cursor: pointer; color: var(--text-2); text-align: left; line-height: 1.25; }
+.seg button small { display: block; font-size: 11px; color: var(--text-3); }
+.seg button.on { background: var(--paper); color: var(--text); box-shadow: 0 1px 2px rgba(9,48,47,0.12), 0 0 0 1px var(--border); font-weight: 600; }
+.seg button.on small { color: var(--accent-strong); font-weight: 500; }
+.field { display: flex; gap: 8px; }
+.field input { flex: 1; min-width: 0; height: 32px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--paper); padding: 0 10px; font-size: 12.5px; user-select: text; }
+.field input:disabled { color: var(--text-3); background: var(--surface-2); }
+.hint { grid-column: 2; margin-top: -6px; font-size: 11.5px; color: var(--text-3); }
+.checks { display: flex; gap: 22px; flex-wrap: wrap; }
+.chk { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text); }
+.chk input { appearance: none; width: 17px; height: 17px; border: 1.5px solid var(--border-strong); border-radius: 5px; margin: 0; display: grid; place-items: center; background: var(--paper); cursor: pointer; }
+.chk input:checked { background: var(--primary); border-color: var(--primary); }
+.chk input:checked::after { content: ''; width: 9px; height: 5px; border: 2px solid var(--primary-text); border-top: 0; border-right: 0; transform: rotate(-45deg) translate(1px, -1px); }
+.err { min-height: 18px; margin-top: 8px; color: var(--danger); font-size: 12.5px; font-weight: 550; line-height: 1.4; }
+
+/* progress */
+.bar { height: 10px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin-top: 26px; position: relative; }
+.bar i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: var(--brand-gradient); transition: width 0.25s ease; }
+.bar i::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent); animation: shine 1.4s linear infinite; }
+@keyframes shine { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.pstat { display: flex; justify-content: space-between; margin-top: 10px; color: var(--text-3); font-size: 12.5px; }
+.pstat b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* result */
+.badge { width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 14px; }
+.badge.ok { background: var(--brand-gradient); color: #fff; box-shadow: 0 6px 18px rgba(176, 119, 65, 0.35); }
+.badge.bad { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.badge svg { width: 28px; height: 28px; }
+.note { margin-top: 18px; display: flex; gap: 12px; align-items: center; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--surface-2); }
+.note p { flex: 1; font-size: 12.5px; }
+.errbox { margin-top: 14px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); font-size: 12.5px; max-height: 96px; overflow: auto; user-select: text; word-break: break-word; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header id="hdr">
+  <img src="data:image/svg+xml;base64,{{LOGO}}" alt="">
+  <span class="word"><b>PDF</b> Editor</span>
+  <span class="ver" id="ver"></span>
+  <div class="wbtns">
+    <button class="wbtn" id="bmin" title="Minimise" tabindex="-1"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 5.5h9" stroke="currentColor" stroke-width="1.2"/></svg></button>
+    <button class="wbtn x" id="bx" title="Close" tabindex="-1"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 1.5l8 8M9.5 1.5l-8 8" stroke="currentColor" stroke-width="1.2"/></svg></button>
+  </div>
+</header>
+<main>
+  <!-- install: summary -->
+  <section class="view" id="v-welcome">
+    <h1 id="w-title">Install PDF Editor</h1>
+    <p class="lead" id="w-lead">View, mark up, measure and edit PDFs: drawings, specifications and scans.</p>
+    <div class="card" id="w-card"></div>
+    <div class="grow"></div>
+    <div class="foot">
+      <button class="btn" id="w-opts">Options</button>
+      <span class="sp"></span>
+      <button class="btn hidden" id="w-open2">Open PDF Editor</button>
+      <button class="btn primary" id="w-go">Install</button>
+    </div>
+  </section>
+
+  <!-- install: options -->
+  <section class="view" id="v-options">
+    <h1>Options</h1>
+    <div class="form">
+      <span class="lab">Install for</span>
+      <div class="seg" id="o-scope">
+        <button data-v="user">Just me<small>No admin rights needed</small></button>
+        <button data-v="machine">Everyone on this PC<small>Asks for admin rights</small></button>
+      </div>
+      <span class="lab">Folder</span>
+      <div class="field"><input id="o-dir" spellcheck="false"><button class="btn sm" id="o-dirb">Browse…</button></div>
+      <span class="lab">Also</span>
+      <div class="checks">
+        <label class="chk"><input type="checkbox" id="o-desk">Desktop shortcut</label>
+        <label class="chk"><input type="checkbox" id="o-open">Open PDFs with PDF Editor</label>
+      </div>
+      <span class="lab">Updates from</span>
+      <div class="field"><input id="o-src" spellcheck="false" placeholder="No automatic updates"><button class="btn sm" id="o-srcb">Browse…</button></div>
+      <span class="hint">Where new versions are published. Empty: no automatic updates.</span>
+    </div>
+    <div class="err" id="o-err"></div>
+    <div class="grow"></div>
+    <div class="foot">
+      <button class="btn" id="o-back">Back</button>
+      <span class="sp"></span>
+      <button class="btn primary" id="o-go">Install</button>
+    </div>
+  </section>
+
+  <!-- working -->
+  <section class="view" id="v-work">
+    <h1 id="k-title">Installing PDF Editor…</h1>
+    <p class="lead" id="k-lead">Copying the app to your PC.</p>
+    <div class="bar"><i id="k-bar"></i></div>
+    <div class="pstat"><span id="k-stage">Starting</span><b id="k-pct">0%</b></div>
+    <div class="grow"></div>
+  </section>
+
+  <!-- finished -->
+  <section class="view" id="v-done">
+    <div class="badge ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+    <h1 id="d-title">PDF Editor is ready</h1>
+    <p class="lead" id="d-lead"></p>
+    <div class="note hidden" id="d-def">
+      <p>To open every PDF with PDF Editor, choose it once in Windows' settings.</p>
+      <button class="btn sm" id="d-defb">Set as default…</button>
+    </div>
+    <div class="grow"></div>
+    <div class="foot">
+      <span class="sp"></span>
+      <button class="btn" id="d-close">Close</button>
+      <button class="btn primary" id="d-open">Open PDF Editor</button>
+    </div>
+  </section>
+
+  <!-- failed -->
+  <section class="view" id="v-fail">
+    <div class="badge bad"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 7.5v6M12 17h.01"/><circle cx="12" cy="12" r="9.5"/></svg></div>
+    <h1 id="f-title">Couldn't install</h1>
+    <p class="lead" id="f-lead"></p>
+    <div class="errbox hidden" id="f-err"></div>
+    <div class="grow"></div>
+    <div class="foot">
+      <span class="sp"></span>
+      <button class="btn" id="f-close">Close</button>
+      <button class="btn primary" id="f-retry">Try again</button>
+    </div>
+  </section>
+
+  <!-- uninstall -->
+  <section class="view" id="v-remove">
+    <h1>Remove PDF Editor</h1>
+    <p class="lead" id="r-lead"></p>
+    <div class="card"><div class="row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18M8 7V4.5h8V7M6 7l1 13h10l1-13"/></svg>
+      <div class="t"><div class="k">PDF Editor, its shortcuts and its link to PDF files</div><div class="v" id="r-dir"></div></div>
+    </div></div>
+    <label class="chk" style="margin-top: 18px"><input type="checkbox" id="r-data">Also remove my settings, recent files list, saved AI keys, backups of saved files and copies of unsaved work</label>
+    <div class="grow"></div>
+    <div class="foot">
+      <span class="sp"></span>
+      <button class="btn" id="r-cancel">Cancel</button>
+      <button class="btn danger" id="r-go">Remove</button>
+    </div>
+  </section>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const RPC = { n: 1, p: {} };
+function send(o) {
+  const s = JSON.stringify(o);
+  if (window.__mock) return window.__mock(o);
+  if (window.chrome && chrome.webview) chrome.webview.postMessage(s);
+}
+function host(m, ...a) { const id = RPC.n++; return new Promise((res) => { RPC.p[id] = res; send({ id, m, a }); }); }
+function post(m, ...a) { send({ id: 0, m, a }); }
+window.__r = (id, v) => { const f = RPC.p[id]; delete RPC.p[id]; if (f) f(v); };
+const on = {};
+window.__ev = (n, v) => { if (on[n]) on[n](v); };
+window.onerror = (msg, src, line) => post('log', msg + ' @' + line);
+
+let S = null, O = null, busy = false, cur = 'welcome', what = 'install';
+const ICON = {
+  user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="3.8"/><path d="M4.5 20c1.3-3.8 4.2-5.6 7.5-5.6s6.2 1.8 7.5 5.6"/></svg>',
+  pc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+  links: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3h7v7M21 3l-9 9"/><path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></svg>',
+  upd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg>',
+};
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const order = ['welcome', 'options', 'work', 'done', 'fail', 'remove'];
+function show(v) {
+  const a = order.indexOf(cur), b = order.indexOf(v);
+  document.querySelectorAll('.view').forEach((el) => { el.classList.remove('on', 'back'); });
+  const prev = $('v-' + cur);
+  if (prev && cur !== v && b < a) prev.classList.add('back');
+  $('v-' + v).classList.add('on');
+  cur = v;
+  const f = $('v-' + v).querySelector('.btn.primary, .btn.danger');
+  if (f) setTimeout(() => f.focus(), 30);
+}
+function setBusy(b) { busy = b; $('bx').disabled = b; }
+
+function summary() {
+  const rows = [];
+  const scope = O.scope === 'machine' ? ['Everyone on this PC', 'Asks for admin rights once'] : ['Just for you', 'No admin rights needed'];
+  rows.push([O.scope === 'machine' ? ICON.pc : ICON.user, scope[0], (scope[1] ? scope[1] + ' · ' : '') + O.dir]);
+  const sc = ['Start menu'];
+  if (O.desktop) sc.push('desktop');
+  rows.push([ICON.links, 'Shortcuts: ' + sc.join(' and '), O.openWith ? 'Listed in "Open with" for PDF files' : 'Not linked to PDF files']);
+  rows.push([ICON.upd, O.source ? 'Updates from the shared folder' : 'No automatic updates', O.source || 'Choose a folder under Options to get new versions automatically']);
+  $('w-card').innerHTML = rows.map((r) => '<div class="row">' + r[0] + '<div class="t"><div class="k">' + esc(r[1]) + '</div><div class="v">' + esc(r[2]) + '</div></div></div>').join('');
+}
+
+function welcome() {
+  const ex = S.existing;
+  $('w-open2').classList.add('hidden');
+  if (ex && ex.version === S.version) {
+    $('w-title').textContent = 'PDF Editor ' + S.version + ' is installed';
+    $('w-lead').textContent = 'You can install it again over the same copy (your settings stay), or just open it.';
+    $('w-go').textContent = 'Reinstall';
+    $('w-open2').classList.remove('hidden');
+    what = 'reinstall';
+  } else if (ex) {
+    $('w-title').textContent = 'Update PDF Editor';
+    $('w-lead').textContent = 'Version ' + ex.version + ' is on this PC. This replaces it with ' + S.version + '. Your settings, recent files and AI keys stay.';
+    $('w-go').textContent = 'Update';
+    what = 'update';
+  } else {
+    $('w-go').textContent = 'Install';
+    what = 'install';
+  }
+  $('o-go').textContent = $('w-go').textContent;
+  summary();
+}
+
+function fillOptions() {
+  document.querySelectorAll('#o-scope button').forEach((b) => b.classList.toggle('on', b.dataset.v === O.scope));
+  $('o-dir').value = O.dir;
+  $('o-desk').checked = O.desktop;
+  $('o-open').checked = O.openWith;
+  $('o-src').value = O.source || '';
+  const locked = !!S.existing;
+  $('o-dir').disabled = locked; $('o-dirb').disabled = locked;
+  document.querySelectorAll('#o-scope button').forEach((b) => (b.disabled = locked));
+  $('o-err').textContent = locked ? 'Installed in this folder. To move it, remove PDF Editor first.' : '';
+  $('o-err').style.color = locked ? 'var(--text-3)' : '';
+}
+function readOptions() {
+  O.dir = $('o-dir').value.trim();
+  O.desktop = $('o-desk').checked;
+  O.openWith = $('o-open').checked;
+  O.source = $('o-src').value.trim();
+}
+
+async function go() {
+  if (busy) return;
+  if (cur === 'options') readOptions();
+  const msg = await host('check', O.scope, O.dir);
+  if (msg) { show('options'); fillOptions(); $('o-err').style.color = ''; $('o-err').textContent = msg; return; }
+  setBusy(true);
+  $('k-title').textContent = what === 'update' ? 'Updating PDF Editor…' : 'Installing PDF Editor…';
+  $('k-lead').textContent = O.scope === 'machine' ? 'Windows may ask for admin rights.' : 'Copying the app to your PC.';
+  progress({ pct: 0, stage: 'Starting' });
+  show('work');
+  await host('install', O);
+}
+function progress(p) {
+  const pct = Math.max(0, Math.min(100, Math.round(p.pct * 100)));
+  $('k-bar').style.width = pct + '%';
+  $('k-pct').textContent = pct + '%';
+  $('k-stage').textContent = p.stage || '';
+}
+on.progress = progress;
+on.done = (r) => {
+  setBusy(false);
+  if (S.mode === 'uninstall') {
+    if (r.ok) {
+      $('d-title').textContent = 'PDF Editor has been removed';
+      $('d-lead').textContent = 'Thanks for using it.';
+      $('d-open').classList.add('hidden');
+      $('d-def').classList.add('hidden');
+      show('done');
+    } else fail('Couldn\'t remove PDF Editor', r);
+    return;
+  }
+  if (r.ok) {
+    $('d-title').textContent = what === 'update' ? 'PDF Editor is up to date' : 'PDF Editor is ready';
+    $('d-lead').textContent = 'Find it in the Start menu' + (O.desktop ? ' and on your desktop.' : '.');
+    $('d-def').classList.toggle('hidden', !O.openWith);
+    show('done');
+  } else fail(what === 'update' ? 'Couldn\'t update' : 'Couldn\'t install', r);
+};
+function fail(title, r) {
+  $('f-title').textContent = title;
+  if (r.running) {
+    $('f-lead').textContent = 'PDF Editor is open. Close it (save your work first), then try again.';
+    $('f-err').classList.add('hidden');
+  } else {
+    $('f-lead').textContent = 'Nothing was changed. The reason:';
+    $('f-err').textContent = r.err || 'Unknown error';
+    $('f-err').classList.remove('hidden');
+  }
+  show('fail');
+}
+
+// ---- wiring
+$('hdr').addEventListener('mousedown', (e) => { if (e.button === 0 && !e.target.closest('button')) post('drag'); });
+$('bmin').onclick = () => post('min');
+$('bx').onclick = () => { if (!busy) post('close'); };
+$('w-opts').onclick = () => { fillOptions(); show('options'); };
+$('w-go').onclick = go;
+$('w-open2').onclick = () => post('open');
+$('o-back').onclick = () => { readOptions(); summary(); show('welcome'); };
+$('o-go').onclick = go;
+document.querySelectorAll('#o-scope button').forEach((b) => (b.onclick = () => {
+  readOptions();
+  const was = O.scope; O.scope = b.dataset.v;
+  if (O.dir === S.dirs[was]) O.dir = S.dirs[O.scope];
+  fillOptions();
+}));
+$('o-dirb').onclick = async () => { readOptions(); const p = await host('browse', 'dir', O.dir); if (p) { O.dir = p; fillOptions(); } };
+$('o-srcb').onclick = async () => { readOptions(); const p = await host('browse', 'source', O.source); if (p) { O.source = p; fillOptions(); } };
+$('d-close').onclick = () => post('close');
+$('d-open').onclick = () => post('open');
+$('d-defb').onclick = () => post('defaults');
+$('f-close').onclick = () => post('close');
+$('f-retry').onclick = () => { if (S.mode === 'uninstall') show('remove'); else go(); };
+$('r-cancel').onclick = () => post('close');
+$('r-go').onclick = async () => {
+  if (busy) return;
+  setBusy(true);
+  $('k-title').textContent = 'Removing PDF Editor…';
+  $('k-lead').textContent = S.existing.scope === 'machine' ? 'Windows may ask for admin rights.' : 'Removing the app from your PC.';
+  progress({ pct: 0, stage: 'Starting' });
+  show('work');
+  await host('uninstall', $('r-data').checked);
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !busy && !e.repeat && !(e.target.closest && e.target.closest('button'))) {
+    const b = $('v-' + cur).querySelector('.btn.primary:not(.hidden), .btn.danger');
+    if (b && !b.disabled) { e.preventDefault(); b.click(); }
+    return;
+  }
+  if (e.key === 'Escape' && !busy) {
+    if (cur === 'options') $('o-back').click(); else post('close');
+  }
+});
+document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input')) e.preventDefault(); });
+
+(async () => {
+  S = await host('init');
+  O = Object.assign({}, S.opts || {});
+  $('ver').textContent = S.version ? 'v' + S.version : '';
+  if (S.mode === 'uninstall') {
+    $('r-lead').textContent = 'This removes PDF Editor' + (S.version ? ' ' + S.version : '') + ' from this PC. Your PDF files aren\'t touched.';
+    $('r-dir').textContent = S.existing.dir;
+    show('remove');
+  } else {
+    welcome();
+    show('welcome');
+  }
+  await document.fonts.ready;
+  requestAnimationFrame(() => post('ready'));
+})();
+</script>
+</body>
+</html>

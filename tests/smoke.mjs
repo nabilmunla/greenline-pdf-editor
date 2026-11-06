@@ -1,0 +1,13 @@
+import { _electron as electron } from 'playwright';
+import { resolve } from 'node:path';
+const files = process.argv.slice(2).map((f) => resolve(f));
+const app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--profile=test', ...files], env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' } });
+const win = await app.firstWindow();
+const logs = [];
+win.on('console', (m) => logs.push(m.type() + ': ' + m.text()));
+win.on('pageerror', (e) => logs.push('PAGEERROR ' + e.stack));
+await win.setViewportSize({ width: 1500, height: 920 }).catch(() => {});
+await win.waitForTimeout(6000);
+await win.screenshot({ path: 'tests/out/smoke1.png' });
+console.log(logs.slice(0, 40).join('\n'));
+await app.close();

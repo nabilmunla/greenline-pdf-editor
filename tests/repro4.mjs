@@ -1,0 +1,22 @@
+import { _electron as electron } from 'playwright';
+import { resolve } from 'node:path';
+import { copyFileSync } from 'node:fs';
+copyFileSync('tests/data/long-spec.pdf', '/tmp/claude-0/spec-dnd.pdf');
+const app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--profile=repro4', '/tmp/claude-0/spec-dnd.pdf'] });
+const win = await app.firstWindow();
+win.on('console', (m) => console.log('console', m.type(), m.text().slice(0, 200)));
+await win.setViewportSize({ width: 1600, height: 1000 }).catch(() => {});
+await win.waitForFunction(() => window.__gcc && window.__gcc.active());
+await win.waitForTimeout(1500);
+const first = () => win.evaluate(async () => (await window.__gcc.active().chars(0)).text.slice(0, 12) + ' | ' + (await window.__gcc.active().chars(2)).text.slice(0, 12));
+console.log('before', await first());
+const src = win.locator('.thumb[data-page="0"]'), dst = win.locator('.thumb[data-page="2"]');
+await src.dragTo(dst, { targetPosition: { x: 40, y: 200 } });
+await win.waitForTimeout(2500);
+console.log('after dragTo', await first());
+// manual mouse drag as a person would
+const a = await win.locator('.thumb[data-page="0"]').boundingBox(), b = await win.locator('.thumb[data-page="3"]').boundingBox();
+await win.mouse.move(a.x + 50, a.y + 50); await win.mouse.down(); await win.mouse.move(a.x + 60, a.y + 80, { steps: 3 }); await win.mouse.move(b.x + 50, b.y + b.height - 20, { steps: 10 }); await win.mouse.up();
+await win.waitForTimeout(2500);
+console.log('after mouse', await first());
+process.exit(0);

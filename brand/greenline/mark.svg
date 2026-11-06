@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#145553"/>
+      <stop offset="1" stop-color="#09302f"/>
+    </linearGradient>
+    <linearGradient id="ln" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#2fd07a"/>
+      <stop offset="1" stop-color="#7cf0a8"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <!-- the sheet -->
+  <path d="M70 44 H154 L190 80 V212 H70 Z" fill="#f2f7f6"/>
+  <path d="M154 44 V80 H190 Z" fill="#c9dbd8"/>
+  <!-- drawing lines on it -->
+  <g stroke="#b9cbc8" stroke-width="7" stroke-linecap="round">
+    <path d="M90 72 H136"/>
+    <path d="M90 96 H170"/>
+    <path d="M90 120 H150"/>
+  </g>
+  <!-- the green line: a measured run with its corners -->
+  <path d="M40 196 L100 148 L146 172 L216 92" fill="none" stroke="#09302f" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M40 196 L100 148 L146 172 L216 92" fill="none" stroke="url(#ln)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#09302f">
+    <circle cx="100" cy="148" r="17"/><circle cx="146" cy="172" r="17"/><circle cx="216" cy="92" r="17"/>
+  </g>
+  <g fill="#ffffff" stroke="#2fd07a" stroke-width="7">
+    <circle cx="100" cy="148" r="11"/><circle cx="146" cy="172" r="11"/><circle cx="216" cy="92" r="11"/>
+  </g>
+</svg>

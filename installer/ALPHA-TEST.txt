@@ -1,0 +1,104 @@
+PDF EDITOR {{VERSION}} - ALPHA TEST
+===============================
+
+Thanks for trying it. This is an early test version: it works, but expect rough edges.
+
+INSTALL
+  1. Unzip this folder anywhere.
+  2. Run "PDF Editor Setup {{VERSION}}.exe".
+     Windows may say "Windows protected your PC" (the file isn't signed yet):
+     click "More info", then "Run anyway".
+  3. Click Install. No admin rights needed. It appears in the Start menu.
+  Remove it any time: Windows Settings > Apps > PDF Editor > Uninstall.
+
+NEW IN THIS VERSION (File > What's new for the short list)
+  - 0.9.1: Updates can also come from a web address (the public GitHub download page),
+    with the same signature checks. Includes everything in 0.9.0 below.
+  - 0.9.0: Print: picking A3 (or any paper) now prints on that paper - it came out on A4
+    cut off. "Printer preferences..." shows the settings of the printer you picked, not the
+    default printer's. Built-in browser updated (security fixes): this version installs
+    with its setup - the update card says so; run the setup from the updates folder once.
+  - 0.8.9: Area gives the perimeter too (no separate Perimeter tool). While drawing by
+    points, Ctrl+Z takes back the last point (Ctrl+Y puts it back) - it used to undo the
+    markup before; Esc cancels and Ctrl+Z brings the shape back; Shift+C closes. Corners
+    snap when dragged; drag an edge's middle dot to add one, Alt+click to delete one,
+    right-click > Continue this line. Dialogs move by their title (Calibrate too).
+  - 0.8.8: Text boxes, callouts and typewriter text format like a word processor: select a
+    word and press B / I / U (or Ctrl+B / I / U), pick a colour, size or font - only that
+    word changes. Nothing selected: the whole box, as before. Saved the standard way, so
+    other PDF programs show and keep it.
+  - 0.8.7: An update no longer gives up ("didn't finish") when PDF Editor takes a moment to
+    close - it waits. Run this version's setup once on each PC for that to take effect.
+  - 0.8.6: Explorer > "Combine with PDF Editor" works with many large files at once (up to
+    100 - a Windows limit; for more, drag them into Merge). Print offers Windows' default
+    printer at every start; a printer you pick is kept until PDF Editor is closed. Files
+    sent with Combine also keep name order when the rest arrive a moment later.
+  - 0.8.5: Switching tabs keeps each file where you left it. Area / Perimeter draw as
+    corners, a rectangle or a circle (keys P / R / O); type a length while measuring
+    (4200 or 4.2) and press Enter. Counts & totals panel (Measure > Totals) - no Excel
+    needed - and Count by tag (door tags D01, D02... counted in one go). Print: heavy scans
+    and dense drawings can go to the printer as one picture per sheet (Send as: Auto) -
+    a much lighter job. Text box bar: font and size lists work. Many fixes from a full
+    check: measurements pasted or moved to another scale show the right number, count
+    numbers never repeat, pages extracted or inserted keep their scale, a pencil stroke is
+    never lost, number boxes can be typed over.
+  - 0.8.4: Rectangle area (Measure tab: drag a box, or click two corners). Measurements to
+    Excel: the number and its unit in separate columns - numbers you can add up.
+  - 0.8.3: 0.8.2's update was stopped by company antivirus on some PCs - this version updates
+    the usual way again, and PDF Editor never starts a downloaded setup by itself.
+  - 0.8.2:Search all open files at once (results grouped by file). Insert pages from
+    another open tab, and Replace pages with revised sheets (bookmarks and links still
+    point at them). Bookmarks you can add, rename, move and delete. Table area to Excel:
+    drag a box round a table on a drawing. Save pages as PNG/JPG, and a new PDF from
+    pictures or scans. Links: make, change, delete; a web link always asks before it
+    opens. Comments list to a PDF summary. Merging a very big set now works. Fixed:
+    deleting or moving pages could lose a file's form fields, scales or attachments.
+    Updates must carry the publisher's signature.
+  - 0.8.1:a long list of fixes from an outside check of the whole program (about 250):
+    the password coming back after Remove password, text added after OCR not showing,
+    markups and form fields lost by Merge / Split / Extract, an empty printer list, settings
+    that a busy settings file could wipe, ribbon pop-ups cut off. Signed PDFs: you are asked
+    before a save that would break the signature. Hundreds of markups move or paste at once
+    much faster.
+  - 0.8.0: Export to Word / Excel (File tab) - bills of quantities become real spreadsheets
+    (one sheet per bill, numbers as numbers), specs and letters become editable Word files;
+    scans are read with OCR and rubber stamps are left out. Tabs: drag to reorder, drag out
+    for a window of their own, drag back onto another window to join it; with many files
+    the tabs shrink and the list button shows them all. OCR'd text now highlights on the
+    words, not above them.
+  - Combine PDFs from Windows Explorer: select them, right-click > Combine with PDF Editor
+    (Windows 11: "Show more options" first).
+  - Measurement decimals and unit, before or after measuring; one number size for the
+    whole file (Measure > Labels); separate X / Y scales (Scale > Direction).
+  - Very heavy drawings open; text boxes from other programs keep their look when turned.
+  - 0.7.0: your own stamp from a scan or photo (Stamp > From a scan or photo, or Stamp from
+    page): paper removed, straightened, real size; Copy to pages; picture stamps keep their
+    shape when resized.
+  - 0.6.1: measurement arrows sized to the number; select a shape and change its colour,
+    width or ends from the ribbon's Style group; an update blocked by the antivirus no
+    longer closes the app - it says to run the setup instead.
+
+WHAT TO TRY (whatever you normally do with PDFs)
+  - Open big drawings and long documents; zoom, scroll, search (Ctrl+F).
+  - Mark up: highlights, text boxes (any font, Arabic too), callouts, clouds, stamps.
+  - Measure: set the scale, then length / area / count.
+  - Pages: rotate, insert, delete, merge files, reduce file size.
+  - Edit text, page numbers, watermarks, redaction, OCR on scans.
+  - Save, then open the file in another PDF program: everything should look the same.
+  - "Find a tool" (Alt+Q) if you can't find something.
+
+REPORTING PROBLEMS
+  File > Report a problem: say what you did and what went wrong (a picture of the
+  window can go with it). Crashes are noted by themselves.
+  Your copy has no shared reports folder, so reports stay on your PC:
+  Settings > Help > "Show them" opens the folder - send me those files.
+
+GOOD TO KNOW
+  - Everything stays on your PC. Only the AI assistant (AI tab) uses the internet,
+    and only with your own key.
+  - Saving keeps the previous version in a backups folder (Settings > Open backups folder).
+  - The full user guide is README.txt.
+
+LICENCE
+  PDF Editor includes MuPDF (GNU AGPL v3): its source code comes with this copy
+  (source-v{{VERSION}}.zip). All licences: Settings > About > Licences.

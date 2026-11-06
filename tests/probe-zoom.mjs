@@ -1,0 +1,28 @@
+// Probe: engine calls during a Ctrl+wheel zoom on a sheet (after it is fully drawn).
+import { _electron as electron } from 'playwright';
+import { resolve, join } from 'node:path';
+import { rmSync } from 'node:fs';
+const F = resolve(process.argv[2]);
+rmSync(join(process.env.HOME, '.config', 'PDF Editor', 'profile-probe'), { recursive: true, force: true });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--profile=probe', ...(process.env.RENDERERS ? ['--renderers=' + process.env.RENDERERS] : [])] });
+const win = await app.firstWindow();
+await app.evaluate(({ BrowserWindow }) => { const b = BrowserWindow.getAllWindows()[0]; b.unmaximize(); b.setContentSize(1600, 950); });
+await win.waitForFunction(() => !!window.__gcc, null, { timeout: 60000 });
+const E = (fn, a) => win.evaluate(fn, a);
+const idle = async () => { const t = Date.now(); while (Date.now() - t < 120000) { const s = await E(() => window.__gcc.tiles.stats()).catch(() => null); if (s && s.tiles > 0 && !s.queued && !s.inflight) { await sleep(150); const s2 = await E(() => window.__gcc.tiles.stats()); if (!s2.queued && !s2.inflight) return Date.now() - t; } await sleep(30); } return -1; };
+await app.evaluate(({ BrowserWindow }, p) => BrowserWindow.getAllWindows()[0].webContents.send('app:open', [p]), F);
+await sleep(500); await idle();
+const box = await win.locator('.viewer').boundingBox();
+await win.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+await E(() => window.__gccSlow.splice(0));
+const t0 = await E(() => performance.now());
+const t = Date.now();
+await win.keyboard.down('Control'); for (let i = 0; i < 26; i++) { await win.mouse.wheel(0, -100); await sleep(16); } await win.keyboard.up('Control');
+const wheelEnd = Date.now() - t;
+await idle();
+console.log('wheel done at', wheelEnd, 'ms; sharp at', Date.now() - t, 'ms; zoom', await E(() => window.__gcc.viewer().zoom().toFixed(2)));
+const s = await E(() => window.__gccSlow.splice(0));
+for (const c of s) console.log(`${String(Math.round(c.at - t0)).padStart(6)} +${String(c.ms).padStart(5)}  ${c.engine}.${c.method}`);
+await app.evaluate(({ app: a }) => a.exit(0)).catch(() => {});
+process.exit(0);

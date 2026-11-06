@@ -1,0 +1,35 @@
+// Probe: scrolling the 1,500-page spec with the wheel - frame times + where the window's time goes.
+import { _electron as electron } from 'playwright';
+import { resolve, join } from 'node:path';
+import { rmSync, copyFileSync, mkdirSync } from 'node:fs';
+mkdirSync('tests/tmp-probe', { recursive: true });
+const F = resolve('tests/tmp-probe/spec.pdf'); copyFileSync(process.argv[2] || 'tests/data/long-spec.pdf', F);
+rmSync(join(process.env.HOME, '.config', 'PDF Editor', 'profile-probe'), { recursive: true, force: true });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--profile=probe'] });
+const win = await app.firstWindow();
+await app.evaluate(({ BrowserWindow }) => { const b = BrowserWindow.getAllWindows()[0]; b.unmaximize(); b.setContentSize(1600, 950); });
+await win.waitForFunction(() => !!window.__gcc, null, { timeout: 60000 });
+const E = (fn, a) => win.evaluate(fn, a);
+await app.evaluate(({ BrowserWindow }, p) => BrowserWindow.getAllWindows()[0].webContents.send('app:open', [p]), F);
+await win.waitForFunction(() => window.__gcc.active()?.pages.length > 100, null, { timeout: 60000 });
+await sleep(2000);
+const box = await win.locator('.viewer').boundingBox();
+await win.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+const cdp = await win.context().newCDPSession(win);
+await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 250 }); await cdp.send('Profiler.start');
+await E(() => { window.__fr = []; let last = performance.now(); const f = (t) => { window.__fr.push(t - last); last = t; if (window.__frOn) requestAnimationFrame(f); }; window.__frOn = true; requestAnimationFrame(f); });
+const t = Date.now();
+for (let i = 0; i < 120; i++) { await win.mouse.wheel(0, 400); await sleep(16); }
+const fr = await E(() => { window.__frOn = false; return window.__fr.slice(1); });
+const { profile } = await cdp.send('Profiler.stop');
+fr.sort((a, b) => a - b);
+const q = (x) => Math.round(fr[Math.min(fr.length - 1, Math.floor(fr.length * x))]);
+console.log('wheel 120 notches in', Date.now() - t, 'ms; page now', await E(() => window.__gcc.viewer().page() + 1), '; frames', fr.length, 'p50', q(0.5), 'p95', q(0.95), 'worst', Math.round(fr[fr.length - 1]));
+const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+const self = new Map(); let total = 0;
+profile.samples.forEach((id, i) => { const n = byId.get(id); const k = (n.callFrame.functionName || '(anon)') + ' ' + (n.callFrame.url.split('/').pop() || '') + ':' + n.callFrame.lineNumber + ':' + n.callFrame.columnNumber; const d = profile.timeDeltas[i] || 0; self.set(k, (self.get(k) || 0) + d); total += d; });
+console.log('sampled', Math.round(total / 1000), 'ms');
+for (const [k, v] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 22)) console.log(String(Math.round(v / 1000)).padStart(6), k);
+await app.evaluate(({ app: a }) => a.exit(0)).catch(() => {});
+process.exit(0);
