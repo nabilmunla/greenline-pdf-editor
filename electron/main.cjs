@@ -115,21 +115,43 @@ const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 let settingsGood = null; // the text last read or written whole
 let settingsBad = ''; // the file couldn't be read: 'locked' | 'damaged'
 const noBom = (t) => (t.charCodeAt(0) === 0xfeff ? t.slice(1) : t);
+/** the settings as last read or written, with the file's size and time then: read again only when
+ *  the file changed. (They hold the stamps and drawn signatures as pictures - MBs once there are a
+ *  few - and were read and parsed from disk at every call, dozens of times per file opened, in the
+ *  main process: everything else waited meanwhile.) */
+let settingsMem = null;
+/** a copy of plain JSON data (objects and arrays new, strings shared - they can't be changed, and
+ *  the pictures in them are most of the bytes): callers may change what they get */
+function jsonCopy(v) {
+  if (Array.isArray(v)) return v.map((x) => (x === undefined || typeof x === 'function' ? null : jsonCopy(x)));
+  if (v && typeof v === 'object') {
+    if (typeof v.toJSON === 'function') return JSON.parse(JSON.stringify(v));
+    const o = {};
+    for (const k of Object.keys(v)) { const x = v[k]; if (x !== undefined && typeof x !== 'function') o[k] = jsonCopy(x); }
+    return o;
+  }
+  return typeof v === 'number' && !Number.isFinite(v) ? null : v;
+}
 function readSettings() {
   const f = settingsPath();
+  if (settingsMem && !settingsBad) {
+    try { const st = fs.statSync(f); if (st.size === settingsMem.size && st.mtimeMs === settingsMem.mtime) return jsonCopy(settingsMem.obj); } catch (_) { /* read below */ }
+  }
   for (let k = 0; ; k++) {
     try {
       // (a settings file saved by Notepad or a PowerShell script starts with a BOM: read as damaged,
       // every setting was dropped and the backup copy written over with the empty ones)
+      const st = fs.statSync(f);
       const txt = noBom(fs.readFileSync(f, 'utf8'));
       const s = JSON.parse(txt);
       if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error('not a settings file');
       settingsGood = txt;
       settingsBad = '';
-      return s;
+      settingsMem = { obj: s, size: st.size, mtime: st.mtimeMs };
+      return jsonCopy(s);
     } catch (e) {
       // (none yet: the first start)
-      if (e.code === 'ENOENT') { settingsBad = ''; return settingsGood ? JSON.parse(settingsGood) : {}; }
+      if (e.code === 'ENOENT') { settingsBad = ''; settingsMem = null; return settingsGood ? JSON.parse(settingsGood) : {}; }
       if (isLock(e) && k < 4) { pause(60 * (k + 1)); continue; }
       if (!settingsBad) log('settings.json could not be read (' + (e.code || e.message) + '): ' + (settingsGood ? 'the copy read last is used' : 'the backup copy is used if there is one'));
       settingsBad = isLock(e) ? 'locked' : 'damaged';
@@ -161,6 +183,10 @@ function writeSettings(s) {
     }
   }
   const text = JSON.stringify(s, null, 2);
+  // (nothing changed - the same recent list, a setting set to what it was: not written again)
+  if (text === settingsGood && settingsMem) {
+    try { const st = fs.statSync(f); if (st.size === settingsMem.size && st.mtimeMs === settingsMem.mtime) return; } catch (_) { /* written below */ }
+  }
   const tmp = f + '.tmp';
   fs.writeFileSync(tmp, text);
   // (an antivirus or the indexer can hold settings.json for a moment: tried again)
@@ -171,6 +197,8 @@ function writeSettings(s) {
     }
   }
   settingsGood = text;
+  settingsMem = null;
+  try { const st = fs.statSync(f); settingsMem = { obj: jsonCopy(s), size: st.size, mtime: st.mtimeMs }; } catch (_) { /* read next time */ }
   // the second copy, refreshed every 10 minutes at most - so it is older than the file itself and
   // whole when a power cut catches settings.json being written
   try {
@@ -655,25 +683,72 @@ ipcMain.handle('file:systemFont', async (_e, name) => {
 
 // page previews of files opened before (fast reopen of heavy drawings)
 const cacheDir = () => path.join(localDir(), 'cache', 'previews');
-let cachePuts = 0;
-const cacheFile = (k) => path.join(cacheDir(), String(k).replace(/[^\w.-]/g, '_') + '.webp');
-ipcMain.handle('cache:get', async (_e, k) => {
-  try { const b = await fsp.readFile(cacheFile(k)); return new Uint8Array(b.buffer, b.byteOffset, b.byteLength); } catch (_) { return null; }
-});
-/** keep the cache under ~800 MB: oldest files go first (every 60 pictures, and at each start - a
- *  day of light use alone never got there) */
-async function trimCache() {
-  try {
-    const files = await Promise.all((await fsp.readdir(cacheDir())).map(async (f) => { try { const st = await fsp.stat(path.join(cacheDir(), f)); return { f, t: st.atimeMs, s: st.size }; } catch (_) { return { f, t: 0, s: 0 }; } }));
-    let total = files.reduce((a, x) => a + x.s, 0);
-    for (const x of files.sort((a, b) => a.t - b.t)) { if (total < 800e6) break; await fsp.unlink(path.join(cacheDir(), x.f)).catch(() => {}); total -= x.s; }
-  } catch (_) { /* no cache yet */ }
+const cacheFile = (k) => path.join(cacheDir(), cacheName(k));
+const cacheName = (k) => String(k).replace(/[^\w.-]/g, '_') + '.webp';
+/** The cache's files (name -> last use, size), kept up to date by its own reads and writes. Listed
+ *  from disk once, in the background a while after the start, a few files at a time. (The whole
+ *  folder - tens of thousands of files once it has filled up over a few months - was looked
+ *  through at every start and then after every 60 pictures, all at once: the disk threads were
+ *  taken for seconds on Windows, and the page previews being read from the cache waited behind.) */
+const cacheIdx = { map: new Map(), total: 0, listed: false, listing: false };
+const CACHE_MAX = Number(process.env.PDFED_CACHE_MAX) || 800e6;
+function cacheNote(name, size) {
+  const o = cacheIdx.map.get(name);
+  if (o) cacheIdx.total -= o.s;
+  cacheIdx.map.set(name, { t: Date.now(), s: size });
+  cacheIdx.total += size;
 }
+async function listCache() {
+  if (cacheIdx.listed || cacheIdx.listing) return;
+  cacheIdx.listing = true;
+  try {
+    let names = [];
+    try { names = await fsp.readdir(cacheDir()); } catch (_) { /* no cache yet */ }
+    for (let i = 0; i < names.length; i += 16) {
+      await Promise.all(names.slice(i, i + 16).map(async (f) => {
+        if (cacheIdx.map.has(f)) return; // (written or read meanwhile: known better)
+        try { const st = await fsp.stat(path.join(cacheDir(), f)); if (!cacheIdx.map.has(f)) { cacheIdx.map.set(f, { t: Math.max(st.atimeMs, st.mtimeMs), s: st.size }); cacheIdx.total += st.size; } } catch (_) { /* gone */ }
+      }));
+    }
+    cacheIdx.listed = true;
+  } finally { cacheIdx.listing = false; }
+  void trimCache();
+}
+/** keep the cache under ~800 MB: the files used longest ago go first, down to 90% (so it isn't done
+ *  again after every picture) */
+let trimming = false;
+async function trimCache() {
+  if (!cacheIdx.listed || trimming || cacheIdx.total <= CACHE_MAX) return;
+  trimming = true;
+  try {
+    const old = [...cacheIdx.map.entries()].sort((a, b) => a[1].t - b[1].t);
+    const out = [];
+    let total = cacheIdx.total;
+    for (const [f, o] of old) { if (total <= CACHE_MAX * 0.9) break; out.push(f); total -= o.s; }
+    for (let i = 0; i < out.length; i += 8) {
+      await Promise.all(out.slice(i, i + 8).map(async (f) => {
+        const o = cacheIdx.map.get(f);
+        await fsp.unlink(path.join(cacheDir(), f)).catch(() => {});
+        if (o && cacheIdx.map.get(f) === o) { cacheIdx.map.delete(f); cacheIdx.total -= o.s; }
+      }));
+    }
+  } finally { trimming = false; }
+}
+ipcMain.handle('cache:get', async (_e, k) => {
+  try {
+    const b = await fsp.readFile(cacheFile(k));
+    const o = cacheIdx.map.get(cacheName(k));
+    if (o) o.t = Date.now(); else cacheNote(cacheName(k), b.byteLength);
+    return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  } catch (_) { return null; }
+});
 ipcMain.handle('cache:put', async (_e, k, data) => {
   try {
     await fsp.mkdir(cacheDir(), { recursive: true });
-    await fsp.writeFile(cacheFile(k), Buffer.from(data));
-    if (++cachePuts % 60 === 0) await trimCache();
+    const b = Buffer.from(data);
+    await fsp.writeFile(cacheFile(k), b);
+    cacheNote(cacheName(k), b.byteLength);
+    void trimCache();
   } catch (_) { /* a cache is optional */ }
   return true;
 });
@@ -790,6 +865,8 @@ ipcMain.handle('dialog:confirm', async (_e, o) => {
 
 // ---------------------------------------------------------------- app services
 
+// (the name markups are signed with: the author set in Settings, else the Windows user)
+ipcMain.handle('app:user', () => readSettings().author || os.userInfo().username);
 ipcMain.handle('app:info', () => {
   const s = readSettings();
   return {
@@ -1696,7 +1773,8 @@ app.whenReady().then(() => {
   // engine temp files of earlier sessions (one app instance at a time)
   fsp.rm(workDir(), { recursive: true, force: true }).catch(() => {});
   void moveFromRoaming().then(cleanRecovery);
-  void trimCache();
+  // (the preview cache is listed once the start and the first files opened have settled)
+  setTimeout(() => void listCache(), Number(process.env.PDFED_CACHE_LIST_MS || 20000));
   cleanOld();
   const root = path.join(__dirname, '..', 'dist');
   protocol.handle('app', (req) => {

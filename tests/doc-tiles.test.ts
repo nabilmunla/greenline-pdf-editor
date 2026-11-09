@@ -18,6 +18,7 @@ g.gcc = {
   log: (s: string) => { logs.push(s); },
   settings: async () => ({}),
   info: async () => ({ user: 'tester' }),
+  user: async () => 'tester',
   dropTemp: async (p: string[]) => { dropped.push(...p); return true; },
   stat: async () => stat,
   commit: async () => ({ size: 120, mtime: 2, inPlace: commitInPlace }),

@@ -1,4 +1,11 @@
 {
+  "0.9.4": {
+    "General polishing": [
+      "Stays quick as your stamps and signatures add up: the settings (which hold them) were read again from disk at nearly every step - opening a file, saving, every check",
+      "The store of page previews no longer slows the app down once it has filled up after months of use (it was looked through whole after every 60 pictures)",
+      "A style changed with a slider (opacity) is saved once you stop, not at every step"
+    ]
+  },
   "0.9.3": {
     "General polishing": [
       "The Greenline name's green fades into the background at its end - in the title bar, on the start page and in the setup",

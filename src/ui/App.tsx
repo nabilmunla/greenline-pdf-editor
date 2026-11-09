@@ -188,6 +188,13 @@ export function App() {
   const doc = docs.find((d) => d.id === activeId) || null;
   const S = useRef(settings);
   S.current = settings;
+  const styleSave = useRef(0);
+  // (a style change still waiting to be written goes now if the window closes)
+  useEffect(() => {
+    const f = () => { if (styleSave.current) { window.clearTimeout(styleSave.current); styleSave.current = 0; void gcc.setSettings({ styles: S.current.styles }); } };
+    window.addEventListener('beforeunload', f);
+    return () => window.removeEventListener('beforeunload', f);
+  }, []);
   const activeRef = useRef(activeId);
   activeRef.current = activeId;
   const pageNoRef = useRef(0);
@@ -797,7 +804,13 @@ export function App() {
       if (!Object.keys(rest).length) return;
       patch = rest;
     }
-    saveSettings({ styles: { ...(S.current.styles || {}), [t]: { ...(S.current.styles?.[t] || {}), ...patch } } });
+    // (shown at once; written once the change stops - a slider dragged wrote the whole settings
+    // file, stamps and signatures included, at every step)
+    const styles = { ...(S.current.styles || {}), [t]: { ...(S.current.styles?.[t] || {}), ...patch } };
+    S.current = { ...S.current, styles };
+    setSettingsState((s) => ({ ...s, styles }));
+    window.clearTimeout(styleSave.current);
+    styleSave.current = window.setTimeout(() => { styleSave.current = 0; void saveSettings({ styles: S.current.styles }); }, 300);
   };
 
   /** the stamp picked last (the Tool Chest keeps it with the stamp tool) */

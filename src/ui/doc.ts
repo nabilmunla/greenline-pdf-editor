@@ -195,7 +195,7 @@ export class PdfDoc {
    * `temp`: the file is ours (a merge result, a recovery copy...) and goes when the tab closes.
    */
   async load(src: FileSpec | Uint8Array, password?: string, temp = false): Promise<'ok' | 'password'> {
-    const user = (await gcc.settings()).author || (await gcc.info()).user;
+    const user = await gcc.user(); // (the author's name, else the Windows user - not the whole settings file)
     const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; fixedTurn?: boolean; heavy?: number; hasForms: boolean; size?: number }>('open', this.id, toArg(src), password, user);
     if (r.needsPassword) return 'password';
     if (temp && !(src instanceof Uint8Array)) for (const t of tempsOf(src)) this.temps.add(t);
@@ -326,7 +326,7 @@ export class PdfDoc {
     const rec = this.lastRecovery;
     const from: FileSpec | Uint8Array | null = rec ? (rec.base ? { path: rec.base.path, size: rec.base.size, delta: rec.file } : { path: rec.file }) : this.src;
     if (!from) return;
-    const user = (await gcc.settings()).author || (await gcc.info()).user;
+    const user = await gcc.user(); // (the author's name, else the Windows user - not the whole settings file)
     const r = await mu<{ pages: PageInfo[]; needsPassword: boolean }>('open', this.id, toArg(from), this.password, user);
     if (r.needsPassword) return;
     if (rec) this.src = from; // the recovery file stays until this tab closes
@@ -789,7 +789,7 @@ export class PdfDoc {
 
   /** open again from a file (after it was overwritten in place) */
   private async reopenFrom(src: FileSpec) {
-    const user = (await gcc.settings()).author || (await gcc.info()).user;
+    const user = await gcc.user(); // (the author's name, else the Windows user - not the whole settings file)
     const r = await mu<{ pages: PageInfo[] }>('open', this.id, toArg(src), this.password, user);
     this.src = src;
     this.pages = r.pages;

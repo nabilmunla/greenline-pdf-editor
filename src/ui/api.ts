@@ -44,6 +44,7 @@ export interface GccApi {
   /** drawing engines asked for on the command line (tests); 0 = decided by the PC */
   renderers?: number;
   info(): Promise<AppInfo>;
+  user(): Promise<string>;
   settings(): Promise<Record<string, any>>;
   /** the view a file was left at (page, spot, zoom) */
   viewGet(p: string): Promise<SavedView | null>;
