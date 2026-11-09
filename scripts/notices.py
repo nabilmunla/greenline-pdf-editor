@@ -44,11 +44,14 @@ if missing:
     sys.exit('notices.py: no licence entry for ' + ', '.join(missing) + ' - add it to the list')
 
 out = []
-out.append('PDF EDITOR - LICENCES\n=====================\n')
-out.append('''PDF Editor is built on the open-source parts listed below. Each keeps its own licence.
+# (the public build's own name - package.json "displayName")
+_pkg = __import__('json').load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'package.json'), encoding='utf-8'))
+NAME = _pkg.get('displayName') or 'PDF Editor'
+out.append(NAME.upper() + ' - LICENCES\n' + '=' * (len(NAME) + 11) + '\n')
+out.append(f'''{NAME} is built on the open-source parts listed below. Each keeps its own licence.
 
 MuPDF is licensed under the GNU Affero General Public License (AGPL) version 3 or later.
-Because PDF Editor includes MuPDF, anyone who passes a copy of PDF Editor on to someone else
+Because {NAME} includes MuPDF, anyone who passes a copy of {NAME} on to someone else
 must also make its complete source code available under the same licence. The source code of
 each version is kept as source-v<version>.zip next to the published app.
 ''')

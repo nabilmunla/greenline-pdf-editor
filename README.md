@@ -39,11 +39,23 @@ Your files never leave your PC. The only things that go online are update checks
 
 ## Install
 
-Windows 10/11. Download **PDF Editor Setup &lt;version&gt;.exe** from [Releases](https://github.com/nabilmunla/greenline-pdf-editor/releases/latest) and run it. No admin rights needed.
+Windows 10/11. Download **Greenline PDF Editor Setup &lt;version&gt;.exe** from [Releases](https://github.com/nabilmunla/greenline-pdf-editor/releases/latest) and run it. No admin rights needed.
 
 The setup isn't code-signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
 
-New versions are announced inside the app (it asks before downloading anything). Every update is signed by the publisher and checked before it's installed. Found a problem? **File › Report a problem** opens a GitHub issue with your text filled in.
+New versions are announced inside the app (it asks before downloading anything). Every update is signed by the publisher and checked before it's installed.
+
+## Reporting problems
+
+**File › Report a problem** sends your words to the developer, anonymously. No GitHub account needed.
+
+- **Sent:** what you type, the picture of the window if you keep it, the app and Windows versions, memory, and the app's recent log.
+- **Taken out first:** your Windows user name, the PC's name, every file name, folder and path. The time is rounded to the hour.
+- **Never sent:** your PDF files. (The picture of the window, if you keep it, shows whatever is on screen: untick it when that's private.)
+- **Crash reports** are **off** until you turn them on (Settings › Help). Only crashes from then on are sent. The same page lists what's sent, with an example.
+- **Where they go:** the developer's own [small open receiver](reports-receiver/worker.js), hosted on Cloudflare. No analytics or crash-reporting company. Like any web host, Cloudflare sees your internet address; the receiver doesn't keep it. Read only by the developer, deleted after 6 months.
+
+Prefer to talk in public? [Open an issue](https://github.com/nabilmunla/greenline-pdf-editor/issues).
 
 ## Building from source
 

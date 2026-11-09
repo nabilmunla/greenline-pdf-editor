@@ -28,6 +28,7 @@ import * as D from './Dialogs';
 import { dragged, dropPages, pagesLabel } from './pagedrag';
 import { followPages, cleanSettings } from './pagesel';
 import type { Pt, Rect, AnnotData, AnnotSpec } from '../engine/mu';
+import { APP_NAME, WORD_LEAD, WORD_REST } from './brand';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 const resolveTheme = (m: ThemeMode) => (m !== 'system' ? m : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -283,7 +284,7 @@ export function App() {
     return () => mq.removeEventListener('change', apply);
   }, [themeMode]);
 
-  useEffect(() => { void gcc.setTitle(doc ? `${doc.name}${doc.dirty ? ' •' : ''} – PDF Editor` : 'PDF Editor'); }, [doc, ver]);
+  useEffect(() => { void gcc.setTitle(doc ? `${doc.name}${doc.dirty ? ' •' : ''} – ${APP_NAME}` : APP_NAME); }, [doc, ver]);
 
   /** settings changed: shown at once, written to disk; a write that fails says so (a stamp or a
    *  drawn signature looked saved - and was gone after a restart). Resolves false when not saved. */
@@ -291,7 +292,7 @@ export function App() {
     setSettingsState((s) => ({ ...s, ...patch }));
     return gcc.setSettings(patch as Record<string, unknown>).then(() => true, (e: unknown) => {
       gcc.log('settings: ' + e);
-      toast("Your settings couldn't be saved on this PC (" + String((e as Error)?.message || e) + '). They stay until PDF Editor is closed.', 'err', undefined, 10000);
+      toast("Your settings couldn't be saved on this PC (" + String((e as Error)?.message || e) + '). They stay until ' + APP_NAME + ' is closed.', 'err', undefined, 10000);
       return false;
     });
   }, []);
@@ -1413,7 +1414,7 @@ export function App() {
 
   // ---------------------------------------------------------------- render
 
-  if (fatal) return <div className="fatal"><h2>PDF Editor could not start</h2><p>{fatal}</p></div>;
+  if (fatal) return <div className="fatal"><h2>{APP_NAME} could not start</h2><p>{fatal}</p></div>;
 
   const snapOn = settings.snap ?? true;
   const curScale = doc?.scaleAt(pageNo) ?? null;
@@ -1464,7 +1465,7 @@ export function App() {
     <div className="app" onPointerDown={() => { if (menu) setMenu(null); if (tabMenu) setTabMenu(null); if (tabList) setTabList(false); }}>
       <div className="frame-top">
         <div className="topbar">
-          <div className="brand"><img src="./gmark.svg" alt="" /><span className="word"><b>PDF</b> Editor</span></div>
+          <div className="brand"><img src="./gmark.svg" alt="" /><span className="word"><b>{WORD_LEAD}</b>{WORD_REST}</span></div>
           <div className="quick">
             <button className="tb-btn" title="Open (Ctrl+O)" onClick={() => void A.open()}><Ico n="open" size={18} /></button>
             <button className="tb-btn" title="Save (Ctrl+S)" disabled={!doc} onClick={() => void A.save()}><Ico n="save" size={18} /></button>
@@ -1615,7 +1616,7 @@ export function App() {
             <span className="s">{doc.dirty ? 'Unsaved changes' : doc.path ? 'Saved' : ''}</span>
           </>
         ) : (
-          <span className="s">PDF Editor {info?.version}</span>
+          <span className="s">{APP_NAME} {info?.version}</span>
         )}
       </div>
       <div className="toasts">
@@ -1719,7 +1720,7 @@ function Start({ ready, recent, recovery, A, onRestore, onDiscard }: { ready: bo
         <div className="start-hero">
           <img src="./gmark.svg" alt="" />
           <div>
-            <h1><b>PDF</b> Editor</h1>
+            <h1><b>{WORD_LEAD}</b>{WORD_REST}</h1>
             <p>Open a PDF, or drop files here. Several files open side by side in tabs.</p>
           </div>
         </div>

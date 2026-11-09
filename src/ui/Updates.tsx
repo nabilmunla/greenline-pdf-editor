@@ -4,12 +4,16 @@ import { gcc, type UpdateState, type UpdatedInfo, type ReportStatus, type NoteGr
 import { Ico } from './icons';
 import { newerVersion } from './pagesel';
 import releaseNotes from '../../release-notes.json';
+import { APP_NAME } from './brand';
 
 /** this app's own notes for a version (shipped with it): groups, or one plain list (up to 0.5.0) */
 export function notesOf(version: string): NoteGroups | null {
   const n = (releaseNotes as Record<string, string[] | NoteGroups>)[version];
   if (!n) return null;
-  return Array.isArray(n) ? { '': n } : n;
+  if (Array.isArray(n)) return { '': n };
+  // (groups named "Public: ..." are the public build's own - its copy of this file has them merged in)
+  const own = Object.fromEntries(Object.entries(n).filter(([k]) => !k.startsWith('Public: ')));
+  return Object.keys(own).length ? own : null;
 }
 /** every version with notes, newest first */
 export const noteVersions = (): string[] => Object.keys(releaseNotes).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
@@ -89,7 +93,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
     <div className="upcard" role="status">
       {u.state === 'available' && (
         <>
-          <div className="up-head"><Ico n="download" size={16} /><b>PDF Editor {u.available} is available</b></div>
+          <div className="up-head"><Ico n="download" size={16} /><b>{APP_NAME} {u.available} is available</b></div>
           <p className="up-sub">You have {u.version}.</p>
           <NotesToggle groups={u.groups || (u.notes?.length ? { '': u.notes } : null)} />
           <div className="up-btns">
@@ -110,7 +114,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
       {u.state === 'ready' && (
         <>
           <div className="up-head"><Ico n="check" size={16} /><b>{u.available} is ready</b></div>
-          <p className="up-sub">PDF Editor restarts to finish and reopens your files. You're asked to save changes first.</p>
+          <p className="up-sub">{APP_NAME} restarts to finish and reopens your files. You're asked to save changes first.</p>
           {admin}
           <div className="up-btns">
             <RestartBtn now={false} label="When I close it" />
@@ -122,10 +126,10 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
         <>
           {u.err === 'unfinished' ? <>
             <div className="up-head err"><Ico n="warn" size={16} /><b>The update to {u.available} didn't finish</b></div>
-            <p className="up-sub">PDF Editor started again on {u.version}. Nothing was lost. Try again - or, if it keeps failing (the antivirus or Windows stopping it), close PDF Editor and run <b>{setupName(u)}</b>{fromWhere(u)}: your files and settings stay.</p>
+            <p className="up-sub">{APP_NAME} started again on {u.version}. Nothing was lost. Try again - or, if it keeps failing (the antivirus or Windows stopping it), close {APP_NAME} and run <b>{setupName(u)}</b>{fromWhere(u)}: your files and settings stay.</p>
           </> : <>
-            <div className="up-head err"><Ico n="warn" size={16} /><b>PDF Editor can't update itself on this PC</b></div>
-            <p className="up-sub">Your antivirus or Windows stopped its update program, so nothing was closed or changed. Install {u.available} with the setup instead: close PDF Editor, then run <b>{setupName(u)}</b>{fromWhere(u)} - your files and settings stay.</p>
+            <div className="up-head err"><Ico n="warn" size={16} /><b>{APP_NAME} can't update itself on this PC</b></div>
+            <p className="up-sub">Your antivirus or Windows stopped its update program, so nothing was closed or changed. Install {u.available} with the setup instead: close {APP_NAME}, then run <b>{setupName(u)}</b>{fromWhere(u)} - your files and settings stay.</p>
           </>}
           <div className="up-btns">
             <button className="btn sm" onClick={() => void gcc.updateLater()}>Later</button>
@@ -136,8 +140,8 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
       )}
       {u.state === 'setup' && (
         <>
-          <div className="up-head"><Ico n="download" size={16} /><b>PDF Editor {u.available} is available</b></div>
-          <p className="up-sub">This version installs with its setup, not by itself (it brings a new version of its built-in browser). Close PDF Editor, then run <b>{setupName(u)}</b>{fromWhere(u)} - your files and settings stay.</p>
+          <div className="up-head"><Ico n="download" size={16} /><b>{APP_NAME} {u.available} is available</b></div>
+          <p className="up-sub">This version installs with its setup, not by itself (it brings a new version of its built-in browser). Close {APP_NAME}, then run <b>{setupName(u)}</b>{fromWhere(u)} - your files and settings stay.</p>
           {admin}
           <NotesToggle groups={u.groups || (u.notes?.length ? { '': u.notes } : null)} />
           <div className="up-btns">
@@ -169,7 +173,7 @@ function SetupBtn({ u }: { u: UpdateState }) {
     ? <button className="btn sm primary" onClick={() => void gcc.openLink(u.setupPath!)}>Open the download page</button>
     : <button className="btn sm primary" onClick={() => void gcc.showInFolder(u.setupPath!)}>Show the setup</button>;
 }
-const setupName = (u: UpdateState) => (u.setupPath && /\.exe$/i.test(u.setupPath) ? u.setupPath.split(/[\\/]/).pop() : `PDF Editor Setup ${u.available}.exe`);
+const setupName = (u: UpdateState) => (u.setupPath && /\.exe$/i.test(u.setupPath) ? u.setupPath.split(/[\\/]/).pop() : `${APP_NAME} Setup ${u.available}.exe`);
 
 function statusLine(u: UpdateState): string {
   switch (u.state) {
@@ -177,11 +181,11 @@ function statusLine(u: UpdateState): string {
     case 'none': return 'You have the newest version (' + ago(u.checked) + ').';
     case 'available': return `Version ${u.available} is available.`;
     case 'downloading': return `Getting ${u.available}… ${Math.round((u.pct || 0) * 100)}%`;
-    case 'ready': return u.pendingAtExit ? `Version ${u.available} is installed when you close PDF Editor.` : `Version ${u.available} is ready.`;
+    case 'ready': return u.pendingAtExit ? `Version ${u.available} is installed when you close ${APP_NAME}.` : `Version ${u.available} is ready.`;
     case 'error': return 'Problem: ' + (u.err || 'unknown');
     case 'blocked': return u.err === 'unfinished'
       ? `The update to ${u.available} didn't finish - try again, or install it with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'}.`
-      : `Version ${u.available} is downloaded, but this PC doesn't let PDF Editor run its update program (antivirus) - install it with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'}.`;
+      : `Version ${u.available} is downloaded, but this PC doesn't let ${APP_NAME} run its update program (antivirus) - install it with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'}.`;
     case 'setup': return `Version ${u.available} is available - it installs with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'} (run it by hand; it can't update itself).`;
     case 'off': return 'No updates folder: this copy doesn\'t look for new versions.';
     case 'unreachable': return u.web ? 'The update server can\'t be reached right now (no internet?).' : 'The updates folder can\'t be reached from this PC right now (normal away from the company network).';
@@ -217,7 +221,7 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
               onKeyDown={(e) => { if (e.key === 'Enter') void commit((e.target as HTMLInputElement).value); }} />
             <button className="btn sm" onClick={() => void browse()}>Browse…</button>
           </div>
-          <p className="hint">{u.web ? 'The web address new versions are published at.' : 'The shared folder where new versions are published.'} PDF Editor asks before downloading anything.
+          <p className="hint">{u.web ? 'The web address new versions are published at.' : 'The shared folder where new versions are published.'} {APP_NAME} asks before downloading anything.
             {u.ownSource && u.setupSource && u.setupSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(null); setSrc(s.source); }}>Use the installer's folder</button></>}
             {u.ownSource && !u.setupSource && u.defaultSource && u.defaultSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(null); setSrc(s.source); }}>Use the download page (default)</button></>}
           </p>
@@ -236,10 +240,10 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
               <div className="hrow">
                 <button className="btn sm" onClick={async () => {
                   const r = await gcc.confirm(fwd
-                    ? { message: `Return to version ${u.previous}?`, detail: `PDF Editor restarts with version ${u.previous} - the newer one you went back from. You're asked to save changes first.`, buttons: ['Return to it', 'Cancel'] }
-                    : { message: `Go back to version ${u.previous}?`, detail: 'PDF Editor restarts with the version you had before this update. You\'re asked to save changes first.', buttons: ['Go back', 'Cancel'] });
+                    ? { message: `Return to version ${u.previous}?`, detail: `${APP_NAME} restarts with version ${u.previous} - the newer one you went back from. You're asked to save changes first.`, buttons: ['Return to it', 'Cancel'] }
+                    : { message: `Go back to version ${u.previous}?`, detail: `${APP_NAME} restarts with the version you had before this update. You're asked to save changes first.`, buttons: ['Go back', 'Cancel'] });
                   const back = r === 0 ? await gcc.updateRollback() : true;
-                  if (back !== true) toast(back === 'blocked' ? "This PC doesn't let PDF Editor run its update program (antivirus), so it can't switch versions by itself. Run the setup of the version you want instead." : `There is no other version to ${fwd ? 'return' : 'go back'} to.`, 'err');
+                  if (back !== true) toast(back === 'blocked' ? `This PC doesn't let ${APP_NAME} run its update program (antivirus), so it can't switch versions by itself. Run the setup of the version you want instead.` : `There is no other version to ${fwd ? 'return' : 'go back'} to.`, 'err');
                 }}>{fwd ? 'Return to' : 'Go back to'} {u.previous}</button>
                 <span className="hint">{fwd ? 'The newer version you went back from.' : "If something in this version doesn't work for you."}</span>
               </div>
@@ -247,7 +251,7 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
           })()}
         </>
       ) : (
-        <p className="hint">Version {u.version}. This copy wasn't installed with PDF Editor Setup, so it doesn't update itself. New versions come with the setup.</p>
+        <p className="hint">Version {u.version}. This copy wasn't installed with {APP_NAME} Setup, so it doesn't update itself. New versions come with the setup.</p>
       )}
     </div>
   );
@@ -270,12 +274,34 @@ export function ReportsRow({ onReport, onWhatsNew }: { onReport(): void; onWhats
         <button className="btn sm" onClick={onReport}><Ico n="report" size={15} /> Report a problem…</button>
         <span className="hint up-status">
           {!st ? '' : st.waiting > 0
-            ? `${st.waiting} report${st.waiting === 1 ? '' : 's'} waiting on this PC${st.state === 'failed' ? " - the reports folder can't be reached right now" : st.state === 'nofolder' ? ' - no updates folder set' : ''}.`
-            : st.folder ? 'Reports go to ' + st.folder + '.' : st.state === 'web' ? 'Reports stay on this PC; Report a problem opens an issue on GitHub.' : 'No updates folder: reports stay on this PC.'}
+            ? `${st.waiting} report${st.waiting === 1 ? '' : 's'} waiting on this PC${st.state === 'failed' ? (st.anon ? ' - sent once the internet can be reached' : " - the reports folder can't be reached right now") : st.state === 'nofolder' ? ' - no updates folder set' : ''}.`
+            : st.anon ? 'Report a problem sends your words to the developer, anonymously.' : st.folder ? 'Reports go to ' + st.folder + '.' : st.state === 'web' ? 'Reports stay on this PC; Report a problem opens an issue on GitHub.' : 'No updates folder: reports stay on this PC.'}
         </span>
         {st && st.waiting > 0 && <button className="btn sm" onClick={() => void gcc.reportOpenQueue()}>Show them</button>}
       </div>
-      <p className="hint">{st?.state === 'web' ? 'Crash reports are kept on this PC only (nothing is sent by itself).' : 'Crashes are reported by themselves (once per kind a day), the same way.'}</p>
+      {st?.anon ? <AnonReports st={st} set={setSt} /> : <p className="hint">{st?.state === 'web' ? 'Crash reports are kept on this PC only (nothing is sent by itself).' : 'Crashes are reported by themselves (once per kind a day), the same way.'}</p>}
     </div>
+  );
+}
+
+/** public build: anonymous reports - the crash-report switch (off until turned on) and what is sent */
+function AnonReports({ st, set }: { st: ReportStatus; set(s: ReportStatus): void }) {
+  const [example, setExample] = useState<string | null>(null);
+  return (
+    <>
+      <label className="check">
+        <input type="checkbox" checked={!!st.crashes} onChange={async (e) => set(await gcc.reportCrashSharing(e.target.checked))} />
+        <span>Send anonymous crash reports (off until you turn it on; only crashes from then on are sent)</span>
+      </label>
+      <details className="hint anon-what">
+        <summary>What's sent, and where</summary>
+        <p><b>Sent:</b> the app and Windows versions, memory, what went wrong (the error and the app's recent log) - and for Report a problem, the words you type and the picture of the window if you keep it.</p>
+        <p><b>Taken out first:</b> your Windows user name, the PC's name, every file name, folder and path. The time is rounded to the hour.</p>
+        <p><b>Never sent:</b> your PDF files. (The picture of the window, if you keep it in Report a problem, shows whatever is on screen - untick it when that's private.)</p>
+        <p><b>Where:</b> the developer's own small receiver, hosted on Cloudflare - no analytics or crash-reporting company. Like any web host, Cloudflare sees your internet address; the receiver doesn't keep it. Read only by the developer, deleted after 6 months. Crash reports aren't kept on this PC either unless the box above is ticked.</p>
+        <button className="btn sm" onClick={async () => setExample(example === null ? await gcc.reportPreview() : null)}>{example === null ? 'Show an example' : 'Hide the example'}</button>
+        {example !== null && <pre className="anon-example">{example}</pre>}
+      </details>
+    </>
   );
 }

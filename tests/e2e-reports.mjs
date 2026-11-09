@@ -99,7 +99,9 @@ await app.close().catch(() => {});
 rmSync(join(INST, 'update.json'));
 ({ app, win } = await launch());
 const st3 = await win.evaluate(() => window.gcc.reportProblem('No folder report', false, {}));
-ok(st3.state === 'nofolder' && st3.waiting >= 1, 'no updates folder: kept on this PC (' + st3.state + ')');
+// (the public build has an address of its own - its GitHub page: "web" there, kept on this PC too)
+const ownFeed = !!JSON.parse(readFileSync('package.json', 'utf8')).updateFeed;
+ok(st3.state === (ownFeed ? 'web' : 'nofolder') && st3.waiting >= 1, 'no updates folder: kept on this PC (' + st3.state + ')');
 await app.close().catch(() => {});
 
 console.log(fails ? fails + ' FAILED' : 'all passed');

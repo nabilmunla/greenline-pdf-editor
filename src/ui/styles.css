@@ -750,3 +750,9 @@ body:has(.scrim) .toasts { top: 16px; bottom: auto; }
 .drawbar button.primary { background: var(--sel); border-color: var(--sel); color: #fff; font-weight: 600; }
 /* an edge's middle dot (drag: a new corner) */
 .ov .hd.mid { fill: #fff; stroke: var(--sel); cursor: copy; opacity: 0.9; }
+
+/* Settings > Help (public build): what anonymous reports carry */
+.anon-what { margin-top: 6px; }
+.anon-what summary { cursor: pointer; color: var(--accent); }
+.anon-what p { margin: 6px 0; }
+.anon-example { max-height: 220px; overflow: auto; font-size: 11px; background: var(--drawer); padding: 8px; border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-all; }

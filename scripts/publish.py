@@ -61,10 +61,14 @@ subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'pack.py'), out], 
 subprocess.run([sys.executable, os.path.join(ROOT, 'installer', 'build.py'), ez, os.path.join(out, f'app-v{ver}.zip'), out], cwd=ROOT, check=True)
 
 app = os.path.join(out, f'app-v{ver}.zip')
-setup = os.path.join(out, f'PDF Editor Setup {ver}.exe')
+NAME = pkg.get('displayName') or pkg.get('productName') or 'PDF Editor'
+setup = os.path.join(out, f'{NAME} Setup {ver}.exe')
 notes = json.load(open(os.path.join(ROOT, 'release-notes.json'), encoding='utf-8')).get(ver, [])
 # grouped notes ({"New features": [...], "General polishing": [...], "Fixes": [...]}) from 0.6.0 on;
 # copies up to 0.5.0 read only the flat "notes" list: the new features first, then the fixes
+# (groups named "Public: ..." are the public build's own: export-public.py merges them in there)
+if isinstance(notes, dict):
+    notes = {k: v for k, v in notes.items() if not k.startswith('Public: ')}
 groups = notes if isinstance(notes, dict) else None
 # (up to 6 lines: the first new features and the first fixes, then polishing if there's room)
 def flat_of(g):
@@ -79,6 +83,9 @@ latest = {
     'notes': flat,
     **({'groups': groups} if groups else {}),
     'app': {'file': os.path.basename(app), 'sha256': sha(app), 'size': os.path.getsize(app)},
+    # which edition this is (signed with the rest): the company build refuses the public one's
+    # releases and the other way round - both are signed with the same key
+    'build': pkg.get('brand') or 'company',
     # (no "setup" entry from 0.8.3 on: copies up to 0.8.2 fetched the setup named here into AppData
     # and started it when the runtime changed - Sophos stopped that as malicious behaviour. Without
     # it they find no package for a new runtime and say nothing; 0.8.3+ show "run the setup", by
@@ -96,11 +103,11 @@ except BaseException:
     os.remove(unsigned)
     raise
 os.replace(unsigned, os.path.join(out, 'latest.json'))
-open(os.path.join(out, 'HOW-TO-PUBLISH.txt'), 'w').write(f'''PDF Editor {ver} - publishing
+open(os.path.join(out, 'HOW-TO-PUBLISH.txt'), 'w').write(f'''{NAME} {ver} - publishing
 
 1. Copy into the updates folder on the share (e.g. \\\\server\\Software\\PDF Editor):
      app-v{ver}.zip
-     PDF Editor Setup {ver}.exe
+     {NAME} Setup {ver}.exe
      source-v{ver}.zip
    and LAST:
      latest.json
@@ -108,7 +115,7 @@ open(os.path.join(out, 'HOW-TO-PUBLISH.txt'), 'w').write(f'''PDF Editor {ver} - 
    Then remove the older versions' files from the folder (a PDF Editor left open since
    before could still fetch them - 0.8.2's setup was flagged by the antivirus that way).
 
-2. New PCs: run "PDF Editor Setup {ver}.exe" from that folder - the setup then uses
+2. New PCs: run "{NAME} Setup {ver}.exe" from that folder - the setup then uses
    the folder for updates by itself.
 
 To hold a version back: don't copy latest.json yet (or put the previous one back).
@@ -118,10 +125,10 @@ one is refused. The signing key stays with the developer copy, never on the shar
 ''')
 # for people outside the company (testers): one zip with the setup, the guides and the source
 import zipfile
-tester = os.path.join(out_root, f'PDF Editor {ver} (test copy).zip')
+tester = os.path.join(out_root, f'{NAME} {ver} (test copy).zip')
 note = open(os.path.join(ROOT, 'installer', 'ALPHA-TEST.txt'), encoding='utf-8').read().replace('{{VERSION}}', ver)
 with zipfile.ZipFile(tester, 'w') as z:
-    folder = f'PDF Editor {ver}/'
+    folder = f'{NAME} {ver}/'
     z.write(setup, folder + os.path.basename(setup), compress_type=zipfile.ZIP_STORED)
     z.write(os.path.join(ROOT, 'README.txt'), folder + 'README.txt', compress_type=zipfile.ZIP_DEFLATED)
     z.writestr(folder + 'START HERE.txt', note.replace('\n', '\r\n'), compress_type=zipfile.ZIP_DEFLATED)

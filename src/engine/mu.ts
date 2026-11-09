@@ -221,7 +221,7 @@ function isSigned(doc: mupdf.PDFDocument): boolean {
 }
 /** files this big can't be read by the editing engine (see openIn) */
 export const TOO_BIG = 2 ** 31;
-export const tooBigText = (size: number) => `This file is ${(size / 2 ** 30).toFixed(1)} GB: PDF Editor can't open files of 2 GB or more. Other PDF programs can; to work on it here, split it into smaller files there first.`;
+export const tooBigText = (size: number) => `This file is ${(size / 2 ** 30).toFixed(1)} GB: files of 2 GB or more can't be opened here. Other PDF programs can; to work on it here, split it into smaller files there first.`;
 /** MuPDF document from bytes or a reader (the reader stays open while the document lives) */
 export function openIn(b: In): mupdf.Document {
   if (b instanceof Uint8Array) return mupdf.Document.openDocument(b, 'application/pdf');

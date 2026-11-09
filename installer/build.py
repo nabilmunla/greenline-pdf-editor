@@ -11,6 +11,10 @@ ez, az, out = sys.argv[1:4]
 os.makedirs(out, exist_ok=True)
 pkg = json.load(open(os.path.join(ROOT, 'package.json')))
 ver = pkg['version']
+# the name people see (the public build's own; files and folders keep "PDF Editor") and where new
+# versions come from when the setup isn't run from an updates folder
+NAME = pkg.get('displayName') or pkg.get('productName') or 'PDF Editor'
+FEED = pkg.get('updateFeed') or ''
 runtime = os.path.basename(ez).split('-')[1].lstrip('v')  # electron-v44.5.1-win32-x64.zip
 work = os.path.join(out, '_setup-build')
 shutil.rmtree(work, ignore_errors=True)
@@ -20,7 +24,7 @@ os.makedirs(work)
 atexit.register(shutil.rmtree, work, True)
 
 # 1. the page of the setup window, with the app's font and logo inside it
-html = open(os.path.join(HERE, 'ui.src.html'), encoding='utf-8').read()
+html = open(os.path.join(HERE, 'ui.src.html'), encoding='utf-8').read().replace('PDF Editor', NAME)
 font = next(f for f in os.listdir(os.path.join(ROOT, 'dist', 'assets')) if f.startswith('inter-latin-wght-normal'))
 html = html.replace('{{INTER}}', base64.b64encode(open(os.path.join(ROOT, 'dist', 'assets', font), 'rb').read()).decode())
 html = html.replace('{{LOGO}}', base64.b64encode(open(os.path.join(ROOT, 'dist', 'gmark.svg'), 'rb').read()).decode())
@@ -29,9 +33,9 @@ open(os.path.join(HERE, 'ui.html'), 'w', encoding='utf-8').write(html)
 # 2. the setup program (Windows, no console window)
 stub = os.path.join(work, 'setup.exe')
 env = dict(os.environ, GOOS='windows', GOARCH='amd64', CGO_ENABLED='0', GOPROXY='off', GOFLAGS='-mod=mod', GOTOOLCHAIN='local', GOSUMDB='off')
-subprocess.run(['go', 'build', '-trimpath', '-ldflags', f'-s -w -H windowsgui -X main.version={ver}', '-o', stub, '.'], cwd=HERE, env=env, check=True)
+subprocess.run(['go', 'build', '-trimpath', '-ldflags', f"-s -w -H windowsgui -X main.version={ver} -X 'main.displayName={NAME}'" + (f" -X 'main.defaultSource={FEED}'" if FEED else ''), '-o', stub, '.'], cwd=HERE, env=env, check=True)
 ico = os.path.join(ROOT, 'pack', 'app.ico')
-subprocess.run(['node', os.path.join(HERE, 'patch-res.mjs'), stub, ico, ver, 'PDF Editor Setup', 'PDF Editor Setup.exe', os.path.join(HERE, 'setup.manifest')], cwd=ROOT, check=True)
+subprocess.run(['node', os.path.join(HERE, 'patch-res.mjs'), stub, ico, ver, NAME + ' Setup', 'PDF Editor Setup.exe', os.path.join(HERE, 'setup.manifest')], cwd=ROOT, check=True)
 
 # 3. the app folder exactly as it will be installed
 stage = os.path.join(work, 'app')
@@ -44,7 +48,7 @@ with zipfile.ZipFile(ez) as z:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with z.open(m) as s, open(dst, 'wb') as d:
             shutil.copyfileobj(s, d)
-subprocess.run(['node', os.path.join(HERE, 'patch-res.mjs'), os.path.join(stage, 'PDF Editor.exe'), ico, ver, 'PDF Editor', 'PDF Editor.exe'], cwd=ROOT, check=True)
+subprocess.run(['node', os.path.join(HERE, 'patch-res.mjs'), os.path.join(stage, 'PDF Editor.exe'), ico, ver, NAME, 'PDF Editor.exe'], cwd=ROOT, check=True)
 with zipfile.ZipFile(az) as z:
     for m in z.infolist():
         if m.is_dir():
@@ -80,7 +84,7 @@ payload = zstandard.ZstdCompressor(compression_params=params).compress(tbuf.getv
 meta = json.dumps({'version': ver, 'runtime': runtime, 'total': total, 'files': len(files)}).encode()
 
 # 5. program + payload + meta + trailer
-setup = os.path.join(out, f'PDF Editor Setup {ver}.exe')
+setup = os.path.join(out, f'{NAME} Setup {ver}.exe')
 with open(setup, 'wb') as o:
     o.write(open(stub, 'rb').read())
     o.write(payload)

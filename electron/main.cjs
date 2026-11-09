@@ -12,6 +12,9 @@ const winprint = require('./winprint.cjs');
 
 const VERSION = require('../package.json').version;
 const APP = 'PDF Editor';
+// the name people see (title bar, messages, Explorer): the public build's own - files and folders
+// keep APP's name (settings, work folders, the exe) so nothing moves
+const DISPLAY = String(require('../package.json').displayName || APP);
 
 function arg(name) {
   const p = process.argv.find((a) => a.startsWith('--' + name + '='));
@@ -228,7 +231,7 @@ function createWindow(opts = {}) {
     minWidth: 900,
     minHeight: 560,
     show: false,
-    title: APP,
+    title: DISPLAY,
     backgroundColor: '#09302f',
     icon: path.join(__dirname, '..', 'dist', 'icon256.png'),
     titleBarStyle: 'hidden',
@@ -268,7 +271,7 @@ function createWindow(opts = {}) {
     // the window is blank now: start it again (unsaved work is offered back from the automatic
     // copies), or close
     const w = win;
-    void dialog.showMessageBox(w, { type: 'error', message: 'The PDF Editor window stopped working', detail: 'Reason: ' + d.reason + '. Start it again: unsaved work from the last automatic copy (made every 45 seconds, every 2 minutes for very big files) is offered back.', buttons: ['Start again', 'Close'], defaultId: 0, noLink: true })
+    void dialog.showMessageBox(w, { type: 'error', message: 'The ' + DISPLAY + ' window stopped working', detail: 'Reason: ' + d.reason + '. Start it again: unsaved work from the last automatic copy (made every 45 seconds, every 2 minutes for very big files) is offered back.', buttons: ['Start again', 'Close'], defaultId: 0, noLink: true })
       .then((r) => { if (w.isDestroyed()) return; if (r.response === 0) w.webContents.reload(); else { W.allowClose = true; w.close(); } })
       .catch(() => {});
   });
@@ -286,7 +289,7 @@ function createWindow(opts = {}) {
     const waited = W.closeAskedAt ? Date.now() - W.closeAskedAt : 0;
     if (W.hung || waited > 20000) {
       const w = win;
-      const r = dialog.showMessageBoxSync(w, { type: 'warning', message: 'PDF Editor is not responding', detail: 'Close it anyway? Changes since the last automatic copy (made every 45 seconds, every 2 minutes for very big files) may be lost - the rest is offered back next time.', buttons: ['Close anyway', 'Wait'], defaultId: 1, cancelId: 1, noLink: true });
+      const r = dialog.showMessageBoxSync(w, { type: 'warning', message: DISPLAY + ' is not responding', detail: 'Close it anyway? Changes since the last automatic copy (made every 45 seconds, every 2 minutes for very big files) may be lost - the rest is offered back next time.', buttons: ['Close anyway', 'Wait'], defaultId: 1, cancelId: 1, noLink: true });
       if (r === 0) { W.allowClose = true; w.destroy(); }
       return;
     }
@@ -781,7 +784,7 @@ ipcMain.handle('dialog:dir', async (_e, opts) => {
   return r.filePaths[0];
 });
 ipcMain.handle('dialog:confirm', async (_e, o) => {
-  const r = await dialog.showMessageBox(winOf(_e), { type: o.type || 'question', title: APP, message: o.message, detail: o.detail || '', buttons: o.buttons, defaultId: 0, cancelId: o.buttons.length - 1, noLink: true });
+  const r = await dialog.showMessageBox(winOf(_e), { type: o.type || 'question', title: DISPLAY, message: o.message, detail: o.detail || '', buttons: o.buttons, defaultId: 0, cancelId: o.buttons.length - 1, noLink: true });
   return r.response;
 });
 
@@ -1073,6 +1076,7 @@ async function registerOpenWith() {
     await reg('add', base + '\\PDFEditor.Document\\DefaultIcon', '/ve', '/d', icon, '/f'),
     await reg('add', base + '\\PDFEditor.Document\\shell\\open\\command', '/ve', '/d', '"' + exe + '" "%1"', '/f'),
     await reg('add', base + '\\.pdf\\OpenWithProgids', '/v', 'PDFEditor.Document', '/t', 'REG_NONE', '/f'),
+    await reg('add', base + '\\Applications\\PDF Editor.exe', '/v', 'FriendlyAppName', '/t', 'REG_SZ', '/d', DISPLAY, '/f'),
     await reg('add', base + '\\Applications\\PDF Editor.exe\\DefaultIcon', '/ve', '/d', icon, '/f'),
     await reg('add', base + '\\Applications\\PDF Editor.exe\\SupportedTypes', '/v', '.pdf', '/t', 'REG_SZ', '/d', '', '/f'),
     await reg('add', base + '\\Applications\\PDF Editor.exe\\shell\\open\\command', '/ve', '/d', '"' + exe + '" "%1"', '/f'),
@@ -1103,7 +1107,7 @@ function combineCommand(exe) {
 async function registerCombine(reg, base, exe) {
   const cmd = await combineCommand(exe);
   return [
-    await reg('add', base + COMBINE_KEY, '/ve', '/d', 'Combine with PDF Editor', '/f'),
+    await reg('add', base + COMBINE_KEY, '/ve', '/d', 'Combine with ' + DISPLAY, '/f'),
     await reg('add', base + COMBINE_KEY, '/v', 'Icon', '/d', '"' + exe + '",0', '/f'),
     await reg('add', base + COMBINE_KEY, '/v', 'MultiSelectModel', '/d', 'Player', '/f'),
     await reg('add', base + COMBINE_KEY + '\\command', '/ve', '/d', cmd, '/f'),
@@ -1443,6 +1447,7 @@ const updater = require('./updater.cjs').create({
   send: broadcast,
   // (a build's own web address for updates - the public build's GitHub repository; none in others)
   defaultSource: String(process.env.PDFED_UPDATE_FEED || require('../package.json').updateFeed || ''),
+  build: String(require('../package.json').brand || 'company'),
 });
 /** close like the windows' close buttons (save prompts), then quit: the update runs after */
 function closeForRestart() {
@@ -1483,6 +1488,8 @@ reports = require('./reports.cjs').create({
   logFile: () => path.join(dataDir(), 'logs', 'app.log'),
   source: () => updater.snapshot().source,
   send: broadcast,
+  // (the public build's anonymous report receiver - none in the company build)
+  endpoint: String(process.env.PDFED_REPORT_ENDPOINT || require('../package.json').reportEndpoint || ''),
 });
 let reportShot = null; // the window as it was when "Report a problem" was opened
 ipcMain.handle('report:capture', async (_e) => {
@@ -1498,6 +1505,8 @@ ipcMain.handle('report:problem', async (_e, text, withShot, extra) => {
   return r;
 });
 ipcMain.handle('report:status', () => reports.status());
+ipcMain.handle('report:crashSharing', (_e, on) => reports.crashSharing(!!on));
+ipcMain.handle('report:preview', () => reports.preview());
 ipcMain.handle('report:openQueue', async () => {
   const st = await reports.status();
   await fsp.mkdir(st.queue, { recursive: true });

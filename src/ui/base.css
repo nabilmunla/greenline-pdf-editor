@@ -31,6 +31,13 @@
   --radius: 8px;
   --radius-sm: 5px;
 }
+/* the public build (brand.ts sets data-brand): its own green in place of the company colours */
+:root[data-brand='greenline'] {
+  --brand-gradient: linear-gradient(100deg, #b8f5cf 0%, #7cf0a8 30%, #3ddc84 65%, #1fae63 100%);
+}
+/* (on the light start page the pale end of that green fades into the background: a deeper one) */
+:root[data-brand='greenline'] .start-hero h1 b { background: linear-gradient(100deg, #3ddc84 0%, #1fae63 45%, #13804a 100%); -webkit-background-clip: text; background-clip: text; }
+
 
 :root,
 :root[data-theme='light'] {

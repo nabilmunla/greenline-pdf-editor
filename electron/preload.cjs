@@ -90,6 +90,8 @@ contextBridge.exposeInMainWorld('gcc', {
   reportCapture: () => ipcRenderer.invoke('report:capture'),
   reportProblem: (text, withShot, extra) => ipcRenderer.invoke('report:problem', text, withShot, extra),
   reportStatus: () => ipcRenderer.invoke('report:status'),
+  reportCrashSharing: (on) => ipcRenderer.invoke('report:crashSharing', on),
+  reportPreview: () => ipcRenderer.invoke('report:preview'),
   reportOpenQueue: () => ipcRenderer.invoke('report:openQueue'),
   reportCrash: (where, message, stack) => ipcRenderer.send('report:crash', where, message, stack),
   onReports: (cb) => { const f = () => cb(); ipcRenderer.on('reports:state', f); return () => ipcRenderer.removeListener('reports:state', f); },

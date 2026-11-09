@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -30,15 +31,15 @@ var (
 	mpr      = windows.NewLazySystemDLL("mpr.dll")
 	advapi32 = windows.NewLazySystemDLL("advapi32.dll")
 
-	procMessageBoxW            = user32.NewProc("MessageBoxW")
-	procShellExecuteExW        = shell32.NewProc("ShellExecuteExW")
-	procSHChangeNotify         = shell32.NewProc("SHChangeNotify")
+	procMessageBoxW                 = user32.NewProc("MessageBoxW")
+	procShellExecuteExW             = shell32.NewProc("ShellExecuteExW")
+	procSHChangeNotify              = shell32.NewProc("SHChangeNotify")
 	procSHCreateItemFromParsingName = shell32.NewProc("SHCreateItemFromParsingName")
-	procCoCreateInstance       = ole32.NewProc("CoCreateInstance")
-	procCoInitializeEx         = ole32.NewProc("CoInitializeEx")
-	procCoTaskMemFree          = ole32.NewProc("CoTaskMemFree")
-	procWNetGetUniversalNameW  = mpr.NewProc("WNetGetUniversalNameW")
-	procRegSetValueExW         = advapi32.NewProc("RegSetValueExW")
+	procCoCreateInstance            = ole32.NewProc("CoCreateInstance")
+	procCoInitializeEx              = ole32.NewProc("CoInitializeEx")
+	procCoTaskMemFree               = ole32.NewProc("CoTaskMemFree")
+	procWNetGetUniversalNameW       = mpr.NewProc("WNetGetUniversalNameW")
+	procRegSetValueExW              = advapi32.NewProc("RegSetValueExW")
 )
 
 const (
@@ -58,7 +59,7 @@ func messageBox(text string, flags uint32) int {
 		return idYes
 	}
 	t, _ := windows.UTF16PtrFromString(text)
-	c, _ := windows.UTF16PtrFromString("PDF Editor Setup")
+	c, _ := windows.UTF16PtrFromString(displayName + " Setup")
 	r, _, _ := procMessageBoxW.Call(0, uintptr(unsafe.Pointer(t)), uintptr(unsafe.Pointer(c)), uintptr(flags|0x10000 /*MB_SETFOREGROUND*/))
 	return int(r)
 }
@@ -527,15 +528,15 @@ func makeShortcut(lnk, target, workdir, icon, desc string) error {
 	for i, s := range strs {
 		keep[i], _ = windows.UTF16PtrFromString(s)
 	}
-	comCall(sl, 20, uintptr(unsafe.Pointer(keep[0]))) // SetPath
-	comCall(sl, 9, uintptr(unsafe.Pointer(keep[1])))  // SetWorkingDirectory
-	comCall(sl, 7, uintptr(unsafe.Pointer(keep[2])))  // SetDescription
+	comCall(sl, 20, uintptr(unsafe.Pointer(keep[0])))    // SetPath
+	comCall(sl, 9, uintptr(unsafe.Pointer(keep[1])))     // SetWorkingDirectory
+	comCall(sl, 7, uintptr(unsafe.Pointer(keep[2])))     // SetDescription
 	comCall(sl, 17, uintptr(unsafe.Pointer(keep[3])), 0) // SetIconLocation
 	if ps, err := comQI(sl, &iidPropertyStore); err == nil {
 		key := propertyKey{fmtid: pkeyAppUserModelID, pid: 5}
 		pv := propVariant{vt: 31 /*VT_LPWSTR*/, val: uintptr(unsafe.Pointer(keep[5]))}
 		comCall(ps, 6, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&pv))) // SetValue
-		comCall(ps, 7)                                                             // Commit
+		comCall(ps, 7)                                                              // Commit
 		comRelease(ps)
 	}
 	pf, err := comQI(sl, &iidPersistFile)
@@ -553,16 +554,17 @@ func makeShortcut(lnk, target, workdir, icon, desc string) error {
 
 func shortcutPaths(scope string) (start, desktop string) {
 	if scope == "machine" {
-		return filepath.Join(knownFolder(windows.FOLDERID_CommonPrograms, filepath.Join(os.Getenv("ProgramData"), `Microsoft\Windows\Start Menu\Programs`)), appName+".lnk"),
-			filepath.Join(knownFolder(windows.FOLDERID_PublicDesktop, filepath.Join(os.Getenv("PUBLIC"), "Desktop")), appName+".lnk")
+		return filepath.Join(knownFolder(windows.FOLDERID_CommonPrograms, filepath.Join(os.Getenv("ProgramData"), `Microsoft\Windows\Start Menu\Programs`)), displayName+".lnk"),
+			filepath.Join(knownFolder(windows.FOLDERID_PublicDesktop, filepath.Join(os.Getenv("PUBLIC"), "Desktop")), displayName+".lnk")
 	}
-	return filepath.Join(knownFolder(windows.FOLDERID_Programs, filepath.Join(os.Getenv("APPDATA"), `Microsoft\Windows\Start Menu\Programs`)), appName+".lnk"),
-		filepath.Join(knownFolder(windows.FOLDERID_Desktop, filepath.Join(os.Getenv("USERPROFILE"), "Desktop")), appName+".lnk")
+	return filepath.Join(knownFolder(windows.FOLDERID_Programs, filepath.Join(os.Getenv("APPDATA"), `Microsoft\Windows\Start Menu\Programs`)), displayName+".lnk"),
+		filepath.Join(knownFolder(windows.FOLDERID_Desktop, filepath.Join(os.Getenv("USERPROFILE"), "Desktop")), displayName+".lnk")
 }
 
 func makeShortcuts(dir string, ii InstallInfo) error {
 	exe := filepath.Join(dir, exeName)
 	start, desktop := shortcutPaths(ii.Scope)
+	removeOldNamedShortcuts(ii.Scope, exe)
 	return withCOM(func() error {
 		var first error
 		if err := makeShortcut(start, exe, dir, exe, "View, mark up, measure and edit PDFs"); err != nil {
@@ -579,6 +581,44 @@ func makeShortcuts(dir string, ii InstallInfo) error {
 	})
 }
 
+// removeOldNamedShortcuts: shortcuts this copy had under another name - "PDF Editor" before the
+// public build was renamed, or "Greenline PDF Editor" when the company build is installed over it -
+// removed, but only those pointing at this copy's own exe
+func removeOldNamedShortcuts(scope, exe string) {
+	start, desktop := shortcutPaths(scope)
+	for _, name := range []string{appName, "Greenline PDF Editor"} {
+		if name == displayName {
+			continue
+		}
+		for _, p := range []string{start, desktop} {
+			old := filepath.Join(filepath.Dir(p), name+".lnk")
+			if b, err := os.ReadFile(old); err == nil && lnkPointsAt(b, exe) {
+				_ = os.Remove(old)
+				logf("removed the old shortcut %s", old)
+			}
+		}
+	}
+}
+
+// lnkPointsAt: a .lnk holds its target as UTF-16 (and often in the ANSI code page too): either,
+// any case - letters outside ASCII included ("C:\Users\Наталья\...")
+func lnkPointsAt(b []byte, exe string) bool {
+	want := strings.ToLower(exe)
+	if strings.Contains(strings.ToLower(string(b)), want) {
+		return true
+	}
+	for off := 0; off < 2; off++ {
+		u := make([]uint16, 0, len(b)/2)
+		for i := off; i+1 < len(b); i += 2 {
+			u = append(u, uint16(b[i])|uint16(b[i+1])<<8)
+		}
+		if strings.Contains(strings.ToLower(string(utf16.Decode(u))), want) {
+			return true
+		}
+	}
+	return false
+}
+
 func removeShortcuts(scope, dir string) {
 	// (made together with the uninstall entry: another copy's are left alone)
 	if !ownsEntries(rootFor(scope), dir) {
@@ -588,6 +628,7 @@ func removeShortcuts(scope, dir string) {
 	start, desktop := shortcutPaths(scope)
 	_ = os.Remove(start)
 	_ = os.Remove(desktop)
+	removeOldNamedShortcuts(scope, filepath.Join(dir, exeName))
 }
 
 // pickFolder: the standard Windows folder picker. "" when cancelled.
@@ -599,8 +640,8 @@ func pickFolder(owner uintptr, title, start string) string {
 	}
 	defer comRelease(d)
 	var opts uint32
-	comCall(d, 10, uintptr(unsafe.Pointer(&opts)))                           // GetOptions
-	comCall(d, 9, uintptr(opts|0x20 /*PICKFOLDERS*/|0x40 /*FORCEFILESYSTEM*/)) // SetOptions
+	comCall(d, 10, uintptr(unsafe.Pointer(&opts)))                              // GetOptions
+	comCall(d, 9, uintptr(opts|0x20 /*PICKFOLDERS*/ |0x40 /*FORCEFILESYSTEM*/)) // SetOptions
 	t, _ := windows.UTF16PtrFromString(title)
 	comCall(d, 17, uintptr(unsafe.Pointer(t))) // SetTitle
 	if start != "" {
@@ -729,7 +770,7 @@ func registerApp(dir string, ii InstallInfo) error {
 		}
 	}
 	// Installed apps (Settings > Apps) with a working Uninstall button
-	add(setStr(root, uninstallKey, "DisplayName", appName))
+	add(setStr(root, uninstallKey, "DisplayName", displayName))
 	add(setStr(root, uninstallKey, "DisplayVersion", ii.Version))
 	add(setStr(root, uninstallKey, "DisplayIcon", `"`+exe+`",0`))
 	add(setStr(root, uninstallKey, "InstallLocation", dir))
@@ -748,12 +789,12 @@ func registerApp(dir string, ii InstallInfo) error {
 		add(setStr(root, classes+`\`+progID+`\DefaultIcon`, "", icon))
 		add(setStr(root, classes+`\`+progID+`\shell\open\command`, "", `"`+exe+`" "%1"`))
 		add(setNone(root, classes+`\.pdf\OpenWithProgids`, progID))
-		add(setStr(root, classes+`\Applications\PDF Editor.exe`, "FriendlyAppName", appName))
+		add(setStr(root, classes+`\Applications\PDF Editor.exe`, "FriendlyAppName", displayName))
 		add(setStr(root, classes+`\Applications\PDF Editor.exe\DefaultIcon`, "", icon))
 		add(setStr(root, classes+`\Applications\PDF Editor.exe\SupportedTypes`, ".pdf", ""))
 		add(setStr(root, classes+`\Applications\PDF Editor.exe\shell\open\command`, "", `"`+exe+`" "%1"`))
 		// listed in Settings > Default apps
-		add(setStr(root, capsKey, "ApplicationName", appName))
+		add(setStr(root, capsKey, "ApplicationName", displayName))
 		add(setStr(root, capsKey, "ApplicationDescription", "View, mark up, measure and edit PDFs"))
 		add(setStr(root, capsKey, "ApplicationIcon", `"`+exe+`",0`))
 		add(setStr(root, capsKey+`\FileAssociations`, ".pdf", progID))
@@ -764,7 +805,7 @@ func registerApp(dir string, ii InstallInfo) error {
 	// Explorer: select PDFs > right-click > "Combine with PDF Editor" (Windows 11: under Show more
 	// options). Player: offered for any number of files (Windows hides it above 15 otherwise);
 	// Windows starts the app once per file and the running copy collects them.
-	add(setStr(root, classes+combineKey, "", "Combine with PDF Editor"))
+	add(setStr(root, classes+combineKey, "", "Combine with "+displayName))
 	add(setStr(root, classes+combineKey, "Icon", `"`+exe+`",0`))
 	add(setStr(root, classes+combineKey, "MultiSelectModel", "Player"))
 	add(setStr(root, classes+combineKey+`\command`, "", `"`+exe+`" --combine "%1"`))

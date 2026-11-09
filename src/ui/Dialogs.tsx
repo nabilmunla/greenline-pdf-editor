@@ -24,6 +24,7 @@ import { CountTagDlg } from './CountTag';
 import { ExportDlg, exportArea } from './ExportDlg';
 import { AiKeysDialog } from './AiPanel';
 import type { PageMark, StampDesign, RGB, Rect } from '../engine/mu';
+import { APP_NAME } from './brand';
 
 interface Props {
   dialog: Dialog;
@@ -81,7 +82,7 @@ export function Dialogs(p: Props) {
     case 'crop': return <CropDlg {...p} page={d.page} rect={d.rect} />;
     case 'table': return <TableDlg {...p} rows={d.rows} page={d.page} rect={d.rect} docId={d.docId} />;
     case 'export': return p.doc ? <ExportDlg doc={p.doc} format={d.format} settings={p.settings} saveSettings={p.saveSettings} close={close} toast={p.toast} fail={p.fail} pickArea={() => p.A.tableArea()} /> : null;
-    case 'about': return <Modal title="PDF Editor" onClose={close} sub={`Version ${p.info?.version}`} actions={<button className="btn primary" onClick={close}>Close</button>}><p className="hint">PDF engines: PDFium (Apache-2.0) for drawing, MuPDF (AGPL-3.0) for editing, Tesseract (Apache-2.0) for OCR. Everything runs on this PC.</p></Modal>;
+    case 'about': return <Modal title={APP_NAME} onClose={close} sub={`Version ${p.info?.version}`} actions={<button className="btn primary" onClick={close}>Close</button>}><p className="hint">PDF engines: PDFium (Apache-2.0) for drawing, MuPDF (AGPL-3.0) for editing, Tesseract (Apache-2.0) for OCR. Everything runs on this PC.</p></Modal>;
   }
   return null;
 }
@@ -795,10 +796,10 @@ function MergeDlg(p: Props & { files?: string[] }) {
       if ((b.$file.size ?? 0) >= 2 ** 31) {
         const gb = ((b.$file.size ?? 0) / 2 ** 30).toFixed(1);
         const to = await gcc.saveDialog({ title: `The merged file is ${gb} GB – too big to open here. Save it as…`, name: 'Merged.pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] });
-        if (!to) { void gcc.dropTemp([b.$file.path]); p.toast(`The merged file (${gb} GB) was not kept. PDF Editor can't open files of 2 GB or more – merge fewer files at a time.`, 'info', undefined, 12000); return; }
+        if (!to) { void gcc.dropTemp([b.$file.path]); p.toast(`The merged file (${gb} GB) was not kept. ${APP_NAME} can't open files of 2 GB or more – merge fewer files at a time.`, 'info', undefined, 12000); return; }
         try { await gcc.commit(b.$file.path, to); } catch (e) { void gcc.dropTemp([b.$file.path]); throw e; }
         p.setDialog(null);
-        p.toast(`Merged ${list.length} files – ${done} pages, ${gb} GB, saved as ${baseName(to)}. It is too big to open in PDF Editor (2 GB or more); other PDF programs can open it.`, 'ok', undefined, 15000);
+        p.toast(`Merged ${list.length} files – ${done} pages, ${gb} GB, saved as ${baseName(to)}. It is too big to open in ${APP_NAME} (2 GB or more); other PDF programs can open it.`, 'ok', undefined, 15000);
         return;
       }
       let d: PdfDoc;
@@ -827,7 +828,7 @@ function MergeDlg(p: Props & { files?: string[] }) {
           ? <button className="btn" onClick={() => { stop.current = true; }} disabled={run.phase !== 'file'}>Stop</button>
           : <button className="btn" onClick={close}>Cancel</button>}
         <button className="btn primary" disabled={!!run || files.length < 2 || bad.length > 0} onClick={() => void go()}>{run ? 'Merging…' : `Merge ${files.length} ${files.length === 1 ? 'file' : 'files'} (${total} pages)`}</button></>}>
-      {bad.length > 0 && <p className="err">{bad.map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is 2 GB or more – too big for PDF Editor' : "can't be read as a PDF"}`).join('; ')}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}
+      {bad.length > 0 && <p className="err">{bad.map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is 2 GB or more – too big for ' + APP_NAME : "can't be read as a PDF"}`).join('; ')}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}
       {run && (
         <div className="mprog">
           <div className="bar"><i style={{ width: `${Math.round(((run.phase === 'file' ? run.k : files.length) + (run.phase === 'open' ? 1 : run.phase === 'write' ? 0.5 : 0)) / (files.length + 1) * 100)}%` }} /></div>
@@ -1878,9 +1879,9 @@ function SettingsDlg(p: Props) {
       <div className="row"><label>Mouse wheel</label>
         <div className="seg"><button className={!wheelZoom ? 'on' : ''} onClick={() => setWheelZoom(false)}>Scrolls (Ctrl+wheel zooms)</button><button className={wheelZoom ? 'on' : ''} onClick={() => setWheelZoom(true)}>Zooms (Alt+wheel scrolls)</button></div>
       </div>
-      <div className="row"><label>Open PDFs with PDF Editor</label>
-        <button className="btn" style={{ alignSelf: 'flex-start' }} onClick={async () => { const r = await gcc.registerOpenWith(); p.toast(r.ok ? 'Registered. Now right-click any PDF > Open with > Choose another app > PDF Editor > tick “Always”.' : 'Could not register: ' + (r.msg || 'Windows refused'), r.ok ? 'ok' : 'err', undefined, 12000); }}>Add to Windows “Open with”</button>
-        <p className="hint">Windows lets only you pick the default app. After this, right-click a PDF → Open with → Choose another app → PDF Editor → tick “Always use this app”.</p>
+      <div className="row"><label>Open PDFs with {APP_NAME}</label>
+        <button className="btn" style={{ alignSelf: 'flex-start' }} onClick={async () => { const r = await gcc.registerOpenWith(); p.toast(r.ok ? `Registered. Now right-click any PDF > Open with > Choose another app > ${APP_NAME} > tick “Always”.` : 'Could not register: ' + (r.msg || 'Windows refused'), r.ok ? 'ok' : 'err', undefined, 12000); }}>Add to Windows “Open with”</button>
+        <p className="hint">Windows lets only you pick the default app. After this, right-click a PDF → Open with → Choose another app → {APP_NAME} → tick “Always use this app”.</p>
       </div>
       <div className="row"><label>Safety</label><p className="hint">Every save writes a new file first and swaps it in, and keeps the previous version in the backups folder (last 40). Unsaved work is copied every 45 s and offered back after a crash.</p>
         <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => void gcc.openExternal(joinPath(p.info?.localDir || p.info?.dataDir || '', 'backups'))}>Open backups folder</button>
@@ -1888,7 +1889,7 @@ function SettingsDlg(p: Props) {
       <UpdatesSection toast={p.toast} />
       <ReportsRow onReport={() => void p.A.report()} onWhatsNew={() => away({ k: 'whatsnew', back: true })} />
       <div className="row"><label>About</label>
-        <p className="hint">PDF Editor {p.info?.version}. Built on open-source parts: Electron, PDFium, MuPDF, Tesseract, Mozilla's translation engine and others.</p>
+        <p className="hint">{APP_NAME} {p.info?.version}. Built on open-source parts: Electron, PDFium, MuPDF, Tesseract, Mozilla's translation engine and others.</p>
         <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => away({ k: 'licences' })}>Licences</button>
       </div>
     </Modal>
@@ -1902,13 +1903,18 @@ function ReportDlg(p: Props & { shot: string | null }) {
   const [text, setText] = useState('');
   const [withShot, setWithShot] = useState(!!p.shot);
   const [sending, setSending] = useState(false);
+  // (the public build sends reports anonymously: what the dialog says follows)
+  const [anon, setAnon] = useState(false);
+  useEffect(() => { void gcc.reportStatus().then((s) => setAnon(!!s.anon)).catch(() => {}); }, []);
   const send = async () => {
     setSending(true);
     try {
       const extra = { openFiles: p.docs.length };
       const st = await gcc.reportProblem(text.trim(), withShot, extra);
       p.setDialog(null);
-      if (st.state === 'sent') p.toast('Thanks - your report is in the reports folder.', 'ok', undefined, 6000);
+      if (st.state === 'sent' && st.anon) p.toast('Sent anonymously - thank you.', 'ok', undefined, 6000);
+      else if (st.anon) p.toast('Saved on this PC - it is sent anonymously once the internet can be reached.', 'info', undefined, 9000);
+      else if (st.state === 'sent') p.toast('Thanks - your report is in the reports folder.', 'ok', undefined, 6000);
       else if (st.state === 'nofolder') p.toast('Saved on this PC. Set an updates folder (Settings) to send reports.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue() }, 9000);
       else if (st.state === 'web' && st.issue) { void gcc.openLink(st.issue); p.toast('Saved on this PC. Your browser opens a new issue on GitHub with your text - press Submit there (needs a free GitHub account). Attach the screenshot from the saved report if it helps.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue() }, 12000); }
       else if (st.state === 'web') p.toast('Saved on this PC.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue() }, 9000);
@@ -1929,7 +1935,9 @@ function ReportDlg(p: Props & { shot: string | null }) {
           <img src={p.shot} alt="" className={withShot ? '' : 'off'} />
         </label>
       )}
-      <p className="hint">The report also includes the app version, Windows version, your Windows user name and the app's recent log (it can contain file names) - never the PDF itself.</p>
+      {anon
+        ? <p className="hint">Sent anonymously to the developer's own receiver: your words{p.shot ? ', the picture if you keep it (it shows what is on screen)' : ''}, the app and Windows versions and the app's recent log - with your user name, PC name, file names and folders taken out. Never the PDF file itself. Settings › Help says more.</p>
+        : <p className="hint">The report also includes the app version, Windows version, your Windows user name and the app's recent log (it can contain file names) - never the PDF itself.</p>}
     </Modal>
   );
 }

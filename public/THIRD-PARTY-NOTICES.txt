@@ -1,9 +1,9 @@
-PDF EDITOR - LICENCES
-=====================
-PDF Editor is built on the open-source parts listed below. Each keeps its own licence.
+GREENLINE PDF EDITOR - LICENCES
+===============================
+Greenline PDF Editor is built on the open-source parts listed below. Each keeps its own licence.
 
 MuPDF is licensed under the GNU Affero General Public License (AGPL) version 3 or later.
-Because PDF Editor includes MuPDF, anyone who passes a copy of PDF Editor on to someone else
+Because Greenline PDF Editor includes MuPDF, anyone who passes a copy of Greenline PDF Editor on to someone else
 must also make its complete source code available under the same licence. The source code of
 each version is kept as source-v<version>.zip next to the published app.
 

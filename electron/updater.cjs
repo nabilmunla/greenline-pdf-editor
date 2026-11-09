@@ -25,13 +25,16 @@ const STALL_TIMEOUT = Number(process.env.PDFED_UPDATE_STALL) || 60000;
 const EVERY = 4 * 3600 * 1000;
 const FIRST = Number(process.env.PDFED_UPDATE_FIRST) || 20000;
 
-function create({ version, readSettings, writeSettings, log, send, appName, defaultSource = '' }) {
+function create({ version, readSettings, writeSettings, log, send, appName, defaultSource = '', build = 'company' }) {
   const installDir = () => process.env.PDFED_INSTALL_DIR || path.dirname(process.execPath);
   const workDir = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), process.env.LOCALAPPDATA ? appName : '', 'updates');
   const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8').replace(/^﻿/, '')); } catch (_) { return null; } };
   const install = () => readJson(path.join(installDir(), 'install.json'));
   const setupSource = () => { const u = readJson(path.join(installDir(), 'update.json')); return (u && typeof u.source === 'string' && u.source.trim()) || ''; };
-  const source = () => { const s = readSettings(); return typeof s.updateSource === 'string' ? s.updateSource.trim() : setupSource() || defaultSource; };
+  // (the setup's update.json with an empty source: "no updates" was chosen there - the build's own
+  // address is used only when the setup said nothing)
+  const setupSaid = () => { const u = readJson(path.join(installDir(), 'update.json')); return !!(u && typeof u.source === 'string'); };
+  const source = () => { const s = readSettings(); return typeof s.updateSource === 'string' ? s.updateSource.trim() : setupSaid() ? setupSource() : defaultSource; };
   const previous = () => { const p = readJson(path.join(installDir(), 'resources', 'app.old', 'package.json')); return (p && p.version) || ''; };
   const runtime = process.versions.electron;
 
@@ -160,6 +163,8 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     for (const k of ['app', 'setup']) if (j[k] && r.latest.signedPresent && typeof r.latest.signedPresent[k] === 'boolean') j[k].present = r.latest.signedPresent[k];
     const bad = validate(j);
     if (bad) return unusable(bad, { state: 'error', err: bad });
+    // (the other edition's release - the public build's in the company folder, say: same key, not ours)
+    if (j.build && j.build !== build) return unusable('update refused: a release of another edition (' + j.build + ')', { state: 'error', err: 'The update in that place is for another edition of the app - not installed.' });
     if (!newer(j.version, version)) { latest = null; set({ state: 'none', err: '', available: '' }); return snapshot(); }
     // a new runtime (Electron) comes with the whole setup; otherwise just the app part
     const full = !!(j.runtime && j.runtime !== runtime) || !j.app;

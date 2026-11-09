@@ -16,3 +16,5 @@ tests/export/corpus/
 tests/export/results/
 __pycache__/
 *.zip
+.greenline-export
+installer/ui.html

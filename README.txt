@@ -1,8 +1,8 @@
-PDF EDITOR - version 0.9.1
+PDF EDITOR - version 0.9.2
 ==========================
 
 INSTALL IT
-  Run "PDF Editor Setup 0.9.1.exe" (one file). Install puts it in your own Programs
+  Run "PDF Editor Setup 0.9.2.exe" (one file). Install puts it in your own Programs
   folder - no admin rights - with a Start menu shortcut, a desktop shortcut and PDF
   Editor listed in "Open with" for PDFs. Options: install for everyone on the PC
   (asks for admin rights; Program Files), another folder, no desktop shortcut, not
@@ -11,14 +11,14 @@ INSTALL IT
   (as \\server\share, not a drive letter). Your settings and keys survive reinstalls.
   Remove: Windows Settings > Apps > PDF Editor > Uninstall (or "PDF Editor Setup.exe"
   in the app folder). Optionally removes your settings too; your PDFs are never touched.
-  For IT: "PDF Editor Setup 0.9.1.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
+  For IT: "PDF Editor Setup 0.9.2.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
   [--no-desktop] [--no-open-with] [--updates "\\server\share\PDF Editor"];
   uninstall: "<app folder>\PDF Editor Setup.exe" --uninstall --silent. Log:
   %TEMP%\PDF Editor Setup.log.
   Windows may warn on first run ("Windows protected your PC" > More info > Run anyway)
   because the setup isn't signed with a company code-signing certificate.
   If the setup window stays empty, it switches to plain Windows prompts by itself after
-  a few seconds; "PDF Editor Setup 0.9.1.exe" --plain uses the plain prompts straight away.
+  a few seconds; "PDF Editor Setup 0.9.2.exe" --plain uses the plain prompts straight away.
 
 UPDATES
   An installed copy looks in its updates folder for a newer version at start and every
@@ -54,9 +54,13 @@ REPORTING PROBLEMS
   file names), never the PDFs. Away from the network they wait on the PC and go later;
   Settings > Help shows how many are waiting. The share needs one permission for this:
   users may create files in <updates folder>\reports.
-  With updates from the web nothing is sent by itself: reports stay on the PC, and Report a
-  problem opens a new issue on GitHub in your browser with your words and the version filled
-  in (no user or PC name, no log) - you press Submit there.
+  The public download (GitHub) sends reports anonymously instead, to the developer's own server:
+  Report a problem sends your words (and the picture, if kept); crash reports only once you turn
+  them on in Settings > Help. Taken out before sending: your user name, PC name, file names,
+  folders and paths; the time is rounded to the hour; never the PDF files (the picture, if
+  kept, shows what is on screen). Settings > Help shows an example of exactly what goes. The
+  receiver runs on Cloudflare (which sees the internet address; the receiver doesn't keep it);
+  reports are kept 6 months.
 
 PUBLISHING A NEW VERSION (for whoever looks after the share)
   Each version comes as a folder "publish-v<version>": latest.json, app-v<version>.zip,

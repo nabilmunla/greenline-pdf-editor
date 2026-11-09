@@ -6,6 +6,7 @@
 // Files are read by the engines straight from disk, on demand.
 import { EngineClient } from '../engine/rpc';
 import { gcc } from './api';
+import { APP_NAME } from './brand';
 
 let started: Promise<void> | null = null;
 export const renderers: EngineClient[] = [];
@@ -36,14 +37,14 @@ window.addEventListener('message', (e: MessageEvent) => {
     if (k >= 0 && renderers.length > 1) {
       renderers.splice(k, 1);
       c.fail(c.name + ' was switched off');
-      window.dispatchEvent(new CustomEvent('gcc-engine-gaveup', { detail: 'One of the drawing engines kept stopping and was switched off – the others carry on (pages may draw a little slower). Closing PDF Editor and opening it again brings it back.' }));
+      window.dispatchEvent(new CustomEvent('gcc-engine-gaveup', { detail: `One of the drawing engines kept stopping and was switched off – the others carry on (pages may draw a little slower). Closing ${APP_NAME} and opening it again brings it back.` }));
       return;
     }
     // (the editing engine holds the open files: without it nothing can be saved - the recovery
     // copies written so far bring the changes back after a restart)
     const msg = `The ${c.name.toLowerCase()} keeps stopping (${e.data.code}), so it was not started again. ` + (c === editor
-      ? 'Close PDF Editor and open it again – files with unsaved changes are offered back from their recovery copies.'
-      : 'Save your work, then close PDF Editor and open it again.');
+      ? `Close ${APP_NAME} and open it again – files with unsaved changes are offered back from their recovery copies.`
+      : `Save your work, then close ${APP_NAME} and open it again.`);
     c.fail(msg);
     window.dispatchEvent(new CustomEvent('gcc-engine-gaveup', { detail: msg }));
     return;
@@ -83,8 +84,8 @@ async function firstAnswer(c: EngineClient, until: number): Promise<void> {
       if ((e as { timeout?: boolean }).timeout || tries >= 4) {
         gcc.log(`${c.name} did not start: ${(e as Error).message || e}`);
         throw new Error((e as { timeout?: boolean }).timeout
-          ? 'The PDF engines did not start within two minutes. Close PDF Editor and open it again. If it happens again, your antivirus may be holding the program\'s files.'
-          : `The PDF engines could not start (${String((e as Error).message || e).slice(0, 160)}). Close PDF Editor and open it again.`);
+          ? `The PDF engines did not start within two minutes. Close ${APP_NAME} and open it again. If it happens again, your antivirus may be holding the program's files.`
+          : `The PDF engines could not start (${String((e as Error).message || e).slice(0, 160)}). Close ${APP_NAME} and open it again.`);
       }
       gcc.log(`${c.name} failed to start (try ${tries}): ${(e as Error).message || e}`);
       // (the app starts a new engine 1.5 s after one dies on starting up)

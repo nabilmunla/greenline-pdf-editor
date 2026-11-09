@@ -160,7 +160,7 @@ p { margin: 0; color: var(--text-2); }
       </div>
       <span class="lab">Updates from</span>
       <div class="field"><input id="o-src" spellcheck="false" placeholder="No automatic updates"><button class="btn sm" id="o-srcb">Browse…</button></div>
-      <span class="hint">Where new versions are published. Empty: no automatic updates.</span>
+      <span class="hint">Where new versions are published (a shared folder or a web address). Empty: no automatic updates.</span>
     </div>
     <div class="err" id="o-err"></div>
     <div class="grow"></div>
@@ -272,7 +272,8 @@ function summary() {
   const sc = ['Start menu'];
   if (O.desktop) sc.push('desktop');
   rows.push([ICON.links, 'Shortcuts: ' + sc.join(' and '), O.openWith ? 'Listed in "Open with" for PDF files' : 'Not linked to PDF files']);
-  rows.push([ICON.upd, O.source ? 'Updates from the shared folder' : 'No automatic updates', O.source || 'Choose a folder under Options to get new versions automatically']);
+  const web = /^https?:\/\//i.test(O.source || '');
+  rows.push([ICON.upd, !O.source ? 'No automatic updates' : web ? 'Updates from the download page' : 'Updates from the shared folder', O.source || 'Choose a folder under Options to get new versions automatically']);
   $('w-card').innerHTML = rows.map((r) => '<div class="row">' + r[0] + '<div class="t"><div class="k">' + esc(r[1]) + '</div><div class="v">' + esc(r[2]) + '</div></div></div>').join('');
 }
 

@@ -5,9 +5,9 @@
 package main
 
 import (
-	"net/url"
 	_ "embed"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,7 +202,7 @@ func (u *ui) run() bool {
 	var wa rect
 	procSystemParametersInfoW.Call(0x0030 /*SPI_GETWORKAREA*/, 0, uintptr(unsafe.Pointer(&wa)), 0)
 	x, y := wa.left+(wa.right-wa.left-w)/2, wa.top+(wa.bottom-wa.top-h)/2
-	title, _ := windows.UTF16PtrFromString("PDF Editor Setup")
+	title, _ := windows.UTF16PtrFromString(displayName + " Setup")
 	const style = 0x80000000 /*POPUP*/ | 0x00C00000 /*CAPTION*/ | 0x00080000 /*SYSMENU*/ | 0x00020000 /*MINIMIZEBOX*/
 	hwnd, _, _ := procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(cn)), uintptr(unsafe.Pointer(title)), style, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 0, 0, hinst, 0)
 	if hwnd == 0 {
@@ -278,7 +278,13 @@ func (u *ui) run() bool {
 	// case "ready" gets lost. A page that never starts at all (WebView2 broken by a policy, an
 	// antivirus or a graphics driver) must not leave an empty window: it is closed and the plain
 	// Windows prompts take over.
-	time.AfterFunc(4*time.Second, func() { u.dispatch(func() { if u.started { u.show() } }) })
+	time.AfterFunc(4*time.Second, func() {
+		u.dispatch(func() {
+			if u.started {
+				u.show()
+			}
+		})
+	})
 	time.AfterFunc(9*time.Second, func() {
 		u.dispatch(func() {
 			if u.started || u.hwnd == 0 {
@@ -466,7 +472,7 @@ func (u *ui) onMessage(msg string) {
 	case "browse":
 		kind, cur := r.str(0), r.str(1)
 		u.dispatch(func() {
-			title := "Choose where to install PDF Editor"
+			title := "Choose where to install " + displayName
 			if kind == "source" {
 				title = "Choose the folder where new versions are published"
 			}
@@ -541,9 +547,9 @@ func (u *ui) onMessage(msg string) {
 
 func fallbackInstall(p *Payload, st UIState) int {
 	o := st.Opts
-	what := "Install PDF Editor " + st.Version + " for you (no admin rights needed)?\n\nFolder: " + o.Dir
+	what := "Install " + displayName + " " + st.Version + " for you (no admin rights needed)?\n\nFolder: " + o.Dir
 	if st.Existing != nil {
-		what = "Update PDF Editor " + st.Existing.Version + " to " + st.Version + "?\nYour settings stay.\n\nFolder: " + o.Dir
+		what = "Update " + displayName + " " + st.Existing.Version + " to " + st.Version + "?\nYour settings stay.\n\nFolder: " + o.Dir
 	}
 	if messageBox(what, mbYesNo|mbInfo) != idYes {
 		return 1
@@ -552,40 +558,40 @@ func fallbackInstall(p *Payload, st UIState) int {
 		err := runAs(p, Job{Kind: "install", Opts: o}, needsElevation(o.Dir, o.Scope), func(float64, string) {})
 		if err == errRunning {
 			// (no one to answer - an automated run - would mean asking for ever: it stops)
-			if !noDialogs() && messageBox("PDF Editor is open. Close it, then press Yes to continue.", mbYesNo|mbWarn) == idYes {
+			if !noDialogs() && messageBox(displayName+" is open. Close it, then press Yes to continue.", mbYesNo|mbWarn) == idYes {
 				continue
 			}
 			logf("install: PDF Editor is open")
 			return 1
 		}
 		if err != nil {
-			messageBox("PDF Editor couldn't be installed:\n\n"+err.Error(), mbError)
+			messageBox(displayName+" couldn't be installed:\n\n"+err.Error(), mbError)
 			return 1
 		}
 		break
 	}
-	if messageBox("PDF Editor is installed. Open it now?", mbYesNo|mbInfo) == idYes {
+	if messageBox(displayName+" is installed. Open it now?", mbYesNo|mbInfo) == idYes {
 		_ = launchApp(filepath.Join(o.Dir, exeName))
 	}
 	return 0
 }
 
 func fallbackUninstall(dir, scope string) int {
-	if messageBox("Remove PDF Editor from this PC?\n\n"+dir, mbYesNo|mbWarn) != idYes {
+	if messageBox("Remove "+displayName+" from this PC?\n\n"+dir, mbYesNo|mbWarn) != idYes {
 		return 1
 	}
-	removeData := messageBox("Also remove your PDF Editor settings, recent files list, saved AI keys, backups of saved files and copies of unsaved work?", mbYesNo|mbInfo) == idYes
+	removeData := messageBox("Also remove your "+displayName+" settings, recent files list, saved AI keys, backups of saved files and copies of unsaved work?", mbYesNo|mbInfo) == idYes
 	for {
 		err := runAs(nil, Job{Kind: "uninstall", Dir: dir}, needsElevation(dir, scope), func(float64, string) {})
 		if err == errRunning {
-			if !noDialogs() && messageBox("PDF Editor is open. Close it, then press Yes to continue.", mbYesNo|mbWarn) == idYes {
+			if !noDialogs() && messageBox(displayName+" is open. Close it, then press Yes to continue.", mbYesNo|mbWarn) == idYes {
 				continue
 			}
 			logf("uninstall: PDF Editor is open")
 			return 1
 		}
 		if err != nil {
-			messageBox("PDF Editor couldn't be removed completely:\n\n"+err.Error(), mbError)
+			messageBox(displayName+" couldn't be removed completely:\n\n"+err.Error(), mbError)
 			return 1
 		}
 		break
@@ -593,6 +599,6 @@ func fallbackUninstall(dir, scope string) int {
 	if removeData {
 		removeUserData()
 	}
-	messageBox("PDF Editor has been removed.", mbInfo)
+	messageBox(displayName+" has been removed.", mbInfo)
 	return 0
 }

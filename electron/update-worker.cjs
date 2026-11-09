@@ -4,6 +4,10 @@
 //   check <folder | web address>    -> { ok, latest } | { ok: false, reach, err }
 //   copy <src | url> <dst> <size>   -> { progress } ..., { done, sha } | { ok: false, err }
 //   put <queue> <folder>            -> { ok, done: [names copied to <folder>\reports] }
+//   post <url> <queue> <crashesSince> [<words file>] -> { sent: [names] } per report, then { ok, done }:
+//                                      reports sent anonymously to the
+//                                      public build's receiver (problem reports always; crash reports
+//                                      made from <crashesSince> (ms) on - 0 = none)
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -12,7 +16,7 @@ const feed = require('./feed.cjs');
 
 const port = process.parentPort;
 const send = (m) => { try { port.postMessage(m); } catch (_) { /* parent gone */ } };
-const [cmd, a, b, c] = process.argv.slice(2);
+const [cmd, a, b, c, d] = process.argv.slice(2);
 
 function check(dir) {
   try {
@@ -154,7 +158,46 @@ async function copyWeb(url, dst, size) {
   });
 }
 
-if (cmd === 'check' && feed.isWeb(a)) checkWeb(a).finally(() => setTimeout(() => process.exit(0), 50));
+// ---------------------------------------------------------------- anonymous reports (public build)
+async function post(url, queue, since, wordsFile) {
+  const anon = require('./anon.cjs');
+  const os = require('os');
+  let who = { user: '', pc: '' };
+  try { who = { user: os.userInfo().username, pc: os.hostname() }; } catch (_) { /* no names to take out */ }
+  // (names known to be private on this PC - the recent files' names and folders: reports.cjs)
+  try { if (wordsFile) who.words = JSON.parse(fs.readFileSync(wordsFile, 'utf8')); } catch (_) { /* none */ }
+  const from = Number(since) || 0;
+  const done = [];
+  let names = [];
+  try { names = fs.readdirSync(queue).filter((n) => n.endsWith('.json')).sort(); } catch (e) { return send({ ok: false, err: e.code || String(e.message || e), done }); }
+  for (const n of names) {
+    let rep;
+    try { rep = JSON.parse(fs.readFileSync(path.join(queue, n), 'utf8')); } catch (_) { continue; }
+    // crash reports only with the person's say-so, and only those made since they said so
+    if (rep.kind !== 'problem' && !(from && Date.parse(rep.time) >= from)) continue;
+    const body = anon.anonymize(rep, who);
+    const png = rep.kind === 'problem' && rep.screenshot ? path.join(queue, path.basename(String(rep.screenshot))) : '';
+    if (png) { try { const b = fs.readFileSync(png); if (b.length <= 1500000) body.screenshot = b.toString('base64'); } catch (_) { /* gone */ } }
+    let res;
+    try {
+      let f = null;
+      try { const { net } = require('electron'); if (net && typeof net.fetch === 'function') f = net.fetch; } catch (_) { /* not here */ }
+      // (the custom header: a web page can't send one without asking first - so a site can't make
+      // its visitors' browsers post reports; the receiver refuses reports without it)
+      res = await (f || fetch)(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Report-Client': 'pdf-editor' }, body: JSON.stringify(body) });
+    } catch (e) { return send({ ok: false, err: String((e && (e.code || e.message)) || e), done }); }
+    // (refused for good - too big, not a report: dropped, or it would block the queue forever)
+    if (res.status === 400 || res.status === 413) { done.push(n); if (png) done.push(path.basename(png)); send({ sent: png ? [n, path.basename(png)] : [n] }); continue; }
+    if (!res.ok) return send({ ok: false, err: 'HTTP ' + res.status, done });
+    done.push(n);
+    if (png) done.push(path.basename(png));
+    send({ sent: png ? [n, path.basename(png)] : [n] });
+  }
+  send({ ok: true, done });
+}
+
+if (cmd === 'post') post(a, b, c, d).finally(() => setTimeout(() => process.exit(0), 50));
+else if (cmd === 'check' && feed.isWeb(a)) checkWeb(a).finally(() => setTimeout(() => process.exit(0), 50));
 else if (cmd === 'check') { check(a); setTimeout(() => process.exit(0), 50); }
 else if (cmd === 'put') { put(a, b); setTimeout(() => process.exit(0), 50); }
 else if (cmd === 'copy' && feed.isWeb(a)) copyWeb(a, b, c);

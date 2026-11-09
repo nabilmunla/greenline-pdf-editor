@@ -29,7 +29,7 @@ type Options struct {
 	Source   string `json:"source"` // updates folder; "" = no automatic updates
 }
 
-var errRunning = errors.New("PDF Editor is open")
+var errRunning = errors.New(displayName + " is open")
 
 type progressFn func(pct float64, stage string)
 
@@ -150,7 +150,9 @@ func doInstall(p *Payload, o Options, prog progressFn) error {
 		if err := writeJSON(filepath.Join(tmp, "install.json"), ii); err != nil {
 			return err
 		}
-		if strings.TrimSpace(o.Source) != "" {
+		// (an empty one too, where the build has an address of its own: "no updates" was chosen -
+		// without the file the app would go to that address anyway)
+		if strings.TrimSpace(o.Source) != "" || defaultSource != "" {
 			if err := writeJSON(filepath.Join(tmp, "update.json"), UpdateConf{Source: strings.TrimSpace(o.Source)}); err != nil {
 				return err
 			}
@@ -178,7 +180,7 @@ func doInstall(p *Payload, o Options, prog progressFn) error {
 func doUninstall(dir string, prog progressFn) error {
 	dir = filepath.Clean(dir)
 	if !looksInstalled(dir) {
-		return fmt.Errorf("%s doesn't look like a PDF Editor installation - nothing was removed", dir)
+		return fmt.Errorf("%s doesn't look like a "+displayName+" installation - nothing was removed", dir)
 	}
 	if exeLocked(filepath.Join(dir, exeName)) {
 		return errRunning
@@ -247,7 +249,7 @@ func runJob(p *Payload, j Job, prog progressFn) error {
 		// (checked here too, with admin rights: the job file came through the temp folder - it only
 		// ever changes a PDF Editor install's own app part)
 		if !looksInstalled(j.Dir) {
-			return fmt.Errorf("%s doesn't look like a PDF Editor installation - nothing was changed", j.Dir)
+			return fmt.Errorf("%s doesn't look like a "+displayName+" installation - nothing was changed", j.Dir)
 		}
 		// (checked here too: an elevated helper also sees copies other people on this PC have open -
 		// and our own copy's last processes still ending: up to 0.8.6 this looked once, a moment
@@ -391,7 +393,12 @@ func main() {
 		// from Downloads, the setup finds none of its own - update.json was dropped and the copy
 		// stopped looking for new versions without a word)
 		if o.Source == "" {
-			o.Source = keptSource(orDefault(o.Dir, o.Scope))
+			if kept, said := keptSourceOf(orDefault(o.Dir, o.Scope)); said {
+				o.Source = kept
+			} else {
+				// (the public build: its download page - nobody should have to know what to type)
+				o.Source = defaultSource
+			}
 		}
 		if o.Scope == "user" && otherAdmin() {
 			// (started with another account's admin rights: "just me" would be that account)
@@ -439,12 +446,19 @@ func orDefault(dir, scope string) string {
 
 // keptSource: the updates folder an install in dir already uses ("" = none, or no install there).
 func keptSource(dir string) string {
-	if !looksInstalled(dir) {
-		return ""
+	src, _ := keptSourceOf(dir)
+	return src
+}
+
+// keptSourceOf: as keptSource, and whether the install says so itself (its update.json - "" there
+// means no updates, chosen; no update.json means nothing was chosen)
+func keptSourceOf(dir string) (string, bool) {
+	if !looksInstalled(dir) || !fileExists(filepath.Join(dir, "update.json")) {
+		return "", false
 	}
 	var uc UpdateConf
 	_ = readJSON(filepath.Join(dir, "update.json"), &uc)
-	return strings.TrimSpace(uc.Source)
+	return strings.TrimSpace(uc.Source), true
 }
 
 // detectSource: started from the company's updates folder (it holds latest.json)? Then that's
@@ -515,16 +529,16 @@ func cmdApply(p *Payload, zip, sha, ver, dir string, pid int, relaunch bool) int
 	if !waitClosed(dir, pid) {
 		// opened again meanwhile (or someone else has it open): not now - the app offers the
 		// downloaded update again next time
-		return later("PDF Editor is open again")
+		return later(displayName + " is open again")
 	}
 	err := runAs(p, Job{Kind: "apply", Dir: dir, Zip: zip, Sha: sha, Version: ver}, needsElevation(filepath.Join(dir, "resources"), ""), func(float64, string) {})
 	if errors.Is(err, errRunning) {
 		// (an install for everyone: also a copy someone else on this PC has open)
-		return later("PDF Editor is open")
+		return later(displayName + " is open")
 	}
 	if err != nil {
 		logf("apply failed: %v", err)
-		messageBox("PDF Editor couldn't be updated:\n\n"+err.Error()+"\n\nThe version you had is unchanged.", mbWarn)
+		messageBox(displayName+" couldn't be updated:\n\n"+err.Error()+"\n\nThe version you had is unchanged.", mbWarn)
 	} else {
 		logf("applied %s", ver)
 		_ = os.Remove(zip)
@@ -540,13 +554,13 @@ func cmdApply(p *Payload, zip, sha, ver, dir string, pid int, relaunch bool) int
 
 func cmdRollback(p *Payload, dir string, pid int, relaunch bool) int {
 	if !waitClosed(dir, pid) {
-		messageBox("PDF Editor is still open, so it can't go back to the previous version now. Close it and try again.", mbWarn)
+		messageBox(displayName+" is still open, so it can't go back to the previous version now. Close it and try again.", mbWarn)
 		return 3
 	}
 	err := runAs(p, Job{Kind: "rollback", Dir: dir}, needsElevation(filepath.Join(dir, "resources"), ""), func(float64, string) {})
 	if err != nil {
 		logf("rollback failed: %v", err)
-		messageBox("PDF Editor couldn't go back to the previous version:\n\n"+err.Error(), mbWarn)
+		messageBox(displayName+" couldn't go back to the previous version:\n\n"+err.Error(), mbWarn)
 	}
 	if relaunch {
 		_ = launchApp(filepath.Join(dir, exeName))
@@ -575,7 +589,7 @@ func cmdUpdate(p *Payload, dir string, pid int, relaunch bool) int {
 	err = runAs(p, Job{Kind: "install", Opts: o}, needsElevation(dir, ii.Scope), func(float64, string) {})
 	if err != nil {
 		logf("update failed: %v", err)
-		messageBox("PDF Editor couldn't be updated:\n\n"+err.Error()+"\n\nThe version you had is unchanged.", mbWarn)
+		messageBox(displayName+" couldn't be updated:\n\n"+err.Error()+"\n\nThe version you had is unchanged.", mbWarn)
 	}
 	if relaunch {
 		_ = launchApp(filepath.Join(dir, exeName))
@@ -591,7 +605,7 @@ func cmdUpdate(p *Payload, dir string, pid int, relaunch bool) int {
 func cmdUninstall(self, dir string, silent, tempCopy bool) int {
 	if !looksInstalled(dir) {
 		if !silent {
-			messageBox("PDF Editor isn't installed here:\n"+dir, mbInfo)
+			messageBox(displayName+" isn't installed here:\n"+dir, mbInfo)
 		}
 		return 2
 	}
@@ -659,7 +673,8 @@ type Existing struct {
 func installState(p *Payload, self string) UIState {
 	st := UIState{Mode: "install", Version: p.Meta.Version, Dirs: map[string]string{"user": defaultDir("user"), "machine": defaultDir("machine")}}
 	st.Source = detectSource(self)
-	st.Opts = Options{Scope: "user", Dir: st.Dirs["user"], Desktop: true, OpenWith: true, Source: st.Source}
+	// (the public build: its download page filled in - nobody should have to know what to type)
+	st.Opts = Options{Scope: "user", Dir: st.Dirs["user"], Desktop: true, OpenWith: true, Source: orIf(st.Source, defaultSource)}
 	if otherAdmin() {
 		// (started with another account's admin rights: "just me" would mean that account)
 		st.Opts.Scope, st.Opts.Dir = "machine", st.Dirs["machine"]
@@ -668,7 +683,11 @@ func installState(p *Payload, self string) UIState {
 		var uc UpdateConf
 		_ = readJSON(filepath.Join(dir, "update.json"), &uc)
 		st.Existing = &Existing{Version: ii.Version, Dir: dir, Scope: ii.Scope, Source: uc.Source}
-		st.Opts = Options{Scope: ii.Scope, Dir: dir, Desktop: ii.Desktop, OpenWith: ii.OpenWith, Source: uc.Source}
+		kept, said := keptSourceOf(dir)
+		if !said {
+			kept = defaultSource
+		}
+		st.Opts = Options{Scope: ii.Scope, Dir: dir, Desktop: ii.Desktop, OpenWith: ii.OpenWith, Source: kept}
 		if st.Source != "" {
 			st.Opts.Source = st.Source
 		}
@@ -717,4 +736,12 @@ func fatal(msg string) {
 	logf("fatal: %s", msg)
 	messageBox(msg, mbError)
 	os.Exit(1)
+}
+
+// orIf: a, or b when a is empty
+func orIf(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

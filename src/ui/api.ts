@@ -34,7 +34,8 @@ export interface UpdateState {
   /** 'blocked' / 'setup': the setup to run instead (in the updates folder - or, from the web, its download page) */
   setupPath?: string;
 }
-export interface ReportStatus { waiting: number; folder: string; queue: string; state: 'idle' | 'sent' | 'failed' | 'nofolder' | 'web'; err: string; at: number; sent: number; /** 'web': a new GitHub issue with the report filled in */ issue?: string }
+export interface ReportStatus { waiting: number; folder: string; queue: string; state: 'idle' | 'sent' | 'failed' | 'nofolder' | 'web'; err: string; at: number; sent: number; /** 'web': a new GitHub issue with the report filled in */ issue?: string;
+  /** public build with a report receiver: reports go there anonymously; crashes: crash reports turned on */ anon?: boolean; crashes?: boolean }
 /** what's new in a version, by group ("New features", "General polishing", "Fixes") */
 export type NoteGroups = Record<string, string[]>;
 export interface UpdatedInfo { from: string; to: string; notes: string[]; groups?: NoteGroups | null; back: boolean }
@@ -133,6 +134,9 @@ export interface GccApi {
   reportCapture(): Promise<string | null>;
   reportProblem(text: string, withShot: boolean, extra?: Record<string, unknown>): Promise<ReportStatus>;
   reportStatus(): Promise<ReportStatus>;
+  /** public build: anonymous crash reports on / off; preview = what one looks like (JSON) */
+  reportCrashSharing(on: boolean): Promise<ReportStatus>;
+  reportPreview(): Promise<string>;
   reportOpenQueue(): Promise<string>;
   reportCrash(where: string, message: string, stack: string): void;
   onReports(cb: () => void): () => void;

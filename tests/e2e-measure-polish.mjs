@@ -240,6 +240,9 @@ try {
   await sleep(600);
   const tt = await E(() => document.querySelector('.totals')?.textContent || '');
   ok(/Areas: perimeters/.test(tt), 'Totals: the areas\' perimeters added up too');
+  // (Totals put away again: on a slow machine it was still opening when the count clicks came, and took them)
+  await win.locator('.ribbon .rb', { hasText: 'Totals' }).click();
+  for (let i = 0; i < 20 && await win.locator('.totals').count(); i++) await sleep(150);
 
   // ---------------------------------------------------------------- count: Backspace
   await tool('m-count');

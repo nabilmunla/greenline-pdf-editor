@@ -29,8 +29,13 @@ const pkg = crypto.randomBytes(400000);
 
 // the web server: /feed/latest.json + /feed/<package>; what it answers is set per step
 let files = {}; const hits = [];
+const posts = [];
 const server = http.createServer((req, res) => {
   hits.push(req.url);
+  if (req.method === 'POST' && req.url === '/report') {
+    let body = ''; req.on('data', (d) => { body += d; }); req.on('end', () => { posts.push(JSON.parse(body)); res.writeHead(200); res.end('Thanks'); });
+    return;
+  }
   const f = files[decodeURIComponent(req.url)];
   if (!f) { res.writeHead(404); res.end('not found'); return; }
   res.writeHead(200, { 'Content-Length': f.length });
@@ -98,6 +103,16 @@ try {
   s = await waitState(win, ['ready', 'error'], 10000);
   ok(s.state === 'error' && !existsSync(local), 'more bytes than latest.json says: stopped (' + (s.err || s.state) + ')');
 
+  // 3b. a release of the other edition (same signing key): refused
+  publish({ build: 'greenline' });
+  await win.evaluate(() => window.gcc.updateSource(null));
+  s = await check(win);
+  ok(s.state === 'error' && /another edition/.test(s.err || ''), 'a release of the other edition is refused: ' + (s.err || s.state));
+  publish({ build: 'company' });
+  await win.evaluate(() => window.gcc.updateSource(null));
+  s = await check(win);
+  ok(s.state === 'available', 'its own edition is taken: ' + s.state);
+
   // 4. nothing published yet
   files = {};
   await win.evaluate(() => window.gcc.updateSource(null));
@@ -114,6 +129,38 @@ try {
   // 6. Report a problem: kept on this PC, nothing sent (no GitHub address here: no issue page)
   const rep = await win.evaluate(() => window.gcc.reportProblem('The ruler is upside down', false, { openFiles: 0 }));
   ok(rep.state === 'web' && !rep.issue && rep.waiting === 1 && !hits.some((h) => /report/i.test(h)), 'a report stays on this PC: ' + JSON.stringify({ state: rep.state, waiting: rep.waiting }));
+  await app.close().catch(() => {});
+
+  // 6b. the public build's receiver: Report a problem goes anonymously; crash reports only once
+  // turned on, and only those made from then on
+  ({ app, win } = await launch({ PDFED_REPORT_ENDPOINT: FEED.replace('/feed', '/report') }));
+  const me = os.userInfo().username, pcName = os.hostname();
+  let rs = await win.evaluate(() => window.gcc.reportStatus());
+  ok(rs.anon === true && rs.crashes === false, 'with a receiver: anonymous, crash reports off to begin with');
+  rs = await win.evaluate((t) => window.gcc.reportProblem(t, false, { openFiles: 1 }), `Ruler wrong in C:\\Users\\${me}\\Desktop\\Tower.pdf - ${me} on ${pcName}`);
+  const p1 = posts[posts.length - 1] || {};
+  ok(rs.state === 'sent' && rs.anon && posts.length === 1 && p1.kind === 'problem', 'Report a problem: sent to the receiver (' + rs.state + ')');
+  const blob = JSON.stringify(p1);
+  ok(!blob.includes(me) && !blob.includes(pcName) && /Ruler wrong/.test(p1.text) && !('user' in p1) && !('pc' in p1) && /:00:00\.000Z$/.test(p1.time || ''), 'no user or PC name, the time to the hour, the words kept');
+  await win.evaluate(() => window.gcc.reportCrash('window', 'TypeError: before consent', ''));
+  await sleep(4500);
+  await win.evaluate(() => window.gcc.reportFlush ? window.gcc.reportFlush() : null);
+  ok(posts.length === 1, 'a crash before the box is ticked: not sent');
+  rs = await win.evaluate(() => window.gcc.reportCrashSharing(true));
+  ok(rs.crashes === true, 'crash reports turned on');
+  await sleep(3000);
+  ok(posts.length === 1, 'the crash from before is still not sent');
+  await win.evaluate(() => window.gcc.reportCrash('window', 'TypeError: after consent at C:\\x\\y.pdf', ''));
+  for (let i = 0; i < 40 && posts.length < 2; i++) await sleep(250);
+  ok(posts.length === 2 && posts[1].kind === 'crash' && /after consent/.test(posts[1].message) && !posts[1].message.includes('y.pdf'), 'a crash after: sent, path taken out (' + (posts[1] && posts[1].message) + ')');
+  const ex = await win.evaluate(() => window.gcc.reportPreview());
+  ok(ex.includes('"kind": "crash"') && !ex.includes(me) && !ex.includes(pcName), 'Settings shows an example of what is sent');
+  await win.locator('.tb-btn[title="Settings"]').click();
+  await win.locator('.modal .anon-what summary').click();
+  await win.locator('.modal .anon-what button', { hasText: 'Show an example' }).click();
+  const shown = await win.locator('.modal .anon-example').waitFor({ timeout: 4000 }).then(() => true, () => false);
+  const ticked = await win.locator('.modal label.check', { hasText: 'Send anonymous crash reports' }).locator('input').isChecked().catch(() => false);
+  ok(shown && ticked, `Settings > Help: the switch (${ticked}), what is sent, the example (${shown})`);
   await app.close().catch(() => {});
 
   // 7. no server at all: quietly "not reachable", quickly
@@ -133,6 +180,15 @@ try {
   ok(s.source === '/some/folder' && !s.web, 'a folder chosen in Settings comes first');
   s = await win.evaluate(() => window.gcc.updateSource(null));
   ok(s.source === 'https://github.com/someone/greenline-pdf-editor', 'and back to the build\'s own address');
+  await app.close().catch(() => {});
+  // "no updates" chosen in the setup (update.json with an empty source): the build's own address isn't used
+  writeFileSync(join(INST, 'update.json'), JSON.stringify({ source: '' }));
+  ({ app, win } = await launch({ PDFED_UPDATE_FEED: 'https://github.com/someone/greenline-pdf-editor' }));
+  s = await state(win);
+  ok(s.source === '' && (await check(win)).state === 'off', '"no updates" chosen in the setup stays so (' + JSON.stringify(s.source) + ')');
+  rmSync(join(INST, 'update.json'), { force: true });
+  await app.close().catch(() => {});
+  ({ app, win } = await launch({ PDFED_UPDATE_FEED: 'https://github.com/someone/greenline-pdf-editor' }));
   const rep2 = await win.evaluate(() => window.gcc.reportProblem('Crash when opening a sheet\nSecond line', false, { openFiles: 2 }));
   const body = rep2.issue ? decodeURIComponent(rep2.issue.split('body=')[1]) : '';
   ok(rep2.state === 'web' && rep2.issue.startsWith('https://github.com/someone/greenline-pdf-editor/issues/new?title=Crash%20when%20opening%20a%20sheet&body='), 'Report a problem: a new GitHub issue with the text');

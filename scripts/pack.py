@@ -16,7 +16,7 @@ comb_dir = tempfile.mkdtemp(prefix='pdfed-combine-')
 comb = os.path.join(comb_dir, 'PDF Editor Combine.exe')
 genv = dict(os.environ, GOOS='windows', GOARCH='amd64', CGO_ENABLED='0', GOPROXY='off', GOFLAGS='-mod=mod', GOTOOLCHAIN='local', GOSUMDB='off')
 subprocess.run(['go', 'build', '-trimpath', '-ldflags', f'-s -w -H windowsgui -X main.version={ver}', '-o', comb, './combine'], cwd='installer', env=genv, check=True)
-subprocess.run(['node', os.path.join('installer', 'patch-res.mjs'), comb, os.path.join('pack', 'app.ico'), ver, 'PDF Editor Combine', 'PDF Editor Combine.exe'], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(['node', os.path.join('installer', 'patch-res.mjs'), comb, os.path.join('pack', 'app.ico'), ver, (pkg.get('displayName') or 'PDF Editor') + ' Combine', 'PDF Editor Combine.exe'], check=True, stdout=subprocess.DEVNULL)
 app = os.path.join(out, f'app-v{ver}.zip')
 with zipfile.ZipFile(app, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     z.write(comb, 'bin/PDF Editor Combine.exe')
@@ -28,9 +28,9 @@ with zipfile.ZipFile(app, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     # engine processes (+ MuPDF next to them)
     for root, _, files in os.walk('electron/engines'):
         for f in files: z.write(os.path.join(root, f), os.path.join(root, f).replace(os.sep, '/'))
-    # (updateFeed: where a build looks for new versions when no updates folder is set - the public
-    # build's GitHub repository; the company build has none)
-    z.writestr('package.json', json.dumps({'name': pkg['name'], 'productName': pkg['productName'], 'version': ver, 'main': 'electron/main.cjs', 'private': True, **({'updateFeed': pkg['updateFeed']} if pkg.get('updateFeed') else {})}, indent=2))
+    # (updateFeed / reportEndpoint: where the public build looks for new versions when no updates
+    # folder is set, and where its anonymous reports go; the company build has neither)
+    z.writestr('package.json', json.dumps({'name': pkg['name'], 'productName': pkg['productName'], 'version': ver, 'main': 'electron/main.cjs', 'private': True, **{k: pkg[k] for k in ('updateFeed', 'reportEndpoint', 'displayName', 'brand') if pkg.get(k)}}, indent=2))
 src = os.path.join(out, f'source-v{ver}.zip')
 # no sample drawings or documents of any kind go out with the source (tests/data, tests/real...),
 # no build output, no git folders (also inside installer/third_party)

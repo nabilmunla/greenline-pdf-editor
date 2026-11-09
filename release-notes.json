@@ -1,4 +1,15 @@
 {
+  "0.9.2": {
+    "New features": [
+      "Report a problem no longer needs a GitHub account: your words (and the picture of the window, if you keep it) go to the developer anonymously - no name, no PC name, no file names, never your PDF files",
+      "Anonymous crash reports, off until you turn them on in Settings › Help - which also lists exactly what is sent, with an example"
+    ],
+    "General polishing": [
+      "Shows its full name - Greenline PDF Editor - in the title bar, taskbar, Start menu, Windows' list of apps and the setup, with its own green",
+      "The setup fills in where new versions come from by itself (this page); a shortcut left from 0.9.1 under the old name is removed",
+      "The Settings button is a cog you can recognise (it looked like a sun)"
+    ]
+  },
   "0.9.1": {
     "New features": [
       "Updates can also come from a web address - the public download page on GitHub - with the same signature and checksum checks; there, Report a problem opens a GitHub issue with your text"

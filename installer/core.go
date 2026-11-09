@@ -28,6 +28,14 @@ const (
 	magic     = "PDFEDSET"
 )
 
+// What people see, and where new versions come from when nothing else says (build.py sets both
+// with -X for the public build: "Greenline PDF Editor", its GitHub repository). Files, folders and
+// registry keys keep appName's name, so an install is always found again.
+var (
+	displayName   = appName
+	defaultSource = ""
+)
+
 // version of this setup build (-ldflags "-X main.version=...")
 var version = "0.0.0"
 
@@ -536,7 +544,7 @@ func applyApp(dir, zipPath, sha, want string) error {
 	}
 	if err := retry(20*time.Second, func() error { return os.Rename(cur, old) }); err != nil {
 		_ = os.RemoveAll(nw)
-		return fmt.Errorf("PDF Editor's files are still in use: %w", err)
+		return fmt.Errorf(displayName+"'s files are still in use: %w", err)
 	}
 	if err := retry(5*time.Second, func() error { return os.Rename(nw, cur) }); err != nil {
 		_ = os.Rename(old, cur)
@@ -557,7 +565,7 @@ func rollbackApp(dir string) error {
 	}
 	_ = os.RemoveAll(tmp)
 	if err := retry(20*time.Second, func() error { return os.Rename(cur, tmp) }); err != nil {
-		return fmt.Errorf("PDF Editor's files are still in use: %w", err)
+		return fmt.Errorf(displayName+"'s files are still in use: %w", err)
 	}
 	if err := os.Rename(old, cur); err != nil {
 		_ = os.Rename(tmp, cur)
