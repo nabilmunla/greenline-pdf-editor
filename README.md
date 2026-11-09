@@ -6,6 +6,8 @@
 
 500 MB merged drawing sets. A0 sheets traced from CAD with millions of lines. 1,500-page specifications. Scanned tender books. The files that make ordinary PDF editors freeze, run out of memory or quietly crash are the files Greenline was built for. Free, offline, open source.
 
+<p align="center"><img src="brand/greenline/screenshots/measure.png" width="900" alt="Greenline measuring room areas, a corridor length and a count of doors on an A1 floor plan, with the Counts and totals panel open"></p>
+
 ## Why it exists
 
 I'm an engineer in the tendering department of a main contractor. Every tender lands as a pile of huge PDFs, and I lost too many hours watching PDF programs hang on them. So I built one that doesn't: speed and stability came first, then the measuring and markup tools a tender needs.
@@ -32,6 +34,14 @@ How: pages are read from disk only as they're needed, never the whole file at on
 - **Export:** BOQs and schedules to Excel, documents to Word.
 - **Print:** A0 sheets fitted onto A3 or A4, or at actual size for drawings to scale, with a preview of every sheet.
 - **Optional:** an AI assistant (Claude or ChatGPT, with your own key) and an offline translator.
+
+<p align="center"><img src="brand/greenline/screenshots/zoom.gif" width="800" alt="Zooming from a whole A1 sheet into a 1:50 unit plan"></p>
+
+| | |
+|---|---|
+| <img src="brand/greenline/screenshots/markup.png" alt="A cloud, a callout and a text box on a unit plan"> | <img src="brand/greenline/screenshots/measure-dark.png" alt="The same take-off in the dark theme"> |
+
+<sub>The screenshots use a made-up drawing, not a real project: <a href="brand/greenline/screenshots/sample-floor-plan.pdf">try it yourself</a>.</sub>
 
 ## Private by design
 
