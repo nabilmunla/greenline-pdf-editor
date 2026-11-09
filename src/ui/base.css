@@ -35,8 +35,13 @@
 :root[data-brand='greenline'] {
   --brand-gradient: linear-gradient(100deg, #b8f5cf 0%, #7cf0a8 30%, #3ddc84 65%, #1fae63 100%);
 }
-/* (on the light start page the pale end of that green fades into the background: a deeper one) */
-:root[data-brand='greenline'] .start-hero h1 b { background: linear-gradient(100deg, #3ddc84 0%, #1fae63 45%, #13804a 100%); -webkit-background-clip: text; background-clip: text; }
+/* the wordmark ("Greenline"): the green darkens towards its end and the last third or so of the
+   final "e" melts into whatever it sits on (the top bar, the start page) - installer/build.py gives
+   the setup's header the same */
+:root[data-brand='greenline'] .brand .word b { background: linear-gradient(100deg, #b8f5cf 0%, #7cf0a8 28%, #3ddc84 58%, #1fae63 79%, #0f7a4a 90%, rgba(15, 122, 74, 0) 98%); -webkit-background-clip: text; background-clip: text; }
+/* (the light start page: the other way round - dark to light, the end fading into the page) */
+:root[data-brand='greenline'] .start-hero h1 b { background: linear-gradient(100deg, #0d6a3d 0%, #13804a 28%, #1fae63 56%, #3ddc84 78%, #7cf0a8 90%, rgba(124, 240, 168, 0) 98%); -webkit-background-clip: text; background-clip: text; }
+:root[data-brand='greenline'][data-theme='dark'] .start-hero h1 b { background: linear-gradient(100deg, #b8f5cf 0%, #7cf0a8 28%, #3ddc84 58%, #1fae63 79%, #0f7a4a 90%, rgba(15, 122, 74, 0) 98%); -webkit-background-clip: text; background-clip: text; }
 
 
 :root,

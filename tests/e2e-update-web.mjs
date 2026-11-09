@@ -186,6 +186,19 @@ try {
   ({ app, win } = await launch({ PDFED_UPDATE_FEED: 'https://github.com/someone/greenline-pdf-editor' }));
   s = await state(win);
   ok(s.source === '' && (await check(win)).state === 'off', '"no updates" chosen in the setup stays so (' + JSON.stringify(s.source) + ')');
+  await app.close().catch(() => {});
+  // the setup named a folder (0.9.2's setup took a copy of a release it was run next to): one click
+  // in Settings goes back to the build's own address
+  writeFileSync(join(INST, 'update.json'), JSON.stringify({ source: '/some/release-copy' }));
+  ({ app, win } = await launch({ PDFED_UPDATE_FEED: 'https://github.com/someone/greenline-pdf-editor' }));
+  s = await state(win);
+  ok(s.source === '/some/release-copy' && !s.ownSource, 'a folder from the setup is used (' + s.source + ')');
+  await win.locator('.tb-btn[title="Settings"]').click();
+  await win.locator('.modal .link', { hasText: 'Use the download page (default)' }).click();
+  await sleep(300);
+  s = await state(win);
+  ok(s.source === 'https://github.com/someone/greenline-pdf-editor' && s.web && await win.locator('.modal .link', { hasText: 'Use the download page (default)' }).count() === 0, 'Settings: "Use the download page (default)" goes to the build\'s own address (' + s.source + ')');
+  await win.keyboard.press('Escape');
   rmSync(join(INST, 'update.json'), { force: true });
   await app.close().catch(() => {});
   ({ app, win } = await launch({ PDFED_UPDATE_FEED: 'https://github.com/someone/greenline-pdf-editor' }));

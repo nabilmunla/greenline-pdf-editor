@@ -1,4 +1,11 @@
 {
+  "0.9.3": {
+    "General polishing": [
+      "The Greenline name's green fades into the background at its end - in the title bar, on the start page and in the setup",
+      "The setup shows its full name and green too - its wordmark and buttons were still gold",
+      "Running the setup from a folder that also holds a copy of the release no longer makes that folder the place updates come from; the setup's Options and Settings › Updates have a one-click way back to the download page"
+    ]
+  },
   "0.9.2": {
     "New features": [
       "Report a problem no longer needs a GitHub account: your words (and the picture of the window, if you keep it) go to the developer anonymously - no name, no PC name, no file names, never your PDF files",

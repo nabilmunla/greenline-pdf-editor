@@ -25,6 +25,20 @@ atexit.register(shutil.rmtree, work, True)
 
 # 1. the page of the setup window, with the app's font and logo inside it
 html = open(os.path.join(HERE, 'ui.src.html'), encoding='utf-8').read().replace('PDF Editor', NAME)
+# the public build's wordmark and colours: its first word stands out ("Greenline PDF Editor"), green
+# in place of the company's gold (the wordmark's markup splits "PDF" off, so it's done on its own)
+if ' ' in NAME:
+    lead, rest = NAME.split(' ', 1)
+    html = html.replace('<span class="word"><b>PDF</b> Editor</span>', f'<span class="word"><b>{lead}</b> {rest}</span>')
+if pkg.get('brand') == 'greenline':
+    html = html.replace('</style>', '''
+:root { --accent: #1fae63; --accent-strong: #13804a; --accent-soft: rgba(31, 174, 99, 0.18); --focus: #1fae63;
+  --brand-gradient: linear-gradient(100deg, #b8f5cf 0%, #7cf0a8 30%, #3ddc84 65%, #1fae63 100%); }
+@media (prefers-color-scheme: dark) { :root { --accent: #3ddc84; --accent-strong: #7cf0a8; --accent-soft: rgba(61, 220, 132, 0.2);
+  --focus: #3ddc84; --primary: #3ddc84; --primary-text: #062b1a; --primary-hover: #5be59a; } }
+.badge.ok { box-shadow: 0 6px 18px rgba(31, 174, 99, 0.35); }
+.word b { background: linear-gradient(100deg, #b8f5cf 0%, #7cf0a8 28%, #3ddc84 58%, #1fae63 79%, #0f7a4a 90%, rgba(15, 122, 74, 0) 98%); -webkit-background-clip: text; background-clip: text; }
+</style>''', 1)
 font = next(f for f in os.listdir(os.path.join(ROOT, 'dist', 'assets')) if f.startswith('inter-latin-wght-normal'))
 html = html.replace('{{INTER}}', base64.b64encode(open(os.path.join(ROOT, 'dist', 'assets', font), 'rb').read()).decode())
 html = html.replace('{{LOGO}}', base64.b64encode(open(os.path.join(ROOT, 'dist', 'gmark.svg'), 'rb').read()).decode())

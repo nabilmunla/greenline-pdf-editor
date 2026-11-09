@@ -159,7 +159,7 @@ p { margin: 0; color: var(--text-2); }
         <label class="chk"><input type="checkbox" id="o-open">Open PDFs with PDF Editor</label>
       </div>
       <span class="lab">Updates from</span>
-      <div class="field"><input id="o-src" spellcheck="false" placeholder="No automatic updates"><button class="btn sm" id="o-srcb">Browse…</button></div>
+      <div class="field"><input id="o-src" spellcheck="false" placeholder="No automatic updates"><button class="btn sm hidden" id="o-srcd" title="The download page this app comes from">Default</button><button class="btn sm" id="o-srcb">Browse…</button></div>
       <span class="hint">Where new versions are published (a shared folder or a web address). Empty: no automatic updates.</span>
     </div>
     <div class="err" id="o-err"></div>
@@ -305,6 +305,7 @@ function fillOptions() {
   $('o-desk').checked = O.desktop;
   $('o-open').checked = O.openWith;
   $('o-src').value = O.source || '';
+  $('o-srcd').classList.toggle('hidden', !S.feed || O.source === S.feed);
   const locked = !!S.existing;
   $('o-dir').disabled = locked; $('o-dirb').disabled = locked;
   document.querySelectorAll('#o-scope button').forEach((b) => (b.disabled = locked));
@@ -385,6 +386,8 @@ document.querySelectorAll('#o-scope button').forEach((b) => (b.onclick = () => {
   fillOptions();
 }));
 $('o-dirb').onclick = async () => { readOptions(); const p = await host('browse', 'dir', O.dir); if (p) { O.dir = p; fillOptions(); } };
+$('o-srcd').onclick = () => { readOptions(); O.source = S.feed; fillOptions(); };
+$('o-src').oninput = () => $('o-srcd').classList.toggle('hidden', !S.feed || $('o-src').value.trim() === S.feed);
 $('o-srcb').onclick = async () => { readOptions(); const p = await host('browse', 'source', O.source); if (p) { O.source = p; fillOptions(); } };
 $('d-close').onclick = () => post('close');
 $('d-open').onclick = () => post('open');

@@ -223,7 +223,7 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
           </div>
           <p className="hint">{u.web ? 'The web address new versions are published at.' : 'The shared folder where new versions are published.'} {APP_NAME} asks before downloading anything.
             {u.ownSource && u.setupSource && u.setupSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(null); setSrc(s.source); }}>Use the installer's folder</button></>}
-            {u.ownSource && !u.setupSource && u.defaultSource && u.defaultSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(null); setSrc(s.source); }}>Use the download page (default)</button></>}
+            {u.defaultSource && u.defaultSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(u.defaultSource!); setSrc(s.source); }}>Use the download page (default)</button></>}
           </p>
           <div className="hrow">
             <button className="btn sm" disabled={!u.source || u.state === 'checking' || u.state === 'downloading'} onClick={async () => { await commit(src ?? ''); await gcc.updateCheck(); }}>Check now</button>

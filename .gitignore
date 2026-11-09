@@ -4,6 +4,7 @@ electron/engines/
 public/ocr/
 public/pdfium.wasm
 public/glyphless.ttf
+installer/ui.html
 keys/
 build/
 pack/out/
@@ -17,4 +18,3 @@ tests/export/results/
 __pycache__/
 *.zip
 .greenline-export
-installer/ui.html

@@ -465,6 +465,12 @@ func keptSourceOf(dir string) (string, bool) {
 // where this copy will look for new versions - as \\server\share, not a drive letter.
 func detectSource(self string) string {
 	d := filepath.Dir(self)
+	// (the public build gets its updates from its download page: a folder with a latest.json next
+	// to its setup - a copy of a release, a download folder - isn't taken for an updates folder;
+	// one can still be chosen under Options)
+	if defaultSource != "" {
+		return ""
+	}
 	if fileExists(filepath.Join(d, "latest.json")) {
 		return toUNC(d)
 	}
@@ -661,6 +667,7 @@ type UIState struct {
 	Dirs     map[string]string `json:"dirs"`
 	Source   string            `json:"source"`
 	Opts     Options           `json:"opts"`
+	Feed     string            `json:"feed"` // the build's own updates address ("" = the company build)
 }
 
 type Existing struct {
@@ -671,7 +678,7 @@ type Existing struct {
 }
 
 func installState(p *Payload, self string) UIState {
-	st := UIState{Mode: "install", Version: p.Meta.Version, Dirs: map[string]string{"user": defaultDir("user"), "machine": defaultDir("machine")}}
+	st := UIState{Mode: "install", Version: p.Meta.Version, Dirs: map[string]string{"user": defaultDir("user"), "machine": defaultDir("machine")}, Feed: defaultSource}
 	st.Source = detectSource(self)
 	// (the public build: its download page filled in - nobody should have to know what to type)
 	st.Opts = Options{Scope: "user", Dir: st.Dirs["user"], Desktop: true, OpenWith: true, Source: orIf(st.Source, defaultSource)}

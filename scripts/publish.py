@@ -103,7 +103,29 @@ except BaseException:
     os.remove(unsigned)
     raise
 os.replace(unsigned, os.path.join(out, 'latest.json'))
-open(os.path.join(out, 'HOW-TO-PUBLISH.txt'), 'w').write(f'''{NAME} {ver} - publishing
+FEED = pkg.get('updateFeed') or ''
+if FEED:
+    # (the public build: a GitHub release, not a shared folder)
+    open(os.path.join(out, 'HOW-TO-PUBLISH.txt'), 'w').write(f'''{NAME} {ver} - publishing
+
+1. New release on {FEED}/releases/new - tag v{ver}, title "{NAME} {ver}".
+2. Attach:
+     app-v{ver}.zip
+     {NAME} Setup {ver}.exe
+     source-v{ver}.zip
+     latest.json
+   (all four in the same release - installed copies read latest.json from the latest release
+   and fetch the app or setup from it).
+3. Publish, marked as the latest release. Installed copies see it at their next check.
+
+To hold a version back: publish it as a pre-release (or as a draft) - "latest" stays on the
+previous one.
+
+latest.json is signed: don't edit it by hand - an edited one is refused. The signing key
+stays with the developer copy, never in the repository or a release.
+''')
+else:
+    open(os.path.join(out, 'HOW-TO-PUBLISH.txt'), 'w').write(f'''{NAME} {ver} - publishing
 
 1. Copy into the updates folder on the share (e.g. \\\\server\\Software\\PDF Editor):
      app-v{ver}.zip
