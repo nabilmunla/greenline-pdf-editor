@@ -15,6 +15,9 @@ copyFileSync('src/engine/mupdf-pre.mjs', join(outDir, 'mupdf', 'pre.js'));
 // HarfBuzz (text shaping: Arabic, PC fonts) also loads its .wasm from its own folder
 mkdirSync(join(outDir, 'harfbuzz'), { recursive: true });
 for (const f of ['index.mjs', 'harfbuzz.js', 'harfbuzz.wasm']) copyFileSync(join('node_modules/harfbuzzjs/dist', f), join(outDir, 'harfbuzz', f));
+// (harfbuzz.js is an ES module: said so, Node read it twice at every engine start - and wrote a
+// warning to the log each time)
+writeFileSync(join(outDir, 'harfbuzz', 'package.json'), JSON.stringify({ type: 'module' }) + '\n');
 await build({
   entryPoints: { render: 'src/engine/host-render.ts', edit: 'src/engine/host-edit.ts' },
   outdir: outDir,

@@ -24,6 +24,8 @@ export class EngineClient {
   private waiting: { id: number; msg: unknown }[] = [];
   /** number of calls in flight (used to spread tiles over engines) */
   busy = 0;
+  /** when it was last asked for something (performance.now(); its memory asked for doesn't count) */
+  lastUse = 0;
   /** times the engine had to be restarted */
   restarts = 0;
   constructor(public name: string) {}
@@ -107,6 +109,7 @@ export class EngineClient {
   call<T>(method: string, args: unknown[] = [], out?: boolean | string): Promise<T> {
     if (this.gone) return Promise.reject(new Error(this.gone));
     const id = this.seq++;
+    if (method !== 'heap') this.lastUse = performance.now();
     this.busy++;
     const msg = { id, method, args, out };
     return new Promise<T>((res, rej) => {

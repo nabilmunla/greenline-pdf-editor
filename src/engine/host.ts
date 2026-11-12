@@ -51,9 +51,11 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
 /**
  * WebAssembly memory only ever grows. A drawing engine that has grown past this (a run of
  * monster scans) starts afresh: it finishes the call, exits, and the app starts a new one
- * and reopens the files in it - a fraction of a second, nothing lost.
+ * and reopens the files in it - a fraction of a second, nothing lost. (The engine can't grow
+ * past 2 GB: at 2 GB, as this was, it was never reached - the engine stopped mid-drawing
+ * instead, the next big picture asking for more. 1.4 GB leaves room for one more page.)
  */
-const RECYCLE_AT = 2 * 1024 ** 3;
+const RECYCLE_AT = Number(process.env.PDFED_RECYCLE_AT) || 1.4 * 1024 ** 3;
 export async function renderRecycle(): Promise<boolean> {
   const pf = await import('./pdfium');
   // never straight after starting (a page that needs that much would loop)

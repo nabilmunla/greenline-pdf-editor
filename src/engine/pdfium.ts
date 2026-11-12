@@ -29,7 +29,7 @@ const M = () => Q().pdfium as unknown as {
 const malloc = (n: number) => M().wasmExports.malloc(n);
 const free = (p: number) => M().wasmExports.free(p);
 
-interface PageCache { ptr: number; text: number; aff: number[]; inv: number[]; w: number; h: number; chars?: CharInfo; heavy?: boolean }
+interface PageCache { ptr: number; text: number; aff: number[]; inv: number[]; w: number; h: number; chars?: CharInfo; heavy?: boolean; /** its pictures, decoded (bytes, estimated) */ pics?: number }
 export interface CharInfo { text: string; box: Float32Array }
 
 interface Doc { mem: number; fa: number; slot: number; reader: Reader | null; doc: number; pages: Map<number, PageCache>; order: number[]; snaps: Map<number, SnapIndex> }
@@ -138,6 +138,34 @@ const heavy: { d: Doc; i: number; t: number }[] = [];
 const HEAVY_MS = 200;
 const SOFT_HEAP = 1.2 * 1024 ** 3;
 const HEAVY_MAX = 4;
+/**
+ * Scanned pages read in fast (a few objects) but hold their pictures decoded once drawn - a
+ * colour scan at 400-600 dpi is 100-600 MB a page, and with 24 pages kept per file a few such
+ * files filled the engine's 2 GB (it stopped mid-drawing; seen in reports). A page whose
+ * pictures come to more than PIC_HEAVY counts as heavy, and heavy pages' pictures are held
+ * within PIC_BUDGET together (the least recently used let go first).
+ */
+const PIC_HEAVY = 48 * 1024 ** 2;
+const PIC_BUDGET = 640 * 1024 ** 2;
+/** a page with more objects than this isn't a scan (its pictures aren't counted: a drawing of
+ *  millions of lines would take seconds just to list) */
+const PIC_SCAN_OBJECTS = 400;
+function picBytes(ptr: number): number {
+  const q = Q();
+  const n = q.FPDFPage_CountObjects(ptr);
+  if (n <= 0 || n > PIC_SCAN_OBJECTS) return 0;
+  const wh = malloc(8);
+  let total = 0;
+  try {
+    for (let i = 0; i < n; i++) {
+      const o = q.FPDFPage_GetObject(ptr, i);
+      if (!o || q.FPDFPageObj_GetType(o) !== 3) continue; // (3: an image)
+      if (!q.FPDFImageObj_GetImagePixelSize(o, wh, wh + 4)) continue;
+      total += (M().HEAP32[wh >> 2] >>> 0) * (M().HEAP32[(wh + 4) >> 2] >>> 0) * 4;
+    }
+  } finally { free(wh); }
+  return total;
+}
 /** a heavy page used this recently is never let go (what's on screen - the page itself, its
  *  thumbnail, its text - asks for it again and again: reading it in again each time would crawl) */
 const HEAVY_IDLE_MS = 8000;
@@ -151,10 +179,12 @@ function loadPage(d: Doc, i: number): PageCache {
   if (!ptr) throw new Error('Could not read page ' + (i + 1));
   const w = q.FPDF_GetPageWidthF(ptr), h = q.FPDF_GetPageHeightF(ptr);
   const aff = affine(ptr, w, h);
-  const isHeavy = performance.now() - t0 > HEAVY_MS;
+  const slow = performance.now() - t0 > HEAVY_MS;
+  const pics = slow ? 0 : picBytes(ptr);
+  const isHeavy = slow || pics > PIC_HEAVY;
   pageStats.loads++;
   if (isHeavy) pageStats.heavyLoads++;
-  return { ptr, text: 0, aff, inv: invert(aff), w, h, heavy: isHeavy };
+  return { ptr, text: 0, aff, inv: invert(aff), w, h, heavy: isHeavy, pics };
 }
 function freePage(p: PageCache) {
   const q = Q();
@@ -184,6 +214,19 @@ function dropIdleHeavy(keep: number) {
 function makeRoom() {
   if (heavy.length > 1 && heapBytes() > SOFT_HEAP) dropIdleHeavy(1);
 }
+/** heavy pages' pictures held within PIC_BUDGET: the least recently used go first (the newest - the
+ *  one just read in - always stays; pages used in the last moment too, unless far over) */
+function trimPictures() {
+  const held = () => heavy.reduce((t, x) => t + (x.d.pages.get(x.i)?.pics || 0), 0);
+  let total = held();
+  if (total <= PIC_BUDGET) return;
+  const now = performance.now();
+  for (let k = 0; k < heavy.length - 1 && total > PIC_BUDGET;) {
+    const e = heavy[k], pics = e.d.pages.get(e.i)?.pics || 0;
+    if (pics && (now - e.t > 1500 || total > 2 * PIC_BUDGET)) { dropPage(e.d, e.i); total -= pics; }
+    else k++;
+  }
+}
 
 function page(d: Doc, i: number): PageCache {
   let p = d.pages.get(i);
@@ -200,6 +243,7 @@ function page(d: Doc, i: number): PageCache {
   if (p.heavy) {
     heavy.push({ d, i, t: performance.now() });
     dropIdleHeavy(HEAVY_MAX);
+    if (p.pics) trimPictures();
   }
   while (d.order.length > KEEP) dropPage(d, d.order[0]);
   return p;

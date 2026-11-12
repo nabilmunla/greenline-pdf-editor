@@ -108,6 +108,29 @@ export function startEngines(): Promise<void> {
   return job;
 }
 
+/**
+ * A drawing engine's memory only ever grows: one that has grown big keeps it until it stops (a PC
+ * with four big scans open showed 355 MB of its 16 GB free). One left idle for a few minutes
+ * with more than IDLE_HEAP gives it back: a planned restart (exit 75 - no message, no crash
+ * report), the files reopened in the new one. (Not sooner: a dense sheet read in again takes
+ * seconds, and that is what the next zoom would wait for.)
+ */
+const IDLE_HEAP = Number(localStorage.getItem('pdfed-idle-heap')) || 1.1 * 1024 ** 3;
+const IDLE_MS = Number(localStorage.getItem('pdfed-idle-ms')) || 180_000;
+window.setInterval(() => {
+  if (!started) return;
+  void (async () => {
+    for (const c of renderers) {
+      if (c.busy || performance.now() - c.lastUse < IDLE_MS) continue;
+      const heap = await c.call<number>('heap').catch(() => 0);
+      if (heap > IDLE_HEAP && !c.busy && performance.now() - c.lastUse >= IDLE_MS) {
+        gcc.log(`${c.name}: idle with ${Math.round(heap / 2 ** 20)} MB - planned restart`);
+        await c.call('exitNow').catch(() => {});
+      }
+    }
+  })();
+}, Math.min(30_000, IDLE_MS / 2));
+
 /** least busy drawing engine */
 export function renderer(): EngineClient {
   let best = renderers[0];

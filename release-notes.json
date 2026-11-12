@@ -1,4 +1,15 @@
 {
+  "0.9.5": {
+    "General polishing": [
+      "Big scanned files no longer stop a drawing engine in the middle of drawing: decoded scans are let go by the memory they take, and an engine that has grown big starts afresh quietly before it runs out",
+      "A drawing engine left idle with a lot of memory gives it back to Windows (a PC with several big scans open was left short of memory, and everything slowed down)",
+      "The engines start a little faster (one part was read twice at every start)",
+      "Anonymous problem reports: long file names in the log are now taken out whole (some got through), and dates are no longer blanked out"
+    ],
+    "Coming next": [
+      "Drawing engines that can use up to 4 GB each (2 GB now), for the very largest scans"
+    ]
+  },
   "0.9.4": {
     "General polishing": [
       "Stays quick as your stamps and signatures add up: the settings (which hold them) were read again from disk at nearly every step - opening a file, saving, every check",
