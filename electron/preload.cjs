@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('gcc', {
   onOpen: (cb) => ipcRenderer.on('app:open', (_e, files) => cb(files)),
   onCombine: (cb) => ipcRenderer.on('app:combine', (_e, files) => cb(files)),
   onClosing: (cb) => ipcRenderer.on('app:closing', (_e, o) => cb(o || {})),
+  onRedraw: (cb) => ipcRenderer.on('app:redraw', (_e, why) => cb(String(why || ''))),
   closeCancelled: () => ipcRenderer.send('app:closeCancelled'),
   updateGet: () => ipcRenderer.invoke('update:get'),
   updateCheck: () => ipcRenderer.invoke('update:check'),

@@ -121,6 +121,8 @@ export interface GccApi {
   /** PDFs picked in Explorer > Combine with PDF Editor */
   onCombine(cb: (files: string[]) => void): void;
   onClosing(cb: (o: { restart?: boolean }) => void): void;
+  /** the pages must be drawn again (Windows unlocked / woken, graphics process restarted) */
+  onRedraw?(cb: (why: string) => void): void;
   closeCancelled(): void;
   updateGet(): Promise<UpdateState>;
   updateCheck(): Promise<UpdateState>;

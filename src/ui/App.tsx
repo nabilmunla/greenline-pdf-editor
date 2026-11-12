@@ -269,6 +269,10 @@ export function App() {
     gcc.onCombine((files) => combineFiles(files));
     gcc.ready();
     // the window's close button: with several files open, close just this one or all of them
+    // (the graphics memory may have been reset: Windows unlocked or woken up, or a canvas lost and
+    // restored - pages already drawn came back blank; drawn again)
+    gcc.onRedraw?.(() => tiles.reset());
+    document.addEventListener('contextrestored', () => tiles.reset(), true);
     gcc.onClosing((o) => void (async () => {
       const ds = docsRef.current;
       const ex = exportRunning.docId ? ds.find((x) => x.id === exportRunning.docId) : null;

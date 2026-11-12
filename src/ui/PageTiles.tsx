@@ -168,6 +168,16 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
 
   useEffect(() => () => { window.clearTimeout(settle.current); tiles.forget(p.tag); }, [p.tag]);
 
+  // everything drawn thrown away (tiles.reset: the graphics memory was reset): the canvases on
+  // the page are drawn again - kept until their new picture is there (marked old: no white flash
+  // where they still show), the preview too
+  useEffect(() => tiles.onReset(() => {
+    for (const el of [baseRef.current, hlRef.current, annRef.current]) if (el) for (const c of Array.from(el.children) as HTMLCanvasElement[]) c.dataset.k = 'old|' + c.dataset.k;
+    prevDrawn.current = { key: '', done: new Set(), complete: false };
+    ask();
+    paint();
+  }), []);
+
   useEffect(() => tiles.onReady((k) => {
     const s = state.current;
     const parts = k.split('|');

@@ -1,0 +1,39 @@
+Greenline report receiver - setting it up on Cloudflare (about 10 minutes)
+==========================================================================
+
+In your normal browser, signed in at https://dash.cloudflare.com
+(Cloudflare moves its menus around now and then: if a label below is a little different, look for the nearest match.)
+
+1. A place to keep the reports
+   Storage & databases > KV (Workers KV) > Create (namespace)
+   Name: greenline-reports  > Create
+
+2. The receiver
+   Compute > Workers & Pages > Create > Start with "Hello World" (Worker)
+   Name: greenline-reports  > Deploy
+
+3. Its code
+   On the new worker: Edit code
+   Open worker.js (next to this file) in Notepad, Ctrl+A, Ctrl+C
+   In Cloudflare's editor: click into the code, Ctrl+A, Ctrl+V (replaces the Hello World code)
+   Deploy
+
+4. Connect the store
+   Back on the worker: Settings > Bindings > Add > KV namespace
+   Variable name: REPORTS   (capital letters, exactly)
+   KV namespace: greenline-reports  > Add / Deploy
+
+5. Your password for reading reports
+   Settings > Variables and Secrets > Add
+   Type: Secret     Name: ADMIN_KEY     Value: a long password of your own
+   > Deploy
+   (Keep it in your password manager. Nobody else needs it - not even Claude.)
+
+6. The address
+   On the worker's page, its address looks like
+      https://greenline-reports.<something>.workers.dev
+   Copy it and paste it to Claude.
+
+7. Check it (optional)
+   Open that address in your browser: it asks for a user name and password -
+   any user name, your ADMIN_KEY password - and shows "Reports - None yet".

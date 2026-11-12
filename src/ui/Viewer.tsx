@@ -916,6 +916,8 @@ export function Viewer(props: Props) {
     }
   };
   useEffect(() => { paintAids(); }, [props.crossOn, props.loupeOn, props.loupeZoom]);
+  // (the graphics memory was reset - tiles.reset: the magnifier's sharp picture may be wiped too)
+  useEffect(() => tiles.onReset(() => { try { loupeSharp.current?.bmp.close(); } catch { /* gone */ } loupeSharp.current = null; }), []);
 
   // ---------------------------------------------------------------- measuring
 

@@ -23,11 +23,11 @@ It was built with **Claude 5.5** by Anthropic. I set the requirements and tested
 | A 1.26 GB merged drawing set | saves in **about 6 seconds** |
 | A drawing engine running out of memory on a monster page | **restarts by itself**; the window and your work carry on |
 
-How: pages are read from disk only as they're needed, never the whole file at once. Drawing, editing and batch jobs each run in their own background engine, so one overloaded engine can't take the app down with it. An engine that dies is restarted with your file from its last automatic copy.
+How: pages are read from disk only as they're needed, never the whole file at once. Drawing, editing and batch jobs each run in their own background engine (a drawing engine can use up to 4 GB), so one overloaded engine can't take the app down with it. An engine that dies is restarted with your file from its last automatic copy.
 
 ## What it does
 
-- **Take-off measuring:** set the scale or calibrate on a known dimension, then length, area *with* perimeter, count, and count by tag (e.g. every D-01 door mark on a plan). Corners snap to the drawing; totals go straight to Excel.
+- **Take-off measuring:** set the scale or calibrate on a known dimension, then length, area *with* perimeter, count, and count by tag (e.g. every D-01 door mark on a plan). Corners snap to the drawing - ends, middles and perpendicular - with Ortho, a crosshair and a magnifier for exact points, and any outline can be continued from any corner; totals go straight to Excel.
 - **Markups:** clouds, callouts, arrows and text boxes formatted like a word processor; stamps, including your own company seal from a scan.
 - **Pages:** merge, extract, insert, reorder and rotate thousands of pages; combine files straight from Windows Explorer's right-click menu.
 - **Scans:** OCR in English and Arabic, fully offline.
@@ -45,7 +45,7 @@ How: pages are read from disk only as they're needed, never the whole file at on
 
 ## Private by design
 
-Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, and the AI assistant, only when you use it.
+Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, the AI assistant only when you use it, and problem reports only when you send them (see below).
 
 ## Install
 
@@ -53,7 +53,7 @@ Windows 10/11. Download **Greenline PDF Editor Setup &lt;version&gt;.exe** from 
 
 The setup isn't code-signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
 
-New versions are announced inside the app (it asks before downloading anything). Every update is signed by the publisher and checked before it's installed.
+New versions are announced inside the app (it asks before downloading anything), with what changed in every version since yours. Every update is signed by the publisher and checked before it's installed.
 
 ## Reporting problems
 

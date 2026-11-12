@@ -1,8 +1,8 @@
-PDF EDITOR - version 0.9.7
+PDF EDITOR - version 0.9.8
 ==========================
 
 INSTALL IT
-  Run "PDF Editor Setup 0.9.7.exe" (one file). Install puts it in your own Programs
+  Run "PDF Editor Setup 0.9.8.exe" (one file). Install puts it in your own Programs
   folder - no admin rights - with a Start menu shortcut, a desktop shortcut and PDF
   Editor listed in "Open with" for PDFs. Options: install for everyone on the PC
   (asks for admin rights; Program Files), another folder, no desktop shortcut, not
@@ -11,19 +11,20 @@ INSTALL IT
   (as \\server\share, not a drive letter). Your settings and keys survive reinstalls.
   Remove: Windows Settings > Apps > PDF Editor > Uninstall (or "PDF Editor Setup.exe"
   in the app folder). Optionally removes your settings too; your PDFs are never touched.
-  For IT: "PDF Editor Setup 0.9.7.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
+  For IT: "PDF Editor Setup 0.9.8.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
   [--no-desktop] [--no-open-with] [--updates "\\server\share\PDF Editor"];
   uninstall: "<app folder>\PDF Editor Setup.exe" --uninstall --silent. Log:
   %TEMP%\PDF Editor Setup.log.
   Windows may warn on first run ("Windows protected your PC" > More info > Run anyway)
   because the setup isn't signed with a company code-signing certificate.
   If the setup window stays empty, it switches to plain Windows prompts by itself after
-  a few seconds; "PDF Editor Setup 0.9.7.exe" --plain uses the plain prompts straight away.
+  a few seconds; "PDF Editor Setup 0.9.8.exe" --plain uses the plain prompts straight away.
 
 UPDATES
   An installed copy looks in its updates folder for a newer version at start and every
   4 hours. When there is one, a card (bottom right) asks: Update / Later ("What's new"
-  on the card shows the changes in short). Nothing is downloaded before you say so. From 0.8.2 on
+  on the card shows the changes in short - of every version since yours, when you skipped
+  some). Nothing is downloaded before you say so. From 0.8.2 on
   an update is only offered when its latest.json carries the publisher's signature (anything
   else in the folder is refused); the download is checked (SHA-256) against that signed list
   before it is used; then "Restart now" or "When I close it" - you're asked to save changes
@@ -247,7 +248,9 @@ MEASURE  (Measure tab)
   markups and the shape's own other corners (Shift: the edge straight). Drag the small
   dot in the middle of an edge to add a corner there; Alt+click a corner to delete it.
   Right-click: Add a corner here / Delete this corner / Continue this line (a polylength
-  or polyline drawn on from its nearer end). Count: Backspace takes back the last mark.
+  or polyline drawn on from its nearer end) / Continue from this corner (any corner of an
+  outline, or one in the middle of a line: draw on from it, the rest of the shape stays).
+  Count: Backspace takes back the last mark.
   Typed lengths: after the first point of a Length, Polylength or Area by
   corners, type the length - 4200 (millimetres: a whole number of 100 or more), 4.2 or
   4,2 (metres), 4200mm, 420cm - the tip shows how it is read; Enter puts the next point
@@ -279,6 +282,14 @@ SNAPPING  (F9 or the status bar)
   points on lines and the corners of other markups. A coloured square shows where it
   will snap and a label says what. Hold Ctrl while clicking to skip snapping once;
   hold Shift for 0/45/90 degree lines.
+  Perpendicular (the square mark): while drawing, a line near the pointer offers the point
+  square to it from the point you came from - on the drawing's lines and on markup edges.
+  A line end or middle nearer than that point wins.
+  Ortho (F8, or the status bar): lines and corners go 0/45/90 degrees without holding
+  Shift - except where the point snapped to something: the snap wins.
+  Crosshair (F6): lines across the view through the pointer, to line points up.
+  Magnifier (F7): a loupe beside the pointer shows the exact point a click puts down,
+  2 to 8 times (Measure > Snap > the x number); sharp once the pointer rests.
 
 EDIT  (Edit tab)
   Edit text: click a line of text, change it, Enter. (One line at a time.) Arabic works
@@ -430,7 +441,8 @@ BATCH  (many files at once)
 HUGE FILES (500 MB merged drawings and scans)
   Files are read from disk as pages are needed - never loaded whole - so a 300 MB scan
   book opens in under a second. Drawing, editing and batch jobs run in separate
-  background engines: if one runs out of memory on a monster file, it restarts by
+  background engines (a drawing engine may use up to 4 GB, and starts afresh quietly
+  before that when it has grown big): if one runs out of memory on a monster file, it restarts by
   itself and the window carries on (if it was the editing engine, the file comes back
   from the last automatic copy and undo starts again; you get a message).
   Sheets made of millions of tiny line pieces (traced or some CAD exports, 40+ MB for one

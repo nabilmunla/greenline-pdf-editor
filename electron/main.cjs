@@ -2,7 +2,7 @@
 // Windows of tabs: every PDF opens as a tab (double-click in Explorer adds one to the window used
 // last); a tab dragged out of its window opens in a window of its own and can be dragged back.
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, protocol, net, clipboard, nativeImage, utilityProcess, MessageChannelMain, safeStorage, screen, webContents } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, protocol, net, clipboard, nativeImage, utilityProcess, MessageChannelMain, safeStorage, screen, webContents, powerMonitor } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -1600,7 +1600,17 @@ ipcMain.handle('report:openQueue', async () => {
   return shell.openPath(st.queue);
 });
 ipcMain.on('report:crash', (_e, where, message, stack) => reports.crash(String(where || 'window'), { message: String(message || ''), stack: String(stack || '') }));
+/** the windows draw their pages again: the graphics card's memory may have been reset (Windows
+ *  unlocked or woken up, the graphics process restarted) - pages already drawn came back blank */
+function redrawAll(why) {
+  log('redraw pages: ' + why);
+  setTimeout(() => { for (const w of BrowserWindow.getAllWindows()) { try { if (!w.isDestroyed()) w.webContents.send('app:redraw', why); } catch { /* closing */ } } }, 1200);
+}
+app.whenReady().then(() => {
+  try { for (const ev of ['unlock-screen', 'resume']) powerMonitor.on(ev, () => redrawAll(ev)); } catch (e) { log('powerMonitor: ' + e); }
+});
 app.on('child-process-gone', (_e, d) => {
+  if (d.type === 'GPU' && !quitting) redrawAll('graphics process ' + d.reason);
   if (quitting || ['clean-exit', 'killed'].includes(d.reason)) return;
   // (an engine that ends itself on purpose to start again fresh - code 75, after its memory grew
   // past its limit - is no crash: each was filed as one, using up the day's reports)

@@ -1,4 +1,9 @@
 {
+  "0.9.8": {
+    "General polishing": [
+      "Pages already drawn no longer stay blank after Windows was locked or asleep: they are drawn again when you unlock or wake the PC, or when the graphics card's memory is reset (the app kept reusing the wiped pictures - pages seen before showed white until the file was opened again)"
+    ]
+  },
   "0.9.7": {
     "New features": [
       "Drawing engines can now use up to 4 GB each (2 GB before): a page whose pictures need more than 2 GB is drawn instead of stopping the engine. An engine still starts afresh quietly before that, at a point set by the PC's memory and the number of engines",

@@ -55,6 +55,29 @@ class TileStore {
     this.retry();
   }
 
+  /**
+   * Everything drawn is thrown away and asked for again. Windows locked or asleep (or a graphics
+   * driver reset) can reset the graphics card's memory: the page pictures kept there - and the
+   * page's own canvases - came back blank, and the app went on reusing them (pages already seen
+   * stayed white after lunch; pages not seen yet drew fine). Thumbnails and small edge tiles
+   * survived: Chromium keeps small canvases out of the graphics card.
+   */
+  private resetListeners = new Set<() => void>();
+  onReset(f: () => void): () => void { this.resetListeners.add(f); return () => { this.resetListeners.delete(f); }; }
+  private resetAt = 0;
+  reset() {
+    // (several signals come together - unlock, resume, a canvas restored: once)
+    const now = performance.now();
+    if (now - this.resetAt < 1500) return;
+    this.resetAt = now;
+    for (const e of this.cache.values()) { try { e.bmp?.close(); } catch { /* gone */ } }
+    this.cache.clear();
+    this.bytes = 0;
+    this.failed.clear();
+    for (const f of this.resetListeners) f();
+    this.retry();
+  }
+
   get(key: string): ImageBitmap | null | undefined {
     const e = this.cache.get(key);
     if (!e) return undefined;
