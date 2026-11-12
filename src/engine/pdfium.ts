@@ -4,14 +4,49 @@
 //
 // "Page space" everywhere: the page as shown (rotation and crop box applied),
 // origin top-left, 1 unit = 1 PDF point. MuPDF uses the same space, so the two agree.
-import { init, type WrappedPdfiumModule } from '@embedpdf/pdfium';
+import type { WrappedPdfiumModule } from '@embedpdf/pdfium';
+// (the package's JavaScript patched to use 4 GB: scripts/patch-pdfium.mjs)
+import { init } from './vendor/pdfium-4gb.js';
 import type { Reader } from './files';
 
 let P: WrappedPdfiumModule | null = null;
 
+/** the most the engine's memory may grow to: 4 GB less one 64 KB page (as Emscripten's own 4 GB builds) */
+export const MEMORY_MAX = 65535 * 65536;
+
+/**
+ * The .wasm says its memory may grow to 2 GB (32768 pages); raised here to 65535 pages, in a
+ * copy (the number is 3 bytes long either way: nothing else moves). Only that exact
+ * declaration is changed: anything else (another build) is left as it is.
+ */
+export function liftMemoryMax(wasm: ArrayBuffer): ArrayBuffer {
+  const b = new Uint8Array(wasm);
+  const leb = (i: number): [number, number] => {
+    let r = 0, k = 0;
+    for (;;) { const x = b[i++]; r += (x & 0x7f) * 2 ** k; k += 7; if (x < 0x80 || k > 35) return [r, i]; }
+  };
+  if (b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return wasm;
+  for (let i = 8; i < b.length;) {
+    const id = b[i];
+    const [size, at] = leb(i + 1);
+    // the memory section: one memory, with a maximum, 32768 pages as 80 80 02
+    if (id === 5) {
+      const [count, j] = leb(at);
+      if (count !== 1 || b[j] !== 1) return wasm;
+      const [, k] = leb(j + 1);
+      if (b[k] !== 0x80 || b[k + 1] !== 0x80 || b[k + 2] !== 0x02) return wasm;
+      const out = b.slice();
+      out.set([0xff, 0xff, 0x03], k);
+      return out.buffer;
+    }
+    i = at + size;
+  }
+  return wasm;
+}
+
 export async function startPdfium(wasm: ArrayBuffer): Promise<void> {
   if (P) return;
-  P = await init({ wasmBinary: wasm });
+  P = await init({ wasmBinary: liftMemoryMax(wasm) });
   P.PDFiumExt_Init();
 }
 
@@ -26,7 +61,15 @@ const M = () => Q().pdfium as unknown as {
   getValue(p: number, t: string): number; setValue(p: number, v: number, t: string): void;
   addFunction(f: (...a: number[]) => number, sig: string): number;
 };
-const malloc = (n: number) => M().wasmExports.malloc(n);
+// (addresses unsigned: past 2 GB they come back from the engine negative. 0 = no memory left:
+// a file was then copied over address 0 - the engine's own data - and every later call failed
+// "table index is out of bounds"; now it stops as out of memory (fatal: started afresh, and the
+// window blames the page, as when PDFium itself runs out))
+const malloc = (n: number) => {
+  const p = M().wasmExports.malloc(n) >>> 0;
+  if (!p && n > 0) throw new Error(`Aborted: the drawing engine is out of memory (${Math.round(n / 2 ** 20)} MB more needed)`);
+  return p;
+};
 const free = (p: number) => M().wasmExports.free(p);
 
 interface PageCache { ptr: number; text: number; aff: number[]; inv: number[]; w: number; h: number; chars?: CharInfo; heavy?: boolean; /** its pictures, decoded (bytes, estimated) */ pics?: number }
@@ -46,7 +89,7 @@ function getBlock(): number {
     getBlockFn = M().addFunction((param: number, pos: number, buf: number, len: number) => {
       const r = readers.get(param);
       if (!r) return 0;
-      try { return r.read(M().HEAPU8, buf, len, pos >>> 0) === len ? 1 : 0; } catch { return 0; }
+      try { return r.read(M().HEAPU8, buf >>> 0, len, pos >>> 0) === len ? 1 : 0; } catch { return 0; }
     }, 'iiiii');
   }
   return getBlockFn;
@@ -118,6 +161,17 @@ export function closeDoc(id: string): void {
 export const openIds = () => [...docs.keys()];
 /** engine memory in use (WebAssembly memory only grows) */
 export const heapBytes = () => M().HEAPU8.buffer.byteLength;
+/** (tests) take `n` bytes of the engine's memory until the returned function gives them back -
+ *  so what comes after lands past 2 GB; and where the next allocation would land */
+export function holdMemory(n: number): () => void { const p = malloc(n); return () => free(p); }
+export function nextAddress(n = 16): number { const p = malloc(n); free(p); return p; }
+/** (tests) take `top` bytes, then the gaps left below, until what comes next lands past `at` */
+export function fillBelow(at: number, top: number): () => void {
+  const gives: (() => void)[] = [];
+  for (let got = 0; got < top; got += 2 ** 30) gives.push(holdMemory(Math.min(2 ** 30, top - got)));
+  for (const n of [1 << 22, 1 << 18, 1 << 14, 1 << 10, 64, 16]) while (nextAddress(n) < at) gives.push(holdMemory(n));
+  return () => { for (const g of gives) g(); };
+}
 
 function mustDoc(id: string): Doc {
   const d = docs.get(id);
@@ -161,7 +215,7 @@ function picBytes(ptr: number): number {
       const o = q.FPDFPage_GetObject(ptr, i);
       if (!o || q.FPDFPageObj_GetType(o) !== 3) continue; // (3: an image)
       if (!q.FPDFImageObj_GetImagePixelSize(o, wh, wh + 4)) continue;
-      total += (M().HEAP32[wh >> 2] >>> 0) * (M().HEAP32[(wh + 4) >> 2] >>> 0) * 4;
+      total += (M().HEAP32[wh >>> 2] >>> 0) * (M().HEAP32[(wh + 4) >>> 2] >>> 0) * 4;
     }
   } finally { free(wh); }
   return total;
@@ -311,7 +365,7 @@ export function render(id: string, pg: number, scale: number, x: number, y: numb
     // 0x10 = RGBA byte order (straight into ImageData); 0x01 = annotations (only for thumbnails of other files)
     const flags = 0x10 | (annots ? 0x01 : 0);
     q.FPDF_RenderPageBitmap(bmp, p.ptr, -Math.round(x), -Math.round(y), Math.round(p.w * scale), Math.round(p.h * scale), 0, flags);
-    const buf = q.FPDFBitmap_GetBuffer(bmp);
+    const buf = q.FPDFBitmap_GetBuffer(bmp) >>> 0;
     const stride = q.FPDFBitmap_GetStride(bmp);
     const heap = M().HEAPU8;
     if (stride === w * 4) return new Uint8ClampedArray(heap.buffer, buf, w * h * 4).slice();
@@ -451,10 +505,10 @@ export function links(id: string, pg: number): LinkInfo[] {
   const q = Q();
   const out: LinkInfo[] = [];
   const pos = malloc(4), lk = malloc(4), rc = malloc(16);
-  M().HEAP32[pos >> 2] = 0;
+  M().HEAP32[pos >>> 2] = 0;
   try {
     while (q.FPDFLink_Enumerate(p.ptr, pos, lk)) {
-      const link = M().HEAP32[lk >> 2];
+      const link = M().HEAP32[lk >>> 2];
       if (!q.FPDFLink_GetAnnotRect(link, rc)) continue;
       const f = new Float32Array(M().HEAPU8.buffer, rc, 4); // left, top, right, bottom
       const info: LinkInfo = { rect: boxToPage(p.aff, f[0], f[2], f[3], f[1]) };
@@ -574,7 +628,7 @@ export function buildSnap(id: string, pg: number): SnapIndex {
     const type = q.FPDFPageObj_GetType(obj);
     if (type !== 2 && type !== 5) return;
     let Mx = [1, 0, 0, 1, 0, 0];
-    if (q.FPDFPageObj_GetMatrix(obj, mat)) { const f = F(); const i = mat >> 2; Mx = [f[i], f[i + 1], f[i + 2], f[i + 3], f[i + 4], f[i + 5]]; }
+    if (q.FPDFPageObj_GetMatrix(obj, mat)) { const f = F(); const i = mat >>> 2; Mx = [f[i], f[i + 1], f[i + 2], f[i + 3], f[i + 4], f[i + 5]]; }
     const A = mulM(T, Mx);
     if (type === 5) {
       if (depth > 6) return;
@@ -592,7 +646,7 @@ export function buildSnap(id: string, pg: number): SnapIndex {
       const sg = q.FPDFPath_GetPathSegment(obj, k);
       if (!q.FPDFPathSegment_GetPoint(sg, xy, xy + 4)) continue;
       const f = F();
-      const ux = f[xy >> 2], uy = f[(xy >> 2) + 1];
+      const ux = f[xy >>> 2], uy = f[(xy >>> 2) + 1];
       const X = A[0] * ux + A[2] * uy + A[4], Y = A[1] * ux + A[3] * uy + A[5];
       const t = q.FPDFPathSegment_GetType(sg);
       if (t === 2 || !has) { sx = X; sy = Y; has = true; bz.length = 0; }

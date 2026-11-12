@@ -1396,9 +1396,18 @@ const resDir = () => path.join(__dirname, '..', 'dist');
 
 /** when each engine last died young (crash loop guard) */
 const deaths = new Map();
+/** when each engine last started afresh on purpose (exit 75): told to the next one, which waits
+ *  longer before doing it again (a page that needs more than its restart point restarted it every
+ *  30 seconds while it was worked on) */
+const planned = new Map();
+/** drawing engines per window - as the window counts them (engines.ts RENDERERS) */
+const renderersPerWindow = () => Number(arg('renderers') || process.env.GCC_RENDERERS) || Math.max(2, Math.min(4, Math.floor((os.cpus().length || 4) / 3)));
 function spawnEngine(wc, name, role, restarted, code) {
   const key = wc.id + ':' + name;
-  const proc = utilityProcess.fork(path.join(engineDir(), role + '.mjs'), [resDir()], { serviceName: APP + ' ' + name, stdio: 'pipe' });
+  const now0 = Date.now();
+  const recent = (planned.get(key) || []).filter((t) => now0 - t < 600000);
+  const env = role === 'render' ? { ...process.env, PDFED_RENDERERS: String(renderersPerWindow()), PDFED_RECYCLES: String(recent.length) } : process.env;
+  const proc = utilityProcess.fork(path.join(engineDir(), role + '.mjs'), [resDir()], { serviceName: APP + ' ' + name, stdio: 'pipe', env });
   const e = { role, proc, gen: (engines.get(key)?.gen ?? 0) + 1, born: Date.now(), wc, name };
   engines.set(key, e);
   const out = (b) => String(b).split('\n').filter(Boolean).forEach((l) => log('[' + name + '] ' + l));
@@ -1414,6 +1423,7 @@ function spawnEngine(wc, name, role, restarted, code) {
     // damaged install, antivirus, no memory left) is not started for ever - the window is told,
     // so calls fail with a message instead of waiting on an engine that never comes
     const now = Date.now();
+    if (c === 75) planned.set(key, [...(planned.get(key) || []).filter((t) => now - t < 600000), now]);
     const young = (deaths.get(key) || []).filter((t) => now - t < 120000);
     // (75: a planned restart. 70 from a drawing engine: a page too big for it took it down, after
     // answering that call with its error - the window blames that page and stops asking for it

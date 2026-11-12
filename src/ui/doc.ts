@@ -141,6 +141,8 @@ export class PdfDoc {
   size = 0;
   mtime = 0;
   repaired = false;
+  /** repaired, and something was missing (see OpenResult.lossy): the user is told */
+  lossy = false;
   hasForms = false;
   /** carries a digital signature (saves append to it where they can, so it stays valid) */
   signed = false;
@@ -196,13 +198,14 @@ export class PdfDoc {
    */
   async load(src: FileSpec | Uint8Array, password?: string, temp = false): Promise<'ok' | 'password'> {
     const user = await gcc.user(); // (the author's name, else the Windows user - not the whole settings file)
-    const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; fixedTurn?: boolean; heavy?: number; hasForms: boolean; size?: number }>('open', this.id, toArg(src), password, user);
+    const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; hasForms: boolean; size?: number }>('open', this.id, toArg(src), password, user);
     if (r.needsPassword) return 'password';
     if (temp && !(src instanceof Uint8Array)) for (const t of tempsOf(src)) this.temps.add(t);
     this.src = src;
     this.password = password;
     this.pages = r.pages;
     this.repaired = r.repaired;
+    this.lossy = !!r.lossy;
     this.heavy = r.heavy || 0;
     this.hasForms = r.hasForms;
     this.signed = !!(r as { signed?: boolean }).signed;
@@ -217,7 +220,7 @@ export class PdfDoc {
     await this.refreshHistory();
     openDocs.add(this);
     // (in the log a problem report carries: which file was open when an engine went down)
-    gcc.log(`opened ${this.name}: ${r.pages.length} pages, ${Math.round(this.size / 1e5) / 10} MB${r.heavy ? `, ${r.heavy} heavy pages simplified` : ''}${r.repaired ? ', repaired' : ''}`);
+    gcc.log(`opened ${this.name}: ${r.pages.length} pages, ${Math.round(this.size / 1e5) / 10} MB${r.heavy ? `, ${r.heavy} heavy pages simplified` : ''}${r.repaired ? (r.lossy ? ', repaired (damaged)' : ', repaired (index only)') : ''}`);
     return 'ok';
   }
 

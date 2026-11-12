@@ -63,7 +63,25 @@ subprocess.run([sys.executable, os.path.join(ROOT, 'installer', 'build.py'), ez,
 app = os.path.join(out, f'app-v{ver}.zip')
 NAME = pkg.get('displayName') or pkg.get('productName') or 'PDF Editor'
 setup = os.path.join(out, f'{NAME} Setup {ver}.exe')
-notes = json.load(open(os.path.join(ROOT, 'release-notes.json'), encoding='utf-8')).get(ver, [])
+ALL_NOTES = json.load(open(os.path.join(ROOT, 'release-notes.json'), encoding='utf-8'))
+notes = ALL_NOTES.get(ver, [])
+# --since X (the version last published to this feed): the notes of the versions in between are
+# merged in - a version never published (0.9.5) had its fixes in no update's notes. Merged by
+# group, newest first; "Coming next" from this version only; a line repeated once.
+SINCE = next((sys.argv[i + 1] for i, a in enumerate(sys.argv[:-1]) if a == '--since'), None)
+if SINCE:
+    vkey = lambda v: [int(x) if x.isdigit() else 0 for x in re.split(r'[.-]', v)]
+    between = sorted((v for v in ALL_NOTES if vkey(SINCE) < vkey(v) <= vkey(ver)), key=vkey, reverse=True)
+    merged = {}
+    for i, v in enumerate(between):
+        n = ALL_NOTES[v]
+        n = n if isinstance(n, dict) else {'General polishing': n}
+        for k, xs in n.items():
+            if i > 0 and k.lower().startswith('coming next'): continue
+            g = merged.setdefault(k, [])
+            g.extend(x for x in xs if x not in g)
+    if merged: notes = merged
+    print('notes merged from', ', '.join(between))
 # grouped notes ({"New features": [...], "General polishing": [...], "Fixes": [...]}) from 0.6.0 on;
 # copies up to 0.5.0 read only the flat "notes" list: the new features first, then the fixes
 # (groups named "Public: ..." are the public build's own: export-public.py merges them in there)
@@ -76,12 +94,21 @@ def flat_of(g):
     out = pick('new', 3) + pick('fix', 3)
     return (out + pick('general', 6))[:6]
 flat = notes if isinstance(notes, list) else flat_of(notes)
+# the last versions' own notes (0.9.7 on): an installed copy shows those of every version after its
+# own - someone who skipped updates sees what each brought (updater.cjs groupsSince)
+_vk = lambda v: [int(x) if x.isdigit() else 0 for x in re.split(r'[.-]', v)]
+history = {}
+for v in sorted((v for v in ALL_NOTES if _vk(v) <= _vk(ver)), key=_vk, reverse=True)[:10]:
+    n = ALL_NOTES[v]
+    n = {k: xs for k, xs in n.items() if not k.startswith('Public: ')} if isinstance(n, dict) else {'': n}
+    if n: history[v] = n
 latest = {
     'version': ver,
     'runtime': evr,
     'published': datetime.date.today().isoformat(),
     'notes': flat,
     **({'groups': groups} if groups else {}),
+    'history': history,
     'app': {'file': os.path.basename(app), 'sha256': sha(app), 'size': os.path.getsize(app)},
     # which edition this is (signed with the rest): the company build refuses the public one's
     # releases and the other way round - both are signed with the same key

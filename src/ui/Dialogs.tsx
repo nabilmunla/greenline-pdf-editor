@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, type Toast } from './Modal';
 import { Ico } from './icons';
 import { gcc, baseName, dirName, joinPath, type AppInfo } from './api';
-import { mu, muBatch, muBatchFile, renderers } from './engines';
+import { mu, muBatch, muBatchFile, renderers, onEngineRestart } from './engines';
 import { fileArg, type FileRef } from '../engine/rpc';
 import { orientScale, type PdfDoc, type Scale, type Viewport } from './doc';
 import type { Dialog, Settings } from './App';
@@ -1662,6 +1662,10 @@ function BatchOcrDlg(p: Props) {
         const rid = 'bocr-' + Math.random().toString(36).slice(2);
         let mid = '';
         let made: string | null = null;
+        // (a drawing engine that starts afresh meanwhile - a planned restart of a big one, or out of
+        // memory - gets the file again: it isn't a tab, the tabs' reopening misses it; the rest of
+        // the file failed "Document is not open")
+        const off = onEngineRestart((c, kind) => { if (kind === 'render') return c.call('open', [rid, fileArg(f), undefined]).then(() => {}); });
         try {
           // both engines read the file from disk on demand
           mid = await muBatch<string>('batchOpen', fileArg(f));
@@ -1694,6 +1698,7 @@ function BatchOcrDlg(p: Props) {
           }
         } catch (e) { setRes((r) => ({ ...r, [f]: 'failed: ' + String((e as Error).message || e) })); }
         finally {
+          off();
           await Promise.all(renderers.map((r) => r.call('close', [rid]).catch(() => {})));
           if (mid) await muBatch('close', mid).catch(() => {});
           if (made) void gcc.dropTemp([made]);

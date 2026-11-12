@@ -79,6 +79,28 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     for (const [k, v] of Object.entries(g).slice(0, 6)) if (Array.isArray(v) && v.length) out[String(k).slice(0, 40)] = v.slice(0, 10).map((x) => String(x).slice(0, 200));
     return Object.keys(out).length ? out : null;
   }
+  /**
+   * The notes of every version after this copy up to the announced one - latest.json's "history"
+   * (from 0.9.7: the last versions' notes, signed with the rest), merged by group, newest first,
+   * "Coming next" from the newest only, a line repeated once. Someone who skipped updates (0.9.4
+   * straight to 0.9.6) was shown only the newest version's notes: 0.9.5's fixes never appeared.
+   */
+  function groupsSince(j) {
+    const own = noteGroups(j.groups);
+    const h = j.history;
+    if (!h || typeof h !== 'object' || Array.isArray(h)) return own;
+    const vs = Object.keys(h).filter((v) => /^\d+(\.\d+){1,3}$/.test(v) && newer(v, version) && !newer(v, j.version)).sort((a, b) => (newer(a, b) ? -1 : 1));
+    if (vs.length <= 1) return own;
+    const out = {};
+    vs.forEach((v, i) => {
+      for (const [k, xs] of Object.entries(noteGroups(h[v]) || {})) {
+        if (i > 0 && /^coming next/i.test(k)) continue;
+        const a = out[k] || (out[k] = []);
+        for (const x of xs) if (!a.includes(x) && a.length < 30) a.push(x);
+      }
+    });
+    return Object.keys(out).length ? out : own;
+  }
   const vparts = (v) => String(v || '').split('.').map((x) => parseInt(x, 10) || 0);
   function newer(a, b) { // a > b
     const x = vparts(a), y = vparts(b);
@@ -175,7 +197,7 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     // latest.json names no setup at all: copies up to 0.8.2 would fetch and start it - they now find
     // no package for a new runtime and say nothing.)
     if (full) {
-      const l = { version: j.version, notes: Array.isArray(j.notes) ? j.notes.map(String).slice(0, 12) : [], groups: noteGroups(j.groups), kind: 'full', setupFile: j.setup && typeof j.setup.file === 'string' ? path.basename(j.setup.file) : '', pkg: { file: '', sha256: '', size: Number((j.setup && j.setup.size) || 0) } };
+      const l = { version: j.version, notes: Array.isArray(j.notes) ? j.notes.map(String).slice(0, 12) : [], groups: groupsSince(j), kind: 'full', setupFile: j.setup && typeof j.setup.file === 'string' ? path.basename(j.setup.file) : '', pkg: { file: '', sha256: '', size: Number((j.setup && j.setup.size) || 0) } };
       latest = l;
       const skippedFull = readSettings().skipUpdate === l.version;
       const showFull = manual || (laterFor !== l.version && !skippedFull);
@@ -188,7 +210,7 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     const pkg = j.app;
     if (!pkg || !/^[0-9a-f]{64}$/i.test(String(pkg.sha256 || ''))) return unusable('no package for this update', { state: 'error', err: 'latest.json lists no package for this update' });
     if (pkg.present === false) return unusable('package not in the folder yet', { state: before.state === 'idle' ? 'idle' : 'none', err: '' });
-    latest = { version: j.version, notes: Array.isArray(j.notes) ? j.notes.map(String).slice(0, 12) : [], groups: noteGroups(j.groups), kind: 'app', setupFile: j.setup && typeof j.setup.file === 'string' ? path.basename(j.setup.file) : '', pkg: { file: path.basename(String(pkg.file)), sha256: String(pkg.sha256).toLowerCase(), size: Number(pkg.size) } };
+    latest = { version: j.version, notes: Array.isArray(j.notes) ? j.notes.map(String).slice(0, 12) : [], groups: groupsSince(j), kind: 'app', setupFile: j.setup && typeof j.setup.file === 'string' ? path.basename(j.setup.file) : '', pkg: { file: path.basename(String(pkg.file)), sha256: String(pkg.sha256).toLowerCase(), size: Number(pkg.size) } };
     // going back from a version means "not that one": it isn't offered by itself again (also when
     // its package is still here from before)
     const skipped = readSettings().skipUpdate === latest.version;

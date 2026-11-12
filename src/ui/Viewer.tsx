@@ -9,6 +9,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefO
 import type { PdfDoc } from './doc';
 import type { AnnotData, AnnotSpec, Pt, Rect } from '../engine/mu';
 import { PageTiles } from './PageTiles';
+import { tiles } from './tiles';
 import { renderers, rendererFor } from './engines';
 import { TOOLS, css, type ToolId, type Style, type Gesture, type MeasureHow } from './tools';
 import { wrapText, TEXT_PAD, TYPE_PAD, AUTO_MIN } from '../engine/textwrap';
@@ -263,6 +264,11 @@ export function Viewer(props: Props) {
   const anchor = useRef<{ page: number; x: number; y: number; cx: number; cy: number } | null>(null);
   const snapRef = useRef<{ page: number; raw: Pt; p: Pt; k: string } | null>(null);
   const snapBusy = useRef(false);
+  /** the newest spot asked for while a snap call was out: asked next (at most one call out) */
+  const snapNext = useRef<{ page: number; p: Pt; r: number; from: Pt | null } | null>(null);
+  /** where the pointer last asked for a snap (an engine answer for a spot it has left is dropped;
+   *  `local`: a markup corner was found there - an engine answer doesn't replace it) */
+  const snapAt = useRef<{ page: number; p: Pt; local: boolean } | null>(null);
   /** false once the pointer is up or the tool doesn't snap: late snap answers are ignored */
   const snapWanted = useRef(false);
   const lastClick = useRef({ t: 0, x: 0, y: 0 });
@@ -417,6 +423,9 @@ export function Viewer(props: Props) {
     const el = scroller.current;
     if (!el) return;
     vpLive.current = true;
+    // (the magnifier / crosshair look at what is under the pointer now: the page moved under it)
+    const ai = aidAt.current;
+    if (ai && (P.current.crossOn || P.current.loupeOn)) { const at = toPage(ai.cx, ai.cy); if (at) { aidAt.current = { ...ai, page: at.page, p: at.p }; requestAnimationFrame(paintAids); } }
     setVp((v) => (v.top === el.scrollTop && v.left === el.scrollLeft && v.w === el.clientWidth && v.h === el.clientHeight ? v : { top: el.scrollTop, left: el.scrollLeft, w: el.clientWidth, h: el.clientHeight }));
   };
   useEffect(() => {
@@ -745,7 +754,7 @@ export function Viewer(props: Props) {
   /** snap to markup corners locally; line work via the drawing engine (async, latest wins) */
   const doSnap = (page: number, p: Pt, ev: { ctrlKey: boolean }) => {
     const pr = P.current;
-    if (!pr.snapOn || ev.ctrlKey || (!TOOLS[pr.tool].snaps && drag?.mode !== 'vertex')) { snapWanted.current = false; snapRef.current = null; setSnapMark(null); return; }
+    if (!pr.snapOn || ev.ctrlKey || (!TOOLS[pr.tool].snaps && drag?.mode !== 'vertex')) { snapWanted.current = false; snapNext.current = null; snapRef.current = null; setSnapMark(null); return; }
     snapWanted.current = true;
     const r = snapR();
     let best: { p: Pt; k: string } | null = null, bd = r;
@@ -765,7 +774,9 @@ export function Viewer(props: Props) {
       }
       const pts: Pt[] = a.vertices || a.line || (a.type === 'Square' || a.type === 'Circle' || a.type === 'FreeText' ? [[a.rect[0], a.rect[1]], [a.rect[2], a.rect[1]], [a.rect[2], a.rect[3]], [a.rect[0], a.rect[3]]] : []);
       pts.forEach((q, i) => { if (i === skip) return; const d = dist(p, q); if (d < bd) { bd = d; best = { p: q, k: 'Markup corner' }; } });
-      if (from && pts.length > 1) {
+      // (⊥ only onto edges that are drawn: not an ellipse's or a text box's box, nor a turned
+      // rectangle's unturned one)
+      if (from && pts.length > 1 && a.type !== 'Circle' && a.type !== 'FreeText' && !(a.type === 'Square' && a.angle)) {
         const closed = !!a.vertices && a.type !== 'PolyLine' || !a.vertices && !a.line;
         for (let i = 0; i < (closed ? pts.length : pts.length - 1); i++) {
           const f = perpFootOn(from, pts[i], pts[(i + 1) % pts.length]);
@@ -778,19 +789,31 @@ export function Viewer(props: Props) {
     // (a corner nearer than the foot wins)
     if (perp && !(best && bd <= pd)) best = { p: perp, k: 'Perpendicular' };
     if (draft && draft.kind === 'poly' && draft.pts.length > 2) { const d = dist(p, draft.pts[0]); if (d < bd) { bd = d; best = { p: draft.pts[0], k: 'Start point' }; } }
-    if (best) { snapRef.current = { page, raw: p, p: best.p, k: best.k }; setSnapMark({ page, p: best.p, k: best.k }); return; }
-    if (snapBusy.current) return;
+    snapAt.current = { page, p, local: !!best };
+    if (best) { snapNext.current = null; snapRef.current = { page, raw: p, p: best.p, k: best.k }; setSnapMark({ page, p: best.p, k: best.k }); return; }
+    askSnap({ page, p, r, from });
+  };
+  /** the drawing's line work, by the drawing engine - one call out at a time; a spot asked for
+   *  meanwhile is asked next (the pointer resting where it stopped is always answered: the newest
+   *  spot was dropped while the engine was busy, and the click landed unsnapped) */
+  const askSnap = (q: { page: number; p: Pt; r: number; from: Pt | null }) => {
+    if (snapBusy.current) { snapNext.current = q; return; }
     snapBusy.current = true;
+    const { page, p, r, from } = q;
+    const done = () => { snapBusy.current = false; const n = snapNext.current; snapNext.current = null; if (n && snapWanted.current) askSnap(n); };
     renderers[0].call<{ x: number; y: number; k: 'end' | 'mid' | 'on' | 'perp' } | null>('snap', [doc.id, page, p[0], p[1], r, from]).then((s) => {
-      snapBusy.current = false;
-      // the answer may arrive after the click / tool change: then it's no longer wanted
-      if (!snapWanted.current) return;
-      if (s) {
-        const k = s.k === 'end' ? 'End point' : s.k === 'mid' ? 'Middle' : s.k === 'perp' ? 'Perpendicular' : 'On line';
-        snapRef.current = { page, raw: p, p: [s.x, s.y], k };
-        setSnapMark({ page, p: [s.x, s.y], k });
-      } else { snapRef.current = null; setSnapMark(null); }
-    }).catch(() => { snapBusy.current = false; });
+      const at = snapAt.current;
+      // the answer may arrive after the click / tool change: then it's no longer wanted; nor when
+      // the pointer has moved on (a newer spot is asked next), or found a markup corner meanwhile
+      if (snapWanted.current && at && !at.local && at.page === page && dist(at.p, p) <= r) {
+        if (s) {
+          const k = s.k === 'end' ? 'End point' : s.k === 'mid' ? 'Middle' : s.k === 'perp' ? 'Perpendicular' : 'On line';
+          snapRef.current = { page, raw: p, p: [s.x, s.y], k };
+          setSnapMark({ page, p: [s.x, s.y], k });
+        } else { snapRef.current = null; setSnapMark(null); }
+      }
+      done();
+    }).catch(done);
   };
   const snapped = (page: number, p: Pt): Pt => {
     const s = snapRef.current;
@@ -880,7 +903,9 @@ export function Viewer(props: Props) {
     ctx.fillText('×' + mag, R + 30, LOUPE - 14);
     // sharp once the pointer rests
     window.clearTimeout(loupeTimer.current);
-    if (!(sharp && sharp.key === key)) {
+    // (not past the view's own zoom limit, nor on a page given up on as too heavy - it took a
+    // drawing engine down twice: drawn again it loops; the magnified screen picture shows then)
+    if (!(sharp && sharp.key === key) && z0 * mag <= lay.current.zMax && !tiles.isHeavy(`${doc.id}|r${doc.crev[at!.page]}`)) {
       const page = at!.page, p0 = at!.p;
       loupeTimer.current = window.setTimeout(() => {
         const x = Math.round(p0[0] * s - W / 2), y = Math.round(p0[1] * s - W / 2);
@@ -959,11 +984,12 @@ export function Viewer(props: Props) {
 
   /** the second point of a two-point draft: Shift = 0/45/90° - for a rectangle area, a square
    *  (kept on the page: near its edge the square stops there, as the point itself does) */
-  const twoEnd = (a: Pt, q: Pt, shift: boolean, page: number): Pt => {
-    if (!shift) return q;
+  const twoEnd = (a: Pt, q: Pt, shift: boolean, page: number, orth = false): Pt => {
+    if (!shift && !orth) return q;
     const how = howOf(P.current.tool);
     if (how === 'circle') return q;
     if (how !== 'rect') return ortho(a, q);
+    if (!shift) return q;
     const sx = Math.sign(q[0] - a[0] || 1), sy = Math.sign(q[1] - a[1] || 1);
     const pg = pages[page];
     let s = Math.max(Math.abs(q[0] - a[0]), Math.abs(q[1] - a[1]));
@@ -973,7 +999,14 @@ export function Viewer(props: Props) {
   /** a rectangle area's corners, from the corner it was started at round to the opposite one */
   const rectCorners = (a: Pt, b: Pt): Pt[] => [a, [b[0], a[1]], b, [a[0], b[1]]];
   /** how the tool's shape is drawn (Area / Perimeter: corners, a rectangle or a circle) */
-  const howOf = (tool: ToolId): MeasureHow => (tool === 'm-rectarea' ? 'rect' : tool === 'm-area' || tool === 'm-perimeter' ? P.current.how || 'points' : 'points');
+  // (continuing an outline from a corner is by points, whatever the tool's rectangle / circle
+  // mode: the first click started a rectangle and the continuation was lost)
+  const howOf = (tool: ToolId): MeasureHow => (draft && draft.kind === 'poly' && draft.cont ? 'points' : tool === 'm-rectarea' ? 'rect' : tool === 'm-area' || tool === 'm-perimeter' ? P.current.how || 'points' : 'points');
+  /** the point is where a snap put it (what `snapped` returned) */
+  const snappedNow = (page: number, p: Pt) => { const s = snapRef.current; return !!s && s.page === page && s.p[0] === p[0] && s.p[1] === p[1]; };
+  /** straighten to 0 / 45 / 90°: Shift always; Ortho (F8) unless the point snapped to something -
+   *  a snap wins, as in CAD (Ortho moved a snapped corner a snap radius off it, the mark still on it) */
+  const straight = (e: { shiftKey: boolean }, page: number, p: Pt) => e.shiftKey || (!!P.current.orthoOn && !snappedNow(page, p));
   const gestureOf = (tool: ToolId): Gesture => (howOf(tool) === 'points' ? TOOLS[tool].gesture : 'two');
   /** the measurement kind a tool makes (the Rectangle area tool of 0.8.4 makes areas) */
   const kindOfTool = (tool: ToolId) => (tool === 'm-rectarea' ? 'm-area' : tool) as ToolId;
@@ -1586,13 +1619,13 @@ export function Viewer(props: Props) {
       }
       case 'rect': setDraft({ kind: 'rect', page, a: p, b: p }); return;
       case 'two':
-        if (draft && draft.kind === 'two' && draft.clicked) { const q = onDraftPage(draft.page); const d = { ...draft, b: twoEnd(draft.a, q, e.shiftKey, draft.page) }; void finishDraft(d); return; }
+        if (draft && draft.kind === 'two' && draft.clicked) { const q = onDraftPage(draft.page); const d = { ...draft, b: twoEnd(draft.a, q, e.shiftKey, draft.page, straight(e, draft.page, q)) }; void finishDraft(d); return; }
         setDraft({ kind: 'two', page, a: p, b: p, clicked: false });
         return;
       case 'poly': {
         if (draft && draft.kind === 'poly' && draft.page === page) {
           const last = draft.pts[draft.pts.length - 1];
-          const q = (e.shiftKey || P.current.orthoOn) ? ortho(last, p) : p;
+          const q = straight(e, page, p) ? ortho(last, p) : p;
           // double-click or click on the start point: finish
           if (dbl || (draft.pts.length > 2 && dist(q, draft.pts[0]) < 6 / z)) { void finishDraft(draft); return; }
           const pts = [...draft.pts, q];
@@ -1703,11 +1736,13 @@ export function Viewer(props: Props) {
     let p = at.p;
     const tool = props.tool;
     if (TOOLS[tool].snaps || drag?.mode === 'vertex') { doSnap(page, p, e); p = snapped(page, p); } else if (snapMark) setSnapMark(null);
-    if (P.current.crossOn || P.current.loupeOn) {
-      // (the loupe looks at the point a click would put down: snapped, and straightened while drawing)
-      const last = draft && draft.kind === 'poly' && draft.page === page ? draft.pts[draft.pts.length - 1] : null;
-      aidAt.current = { cx: e.clientX, cy: e.clientY, page, p: last && (e.shiftKey || P.current.orthoOn) ? ortho(last, p) : p };
-      requestAnimationFrame(paintAids);
+    {
+      // (the loupe looks at the point a click would put down: snapped, and straightened while drawing;
+      // kept with the aids off too - turned on, they open where the pointer is)
+      const last = draft && draft.page === page ? (draft.kind === 'poly' ? draft.pts[draft.pts.length - 1] : null) : null;
+      const two = draft && draft.kind === 'two' && draft.page === page ? draft : null;
+      aidAt.current = { cx: e.clientX, cy: e.clientY, page, p: last && straight(e, page, p) ? ortho(last, p) : two ? twoEnd(two.a, p, e.shiftKey, page, straight(e, page, p)) : p };
+      if (P.current.crossOn || P.current.loupeOn) requestAnimationFrame(paintAids);
     }
     // markups stay on the page: points dragged past its edge stop at the edge (a callout's tip
     // could be pulled thousands of points off the sheet, where nobody would find it again)
@@ -1748,7 +1783,7 @@ export function Viewer(props: Props) {
         case 'vertex': {
           const a = (annots[page] || []).find((x) => x.id === drag.id);
           // Shift: the edge from the corner before goes straight (0 / 45 / 90°)
-          const nb = !(e.shiftKey || P.current.orthoOn) || !a ? null : drag.which === 'l' && a.line ? a.line[1 - drag.index] : drag.which === 'v' && a.vertices ? (drag.ins ? a.vertices[drag.index - 1] : drag.index > 0 ? a.vertices[drag.index - 1] : a.type === 'Polygon' ? a.vertices[a.vertices.length - 1] : a.vertices[1]) : null;
+          const nb = !straight(e, page, p) || !a ? null : drag.which === 'l' && a.line ? a.line[1 - drag.index] : drag.which === 'v' && a.vertices ? (drag.ins ? a.vertices[drag.index - 1] : drag.index > 0 ? a.vertices[drag.index - 1] : a.type === 'Polygon' ? a.vertices[a.vertices.length - 1] : a.vertices[1]) : null;
           let q = nb ? ortho(nb, at.p) : p;
           const pg = pages[page];
           if (pg) q = [Math.max(0, Math.min(pg.w, q[0])), Math.max(0, Math.min(pg.h, q[1]))];
@@ -1798,7 +1833,7 @@ export function Viewer(props: Props) {
           return;
         }
         case 'two': {
-          const b = twoEnd(draft.a, p, e.shiftKey, draft.page);
+          const b = twoEnd(draft.a, p, e.shiftKey, draft.page, straight(e, draft.page, p));
           setDraft({ ...draft, b, clicked: draft.clicked || (e.buttons === 0) });
           const how = howOf(tool);
           if (how === 'rect') {
@@ -1817,10 +1852,11 @@ export function Viewer(props: Props) {
         }
         case 'poly': {
           const last = draft.pts[draft.pts.length - 1];
-          const cur = (e.shiftKey || P.current.orthoOn) ? ortho(last, p) : p;
+          const cur = straight(e, page, p) ? ortho(last, p) : p;
           setDraft({ ...draft, cur });
           if (tool.startsWith('m-')) {
-            const pts = [...draft.pts, cur];
+            // (continuing from a corner: the rest of the shape counts too)
+            const pts = [...draft.pts, cur, ...(draft.cont?.tail ?? [])];
             const txt = measureText(tool, page, pts);
             tipAt(txt + (tool !== 'm-angle' ? '   (segment ' + fmtLen(realDist(last, cur, scaleFor(page, last)), scaleFor(page, last), P.current.style.fmt) + ' at ' + angleOf(last, cur) + ')' : ''));
           }
@@ -2259,7 +2295,7 @@ export function Viewer(props: Props) {
   const tellPoints = (d: Extract<Draft, { kind: 'poly' }>) => {
     const t = P.current.tool;
     const n = d.pts.length - (d.cont ? d.cont.base : 0);
-    P.current.onEvent({ type: 'status', text: `${n} point${n === 1 ? '' : 's'}${t.startsWith('m-') && d.pts.length > 1 ? ' - ' + measureText(t, d.page, d.pts) : ''}. Ctrl+Z takes back a point, Ctrl+Y puts it back.` });
+    P.current.onEvent({ type: 'status', text: `${n} point${n === 1 ? '' : 's'}${t.startsWith('m-') && d.pts.length > 1 ? ' - ' + measureText(t, d.page, [...d.pts, ...(d.cont?.tail ?? [])]) : ''}. Ctrl+Z takes back a point, Ctrl+Y puts it back.` });
   };
   const pointKeys = useRef({ undoPoint, redoPoint, cancelDraft, closeDraft });
   pointKeys.current = { undoPoint, redoPoint, cancelDraft, closeDraft };
@@ -2702,7 +2738,7 @@ export function Viewer(props: Props) {
     const closedTool = ['polygon', 'cloud', 'm-area', 'm-perimeter'].includes(tool);
     const n = draft.pts.length - (draft.cont ? draft.cont.base : 0);
     const enough = draft.cont ? n > 0 : draft.pts.length >= (closedTool ? 3 : 2);
-    const live = tool.startsWith('m-') && draft.pts.length >= 1 ? measureText(tool, draft.page, [...draft.pts, draft.cur]) : '';
+    const live = tool.startsWith('m-') && draft.pts.length >= 1 ? measureText(tool, draft.page, [...draft.pts, draft.cur, ...(draft.cont?.tail ?? [])]) : '';
     const stop = (e: React.SyntheticEvent) => e.stopPropagation();
     return (
       <div className="drawbar" style={{ left: vp.left + vp.w / 2, top: vp.top + vp.h - (tool === 'm-area' || tool === 'm-perimeter' ? 100 : 52) }} onPointerDown={stop} onPointerUp={stop} onDoubleClick={stop} onMouseDown={(e) => e.preventDefault()}>

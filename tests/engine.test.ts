@@ -539,6 +539,46 @@ test('saving twice in a row (incremental) gives a clean file each time', () => {
   }
 });
 
+test('a file whose index merely points off is repaired quietly; a cut-short one is told', () => {
+  // (as a quotation from Excel 2016: the body's line ends don't match what the index says)
+  const head = spec.indexOf(10) + 1;
+  const tail = new TextDecoder('latin1').decode(spec.subarray(spec.length - 4096));
+  assert.ok(tail.includes('startxref'), 'fixture has a classic end');
+  const off = new Uint8Array(spec.length + 7);
+  off.set(spec.subarray(0, head));
+  off.fill(32, head, head + 7); // 7 spaces near the top: every offset after them is off
+  off.set(spec.subarray(head), head + 7);
+  const r = mu.open('rq', off);
+  assert.equal(r.repaired, true, 'index rebuilt');
+  assert.equal(r.lossy, false, 'nothing missing: not told');
+  assert.equal(r.pages.length, mu.open('rq0', spec).pages.length, 'every page there');
+  mu.close('rq'); mu.close('rq0');
+  const cut = spec.slice(0, Math.floor(spec.length * 0.6));
+  const c = mu.open('rc', cut);
+  assert.equal(c.repaired, true);
+  assert.equal(c.lossy, true, 'cut short: told');
+  mu.close('rc');
+  // a page's content cut out of the middle (the index off after it): the page dict is there, its
+  // content leads nowhere - told (0.9.7 run 1 quietly opened it blank)
+  const d = new mupdf.PDFDocument();
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, 'BT /F1 24 Tf 72 700 Td (KEEP) Tj ET'));
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, 'BT /F1 24 Tf 72 700 Td (LOST PAGE CONTENT) Tj ET'));
+  const raw = new TextDecoder('latin1').decode(d.saveToBuffer('').asUint8Array());
+  const m = /\n(\d+) 0 obj\s*<<[^>]*\/Length[^>]*>>\s*stream\s*BT \/F1 24 Tf 72 700 Td \(LOST/.exec(raw)!;
+  const at = m.index + 1, end = raw.indexOf('endobj', at) + 6;
+  const holed = Uint8Array.from(raw.slice(0, at) + raw.slice(end), (ch) => ch.charCodeAt(0));
+  const h = mu.open('rh', holed);
+  assert.equal(h.repaired, true);
+  assert.equal(h.pages.length, 2);
+  assert.equal(h.lossy, true, 'a page\'s content gone: told');
+  mu.close('rh');
+  // junk after the end (5 KB - more than the 4 KB looked at up to 0.9.6), nothing missing: quiet
+  const junk = new Uint8Array(off.length + 5000); junk.set(off); junk.fill(32, off.length);
+  const j = mu.open('rj', junk);
+  assert.equal(j.lossy, false, 'junk after %%EOF: not told');
+  mu.close('rj');
+});
+
 test('after a redaction, later saves never bring the removed text back (no incremental)', () => {
   mu.open('k2', spec);
   const hits = mu.searchQuads('k2', 3, 'clause 9');

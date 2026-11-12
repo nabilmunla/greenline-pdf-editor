@@ -17,6 +17,24 @@ export function notesOf(version: string): NoteGroups | null {
 }
 /** every version with notes, newest first */
 export const noteVersions = (): string[] => Object.keys(releaseNotes).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+/**
+ * The notes of every version after `from` up to `to`, merged by group (newest first; "Coming
+ * next" from the newest only; a line repeated across versions once). Updating from 0.9.4 straight
+ * to 0.9.6 showed only 0.9.6's notes: 0.9.5's fixes were never mentioned.
+ */
+export function notesSince(from: string, to: string): NoteGroups | null {
+  const vs = noteVersions().filter((v) => newerVersion(v, from) && !newerVersion(v, to));
+  if (vs.length <= 1) return notesOf(to);
+  const out: NoteGroups = {};
+  vs.forEach((v, i) => {
+    for (const [k, items] of Object.entries(notesOf(v) || {})) {
+      if (i > 0 && /^coming next/i.test(k)) continue;
+      const g = (out[k] = out[k] || []);
+      for (const x of items) if (!g.includes(x)) g.push(x);
+    }
+  });
+  return Object.keys(out).length ? out : notesOf(to);
+}
 
 /** "What's new": a few short lines per group (TLDR) */
 export function WhatsNew({ groups, compact }: { groups: NoteGroups; compact?: boolean }) {
@@ -82,7 +100,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
     return (
       <div className="upcard" role="status">
         <div className="up-head"><Ico n="check" size={16} /><b>{updated.back ? `Back to version ${updated.to}` : `Updated to ${updated.to}`}</b></div>
-        {!updated.back && <NotesToggle groups={notesOf(updated.to) || updated.groups || (updated.notes.length ? { '': updated.notes } : null)} />}
+        {!updated.back && <NotesToggle groups={(updated.from ? notesSince(updated.from, updated.to) : notesOf(updated.to)) || updated.groups || (updated.notes.length ? { '': updated.notes } : null)} />}
         <div className="up-btns"><button className="btn sm primary" onClick={onDone}>OK</button></div>
       </div>
     );

@@ -1,4 +1,18 @@
 {
+  "0.9.7": {
+    "New features": [
+      "Drawing engines can now use up to 4 GB each (2 GB before): a page whose pictures need more than 2 GB is drawn instead of stopping the engine. An engine still starts afresh quietly before that, at a point set by the PC's memory and the number of engines",
+      "Updates now list what every version you skipped brought - in the update card and in \"Updated to\" afterwards - not only the newest (going from 0.9.4 straight to 0.9.6 left out 0.9.5's fixes)"
+    ],
+    "General polishing": [
+      "A file whose index merely points a little off (common in PDFs saved from Excel) opens without the \"was damaged\" notice - repaired quietly, as Acrobat does. The notice stays for files really missing something: cut short (also within a section saved later), a page that can't be found, or a page's content, pictures, fonts or markups missing",
+      "Ortho (F8) now also straightens Length, Calibrate, Line and Arrow; a point that snapped to something stays on it with Ortho on (it was moved off its target)",
+      "Continue from this corner works with Area / Perimeter in rectangle or circle mode (it made a stray rectangle instead); the tip and the drawing bar count the rest of the shape while you continue",
+      "Snapping no longer misses the spot the pointer stops on while the drawing engine is busy",
+      "The magnifier follows the page when it scrolls or zooms under a still pointer, opens where the pointer is, and skips pages too heavy to draw sharp; the perpendicular snap only offers edges that are drawn",
+      "Make files searchable (several files): a drawing engine starting afresh during the run no longer fails the file"
+    ]
+  },
   "0.9.6": {
     "New features": [
       "⊥ snapping: while you draw, a line near the pointer offers the point square to it from the point you came from - on the drawing's lines and on markup edges (as in the Estimation app)",

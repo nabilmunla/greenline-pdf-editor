@@ -35,6 +35,22 @@ export function withSink<T>(write: (view: Uint8Array) => void, run: () => T): T 
 }
 const out_ = (b: mupdf.Buffer) => out(b);
 /** the startxref value at the end of a file (-1 if not found) */
+/**
+ * A file cut short: no startxref in its last 64 KB, or object headers after the last one (an
+ * appended section - markups, form fills, a signature - that lost its end). (4 KB, as was: a file
+ * cut a few KB into its last appended section still had the earlier startxref - its markups were
+ * gone without a word; and more than 4 KB of junk after %%EOF counted as cut.)
+ */
+function cutShort(b: In): boolean {
+  const size = inSize(b);
+  const n = Math.min(65536, size);
+  let tail: Uint8Array;
+  if (b instanceof Uint8Array) tail = b.subarray(size - n);
+  else { tail = new Uint8Array(n); if (b.read(tail, 0, n, size - n) !== n) return true; }
+  const t = new TextDecoder('latin1').decode(tail);
+  const sx = t.lastIndexOf('startxref');
+  return sx < 0 || /\d+\s+\d+\s+obj\b/.test(t.slice(sx));
+}
 function startXref(b: In): number {
   const size = inSize(b);
   const n = Math.min(4096, size);
@@ -380,7 +396,14 @@ function hideReplies(p: mupdf.PDFPage) {
 // ---------------------------------------------------------------- open / close
 
 /** signed: the file carries a digital signature (saves append to it; see save) */
-export interface OpenResult { pages: PageInfo[]; needsPassword: boolean; repaired: boolean; fixedTurn?: boolean; heavy?: number; title: string; author: string; encrypted: boolean; hasForms: boolean; signed?: boolean }
+/**
+ * `repaired`: MuPDF had to rebuild the file's index. `lossy`: and something is missing - the
+ * file is cut short (cutShort), a page can't be found, or something a page uses leads nowhere. A file whose
+ * index merely points a little off (a quotation from Excel 2016, Nov 2026: its line ends don't
+ * match the index - every object is still there; Acrobat and qpdf repair such files without a
+ * word) is repaired quietly.
+ */
+export interface OpenResult { pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; title: string; author: string; encrypted: boolean; hasForms: boolean; signed?: boolean }
 
 export function open(id: string, bytes: In, password?: string, author = ''): OpenResult {
   close(id);
@@ -411,9 +434,28 @@ export function open(id: string, bytes: In, password?: string, author = ''): Ope
   // cuts it down - the two would disagree on the page's shape (markups off the drawing). Set to
   // MuPDF's value here; the drawing engine then gets this copy.
   let turned = false;
+  // (with `repaired`, what tells real damage from a mere misplaced index - see OpenResult.lossy:
+  // pages that can't be found, and what a page uses that leads nowhere after the repair - its
+  // content, markups, pictures, fonts: a page whose content or scan was cut out opened blank, and
+  // nothing was said)
+  const repaired = doc.wasRepaired();
+  let broken = 0;
+  const gone = (v: mupdf.PDFObject) => v.isIndirect() && v.resolve().isNull();
   for (let i = 0, n = doc.countPages(); i < n; i++) {
+    let po: mupdf.PDFObject;
+    try { po = doc.findPage(i); if (!po.isDictionary()) { broken++; continue; } } catch { broken++; continue; }
+    if (repaired && !broken) {
+      try {
+        for (const k of ['Contents', 'Annots']) {
+          const v = po.get(k);
+          if (gone(v)) broken++;
+          else if (v.isArray()) for (let j = 0; j < v.length; j++) if (gone(v.get(j))) broken++;
+        }
+        const res = po.getInheritable('Resources');
+        for (const k of ['XObject', 'Font']) { const dd = res.get(k); if (dd.isDictionary()) dd.forEach((v: mupdf.PDFObject) => { if (gone(v)) broken++; }); }
+      } catch { broken++; }
+    }
     try {
-      const po = doc.findPage(i);
       const r = po.getInheritable('Rotate');
       if (r.isNumber() && r.asNumber() % 90 !== 0) { po.put('Rotate', (((Math.round(r.asNumber() / 90) * 90) % 360) + 360) % 360); turned = true; }
     } catch { /* a broken page: left as it is */ }
@@ -428,7 +470,8 @@ export function open(id: string, bytes: In, password?: string, author = ''): Ope
   return {
     pages,
     needsPassword: false,
-    repaired: doc.wasRepaired(),
+    repaired,
+    lossy: repaired && (broken > 0 || !pages.length || cutShort(bytes)),
     fixedTurn: turned || merged > 0,
     heavy: merged,
     title: doc.getMetaData('info:Title') || '',

@@ -3,6 +3,7 @@
 // no PNG encoding), and the words come back with their boxes in page points.
 import { createWorker, type Worker as TWorker } from 'tesseract.js';
 import { rendererFor } from './engines';
+import { isEngineDown } from '../engine/rpc';
 import { prep } from './ocrprep';
 
 export type OcrLang = 'eng' | 'ara' | 'eng+ara';
@@ -150,7 +151,10 @@ async function pagePgm(docId: string, page: number, pw: number, ph: number, rect
   const maxSide = 7000;
   scale = Math.min(scale, maxSide / Math.max(r[2] - r[0], r[3] - r[1]));
   const W = Math.max(1, Math.round((r[2] - r[0]) * scale)), H = Math.max(1, Math.round((r[3] - r[1]) * scale));
-  const bmp = await rendererFor(docId, page).call<ImageBitmap>('tile', [docId, page, scale, Math.round(r[0] * scale), Math.round(r[1] * scale), W, H]);
+  const tile = () => rendererFor(docId, page).call<ImageBitmap>('tile', [docId, page, scale, Math.round(r[0] * scale), Math.round(r[1] * scale), W, H]);
+  // (the drawing engine went down or restarted while drawing it: once more, on the new engine -
+  // the file is reopened there first)
+  const bmp = await tile().catch(async (e: unknown) => { if (!isEngineDown(e)) throw e; await new Promise((res) => setTimeout(res, 1500)); return tile(); });
   const turned = quarter % 2 === 1;
   const OW = turned ? H : W, OH = turned ? W : H;
   const pgm = await prepPgm(bmp, W, H, quarter, denoise);

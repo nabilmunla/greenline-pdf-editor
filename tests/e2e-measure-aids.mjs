@@ -153,6 +153,10 @@ try {
   ok(await E(() => getComputedStyle(document.querySelector('.loupe')).display === 'none'), 'F7 again: gone');
 
   // ---------------------------------------------------------------- continue from a corner
+  // (zoomed out: at 140% the third corner fell under the Area tool's bars at the bottom middle of
+  // the view - the click went to them, depending on where the page sat)
+  await E(() => window.__gcc.viewer().setZoom(1));
+  await sleep(800);
   await tool('m-area');
   for (const q of [[120, 430], [220, 440], [230, 520], [110, 520]]) { await move(...q); await click(...q); await sleep(200); } // (not a rectangle: those keep square)
   await win.keyboard.press('Enter');

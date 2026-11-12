@@ -507,7 +507,7 @@ export function App() {
       setSel([]);
       setPageSel([]);
     }
-    if (d.repaired) toast(`${d.name} was damaged; it was repaired while opening. Save to keep the repaired copy.`, 'info', undefined, 8000);
+    if (d.lossy) toast(`${d.name} was damaged; it was repaired while opening. Save to keep the repaired copy.`, 'info', undefined, 8000);
     if (d.heavy) toast(`${d.name} is an extremely heavy drawing (millions of separate line pieces). They were joined into fewer lines so it can be drawn at all - same drawing, very dense hatching may look a touch darker. The first picture can take half a minute.`, 'info', undefined, 12000);
     if (d.readOnly) toast(`${d.name} is read-only here – use Save as to keep changes.`, 'info');
   }

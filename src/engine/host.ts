@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import path from 'node:path';
+import os from 'node:os';
 import { VFile, isFileSrc, tempPath, writeView, removeTemp, statOf, workDir, type FileSrc } from './files';
 
 type Handler = (...a: any[]) => unknown;
@@ -28,6 +29,10 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
   const pf = await import('./pdfium');
   const wasm = fs.readFileSync(path.join(resDir, 'pdfium.wasm'));
   await pf.startPdfium(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength) as ArrayBuffer);
+  // (tests only - e2e-4gb: PDFED_TEST_FILL=2.1 takes the engine's memory up to 2.1 GB first, so
+  // all its work lands past it)
+  const fill = Number(process.env.PDFED_TEST_FILL);
+  if (fill > 0) pf.fillBelow(fill * 2 ** 30, fill * 2 ** 30);
   return {
     open(id: string, src: VFile | Uint8Array, password?: string) { return pf.openDoc(id, src, password); },
     close(id: string) { pf.closeDoc(id); return true; },
@@ -51,15 +56,24 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
 /**
  * WebAssembly memory only ever grows. A drawing engine that has grown past this (a run of
  * monster scans) starts afresh: it finishes the call, exits, and the app starts a new one
- * and reopens the files in it - a fraction of a second, nothing lost. (The engine can't grow
- * past 2 GB: at 2 GB, as this was, it was never reached - the engine stopped mid-drawing
- * instead, the next big picture asking for more. 1.4 GB leaves room for one more page.)
+ * and reopens the files in it - a fraction of a second, nothing lost.
+ * The engine itself may grow to 4 GB (0.9.7; 2 GB before: a page whose pictures needed more
+ * stopped the engine mid-drawing). Restarted earlier than that, by the PC's memory shared by the
+ * window's drawing engines (2 to 4): 40% of the RAM between them, each at least 1.4 GB (as up
+ * to 0.9.6) and at most 3 GB (1 GB left for the next page) - 16 GB with 4 engines: 1.6 GB each,
+ * with 2: 3 GB. A single page that needs more still gets it (up to 4 GB): this is when to start
+ * afresh, not a limit.
  */
-const RECYCLE_AT = Number(process.env.PDFED_RECYCLE_AT) || 1.4 * 1024 ** 3;
+const ENGINES = Number(process.env.PDFED_RENDERERS) || Math.max(2, Math.min(4, Math.floor((os.cpus().length || 4) / 3)));
+const RECYCLE_AT = Number(process.env.PDFED_RECYCLE_AT) || Math.min(3 * 1024 ** 3, Math.max(1.4 * 1024 ** 3, (os.totalmem() * 0.4) / ENGINES));
+/** not straight after starting (a page that needs that much would loop): 30 s, twice that for each
+ *  planned restart of this engine in the last 10 minutes (the app counts them: PDFED_RECYCLES) -
+ *  a page bigger than the restart point, worked on, restarted the engine every 30 s */
+const MIN_UP = 30 * 2 ** Math.min(4, Number(process.env.PDFED_RECYCLES) || 0);
 export async function renderRecycle(): Promise<boolean> {
   const pf = await import('./pdfium');
   // never straight after starting (a page that needs that much would loop)
-  try { return process.uptime() > 30 && pf.heapBytes() > RECYCLE_AT; } catch { return false; }
+  try { return process.uptime() > MIN_UP && pf.heapBytes() > RECYCLE_AT; } catch { return false; }
 }
 
 /** where each open document reads from, and how that file looked when opened */

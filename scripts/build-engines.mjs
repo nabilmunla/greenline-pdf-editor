@@ -3,7 +3,14 @@
 import { build } from 'esbuild';
 import { mkdirSync, copyFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
+// the drawing engine's JavaScript is a copy patched for 4 GB (scripts/patch-pdfium.mjs): it must be
+// of the installed @embedpdf/pdfium (its .wasm ships as installed - copy-assets)
+{
+  const installed = JSON.parse(readFileSync('node_modules/@embedpdf/pdfium/package.json', 'utf8')).version;
+  const patched = (readFileSync('src/engine/vendor/pdfium-4gb.js', 'utf8').match(/PATCHED_FROM = "([^"]+)"/) || [])[1];
+  if (installed !== patched) throw new Error(`@embedpdf/pdfium ${installed} is installed, the patched copy is of ${patched}: run node scripts/patch-pdfium.mjs`);
+}
 const outDir = 'electron/engines';
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(join(outDir, 'mupdf'), { recursive: true });

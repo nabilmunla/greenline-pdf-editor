@@ -1,7 +1,7 @@
 {
   "name": "pdf-editor",
   "productName": "PDF Editor",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Greenline PDF Editor - opens huge construction PDFs without freezing; markups, scale and measuring.",
   "main": "electron/main.cjs",
   "private": true,
@@ -11,7 +11,7 @@
     "test": "tsx --test tests/*.test.ts"
   },
   "devDependencies": {
-    "@embedpdf/pdfium": "^2.15.1",
+    "@embedpdf/pdfium": "2.15.1",
     "@fontsource-variable/inter": "^5.3.0",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
@@ -45,6 +45,5 @@
   "homepage": "https://github.com/nabilmunla/greenline-pdf-editor",
   "updateFeed": "https://github.com/nabilmunla/greenline-pdf-editor",
   "displayName": "Greenline PDF Editor",
-  "brand": "greenline",
-  "reportEndpoint": "https://greenline-reports.n-munla.workers.dev/report"
+  "brand": "greenline"
 }
