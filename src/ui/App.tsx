@@ -91,7 +91,7 @@ export type Dialog =
   | { k: 'batch-flatten' }
   | { k: 'redact-search' }
   | { k: 'props' }
-  | { k: 'print'; page: number }
+  | { k: 'print'; page: number; area?: Rect }
   | { k: 'counttag'; page: number }
   | { k: 'settings' }
   | { k: 'whatsnew'; back?: boolean }
@@ -177,6 +177,8 @@ export function App() {
   const [place, setPlace] = useState<PlaceItem | null>(null);
   const [countGroup, setCountGroup] = useState('Count 1');
   const [menu, setMenu] = useState<{ x: number; y: number; page: number; at: Pt; text: string | null } | null>(null);
+  /** the area marked with the Snapshot tool (it stays: right-click it to print, copy or save it) */
+  const [marked, setMarked] = useState<{ docId: string; page: number; rect: Rect } | null>(null);
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [recovery, setRecovery] = useState<Recovery[]>([]);
   const [commentFocus, setCommentFocus] = useState(0);
@@ -1030,6 +1032,17 @@ export function App() {
       });
       setVer((v) => v + 1);
     },
+    /** the selected measurements' numbers (and arrows) made bigger or smaller: factor 1.5 = half
+     *  as big again, each from its own size (one undo); the file's size for new ones stays */
+    labelScaleSel: async (f: number) => {
+      if (!doc || !(f > 0) || Math.abs(f - 1) < 1e-6) return;
+      // (read now, not the selection's cached data: a second change straight after the first scaled from the old size)
+      const all = (await Promise.all([...new Set(sel.map((x) => x.page))].map((pg) => doc.annots(pg)))).flat();
+      const list = all.filter((a) => sel.some((x) => x.page === a.page && x.id === a.id) && a.kind?.startsWith('measure-') && a.kind !== 'measure-count' && !a.locked);
+      if (!list.length) return;
+      await doc.update(list.map((a) => ({ page: a.page, id: a.id, patch: { labelSize: Math.round(Math.max(0.2, Math.min(720, (a.labelSize ?? 10) * f)) * 100) / 100 } })), 'Label size');
+      setVer((v) => v + 1);
+    },
     exportMeasurements: async () => {
       if (!doc) return;
       const all = (await doc.allAnnots()).filter((a) => a.kind?.startsWith('measure-'));
@@ -1123,7 +1136,8 @@ export function App() {
       case 'calibrate': setDialog({ k: 'calibrate', page: e.page, a: e.a, b: e.b }); break;
       case 'viewport': setDialog({ k: 'viewport', page: e.page, rect: e.rect }); setToolState('select'); setStatus(TOOLS.select.hint ?? ''); break;
       case 'crop': setDialog({ k: 'crop', page: e.page, rect: e.rect }); setToolState('select'); setStatus(TOOLS.select.hint ?? ''); break;
-      case 'snapshot': if (d) await snapshot(d, e.page, e.rect); break;
+      case 'unmark': setMarked(null); break;
+      case 'snapshot': if (d) { setMarked({ docId: d.id, page: e.page, rect: e.rect }); await snapshot(d, e.page, e.rect); } break;
       case 'table': if (d) await copyTable(d, e.page, e.rect); break;
       case 'link': if (d) setDialog({ k: 'link', page: e.page, rect: e.rect }); break;
       case 'linkAt': {
@@ -1158,16 +1172,20 @@ export function App() {
     return c;
   }
 
+  /** the area as a PNG picture, sharp enough to paste into Word / Outlook / Excel */
+  async function areaPng(d: PdfDoc, page: number, r: Rect) {
+    const s = Math.min(4, 6000 / Math.max(r[2] - r[0], r[3] - r[1]), Math.max(2, 1200 / Math.max(r[2] - r[0], r[3] - r[1])));
+    const c = await areaPicture(d, page, r, s);
+    return { png: new Uint8Array(await (await c.convertToBlob({ type: 'image/png' })).arrayBuffer()), w: c.width, h: c.height };
+  }
+  const saveAreaPng = async (png: Uint8Array) => { const t = await gcc.saveDialog({ name: 'snapshot.png', filters: [{ name: 'PNG picture', extensions: ['png'] }] }); if (t) await gcc.write(t, png, { noBackup: true }).then(() => toast('Saved ' + baseName(t), 'ok'), fail); };
   async function snapshot(d: PdfDoc, page: number, r: Rect) {
     await busy('Copying picture…', async () => {
-      const s = Math.min(4, 6000 / Math.max(r[2] - r[0], r[3] - r[1]), Math.max(2, 1200 / Math.max(r[2] - r[0], r[3] - r[1])));
-      const c = await areaPicture(d, page, r, s);
-      const w = c.width, h = c.height;
-      const png = new Uint8Array(await (await c.convertToBlob({ type: 'image/png' })).arrayBuffer());
+      const { png, w, h } = await areaPng(d, page, r);
       await gcc.copyImage(png);
-      toast(`Picture copied (${w} × ${h} px) – paste it into Word, Outlook or Excel.`, 'ok', {
-        label: 'Save as PNG…', run: async () => { const t = await gcc.saveDialog({ name: 'snapshot.png', filters: [{ name: 'PNG picture', extensions: ['png'] }] }); if (t) await gcc.write(t, png, { noBackup: true }).then(() => toast('Saved ' + baseName(t), 'ok'), fail); },
-      }, 7000);
+      toast(`Picture copied (${w} × ${h} px) – paste it into Word, Outlook or Excel. The area stays marked: right-click it to print or save it (Esc unmarks it).`, 'ok', {
+        label: 'Save as PNG…', run: () => saveAreaPng(png),
+      }, 8000);
     });
   }
 
@@ -1269,6 +1287,7 @@ export function App() {
       // (not from a text box or comment being typed in: the view jumped away from the text)
       if (e.key === 'F3' && !e.altKey && !e.metaKey && (!typing || (e.target as HTMLElement)?.closest?.('.search-in, .find-in, .search'))) { e.preventDefault(); if (hits.length) setHitIndex((i) => (i + (e.shiftKey ? hits.length - 1 : 1)) % hits.length); return; }
       if (typing || e.altKey || e.metaKey) return;
+      if (e.key === 'Escape' && marked) setMarked(null);
       if (e.key === 'F9') { e.preventDefault(); A.toggleSnap(); return; }
       if (e.key === 'F8') { e.preventDefault(); A.toggleOrtho(); return; }
       if (e.key === 'F6') { e.preventDefault(); A.toggleCross(); return; }
@@ -1606,7 +1625,7 @@ export function App() {
               <div className="center">
                 <Viewer
                   key={doc.id} doc={doc} rev={ver} tool={tool} setTool={setTool} style={style} place={place}
-                  countGroup={countGroup} snapOn={snapOn} orthoOn={!!settings.ortho} crossOn={!!settings.cross} loupeOn={!!settings.loupe} loupeZoom={settings.loupeZoom ?? 3} wheelZoom={!!settings.wheelZoom} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
+                  countGroup={countGroup} snapOn={snapOn} orthoOn={!!settings.ortho} crossOn={!!settings.cross} loupeOn={!!settings.loupe} loupeZoom={settings.loupeZoom ?? 3} marked={marked && doc && marked.docId === doc.id ? { page: marked.page, rect: marked.rect } : null} wheelZoom={!!settings.wheelZoom} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
                   sel={sel} setSel={setSel} hits={hits} hitIndex={hitIndex} onEvent={(e) => void onViewerEvent(e)} apiRef={viewer} readOnly={false}
                   how={settings.measureHow || 'points'}
                 />
@@ -1683,7 +1702,13 @@ export function App() {
           </div>
         );
       })()}
-      {menu && doc && <ContextMenu m={menu} doc={doc} sel={sel} A={A as unknown as Actions} close={() => setMenu(null)} setSel={setSel} viewer={viewer} toast={toast} setTool={setTool} />}
+      {menu && doc && <ContextMenu m={menu} doc={doc} sel={sel} A={A as unknown as Actions} close={() => setMenu(null)} setSel={setSel} viewer={viewer} toast={toast} setTool={setTool}
+        area={marked && marked.docId === doc.id && marked.page === menu.page && menu.at[0] >= marked.rect[0] && menu.at[0] <= marked.rect[2] && menu.at[1] >= marked.rect[1] && menu.at[1] <= marked.rect[3] ? {
+          print: () => setDialog({ k: 'print', page: marked.page, area: marked.rect }),
+          copy: () => busy('Copying picture…', async () => { const { png } = await areaPng(doc, marked.page, marked.rect); await gcc.copyImage(png); toast('Picture copied – paste it into Word, Outlook or Excel.', 'ok'); }),
+          save: async () => { const r = await busy('Making the picture…', () => areaPng(doc, marked.page, marked.rect)); if (r) await saveAreaPng(r.png); },
+          unmark: () => setMarked(null),
+        } : null} />}
       {dialog && (
         <D.Dialogs
           // (a dialog closing itself closes only itself: a job it started - OCR after its X, an
@@ -1791,7 +1816,7 @@ function Start({ ready, recent, recovery, A, onRestore, onDiscard }: { ready: bo
   );
 }
 
-function ContextMenu({ m, doc, sel, A, close, setSel, viewer, toast, setTool }: { m: { x: number; y: number; page: number; at: Pt; text: string | null }; doc: PdfDoc; sel: SelItem[]; A: Record<string, any>; close(): void; setSel(s: SelItem[]): void; viewer: React.MutableRefObject<ViewerApi | null>; toast: (t: string, k?: Toast['kind']) => void; setTool(t: ToolId): void }) {
+function ContextMenu({ m, doc, sel, A, close, setSel, viewer, toast, setTool, area }: { m: { x: number; y: number; page: number; at: Pt; text: string | null }; doc: PdfDoc; sel: SelItem[]; A: Record<string, any>; close(): void; setSel(s: SelItem[]): void; viewer: React.MutableRefObject<ViewerApi | null>; toast: (t: string, k?: Toast['kind']) => void; setTool(t: ToolId): void; area?: { print(): unknown; copy(): unknown; save(): unknown; unmark(): unknown } | null }) {
   const [list, setList] = useState<AnnotData[]>([]);
   // (only the pages of the selection - reading every page of a long file made the menu's Lock /
   // Rotate / Edit come a second late)
@@ -1814,6 +1839,13 @@ function ContextMenu({ m, doc, sel, A, close, setSel, viewer, toast, setTool }: 
   }, []);
   return (
     <div className="cmenu" style={style} onPointerDown={(e) => e.stopPropagation()}>
+      {area && <>
+        {item('Print this area…', area.print)}
+        {item('Copy as picture', area.copy)}
+        {item('Save as picture…', area.save)}
+        {item('Unmark the area', area.unmark, false, 'Esc')}
+        <div className="sep" />
+      </>}
       {m.text && <>
         {item('Copy text', () => gcc.copyText(m.text!), false, 'Ctrl+C')}
         {item('Highlight', () => setTool('highlight'))}

@@ -236,12 +236,7 @@ export function Ribbon(p: Props) {
             </div>
           </Group>
           <Group label="Labels">
-            <div className="rstack">
-              <span className="rlab">Number size</span>
-              <select className="input xs" value={String(Number(p.doc?.data.labelK) || 1)} disabled={!p.doc} onChange={(e) => A.labelScale(Number(e.target.value))} title="Size of the measurement numbers and their arrows in this whole file - also the ones already there. 100%: sized for the zoom you measure at.">
-                {[0.5, 0.75, 1, 1.25, 1.5, 2, 3].map((k) => <option key={k} value={String(k)}>{k * 100}%</option>)}
-              </select>
-            </div>
+            <LabelSize A={A} doc={p.doc} n={(p.selItems || []).filter((a) => p.sel.some((x) => x.page === a.page && x.id === a.id) && a.kind?.startsWith('measure-') && a.kind !== 'measure-count' && !a.locked).length} />
             <div className="rstack">
               <span className="rlab">Decimals (m)</span>
               <select className="input xs" value={String(p.style.fmt?.dm ?? FMT_DEFAULTS.dm)} onChange={(e) => p.setToolStyle({ fmt: { ...(p.style.fmt || {}), dm: Number(e.target.value) } })} title="Decimals in metres for new measurements (millimetres, m², unit: side panel). Measurements already made: select them, then change it in the side panel.">
@@ -550,3 +545,45 @@ function FlattenButton({ A, disabled, hasSel }: { A: Record<string, any>; disabl
     </span>
   );
 }
+
+/**
+ * Number size: a slider. Nothing selected - every measurement number (and its arrows) in the file,
+ * and new ones (the file's size, 100% = sized for the zoom you measure at). Measurements selected -
+ * just those, from their own size (100% = as they are; back to 100% after each change). Applied
+ * when the slider is let go (one undo each time).
+ */
+function LabelSize({ A, doc, n }: { A: Record<string, any>; doc: PdfDoc | null; n: number }) {
+  const fileK = Number(doc?.data.labelK) || 1;
+  const base = n ? 1 : fileK;
+  const [v, setV] = useState(base);
+  const vr = useRef(v);
+  vr.current = v;
+  const busy = useRef(false), again = useRef(false);
+  useEffect(() => { setV(base); }, [base, n, doc]);
+  const commit = () => {
+    if (!doc) return;
+    // (let go again while the last change is still being applied: applied after it - it was dropped)
+    if (busy.current) { again.current = true; return; }
+    const k = vr.current;
+    if (Math.abs(k - (n ? 1 : Number(doc.data.labelK) || 1)) < 1e-6) return;
+    busy.current = true;
+    void Promise.resolve(n ? A.labelScaleSel(k) : A.labelScale(k)).finally(() => {
+      busy.current = false;
+      if (n) { if (again.current && Math.abs(vr.current - k) > 1e-6) { again.current = false; const f = vr.current / k; setV(f); vr.current = f; commit(); return; } setV(1); }
+      else if (again.current) { again.current = false; commit(); }
+      again.current = false;
+    });
+  };
+  return (
+    <div className="rstack lsz">
+      <span className="rlab">{n ? `Number size · ${n} selected` : 'Number size · all'}</span>
+      <span className="lsz-row">
+        <input type="range" min={0.25} max={4} step={0.05} value={v} disabled={!doc} aria-label="Number size"
+          onChange={(e) => setV(Number(e.target.value))} onPointerUp={commit} onKeyUp={(e) => { if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End' || e.key === 'PageUp' || e.key === 'PageDown') commit(); }}
+          title={n ? 'Make the selected measurements\' numbers and arrows bigger or smaller (from their own size)' : 'Size of every measurement number and its arrows in this file - also the ones already there - and of new ones. 100%: sized for the zoom you measure at. Select measurements to change only those.'} />
+        <span className="lsz-v">{Math.round(v * 100)}%</span>
+      </span>
+    </div>
+  );
+}
+

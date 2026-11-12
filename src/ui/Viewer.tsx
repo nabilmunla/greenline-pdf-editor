@@ -81,6 +81,7 @@ export type ViewerEvent =
   | { type: 'calibrate'; page: number; a: Pt; b: Pt }
   | { type: 'viewport'; page: number; rect: Rect }
   | { type: 'snapshot'; page: number; rect: Rect }
+  | { type: 'unmark' }
   | { type: 'table'; page: number; rect: Rect }
   | { type: 'link'; page: number; rect: Rect }
   | { type: 'linkAt'; page: number; pt: Pt }
@@ -108,6 +109,8 @@ interface Props {
   /** Magnifier (F7): a loupe beside the pointer, at this many times the zoom */
   loupeOn?: boolean;
   loupeZoom?: number;
+  /** an area marked with the Snapshot tool: shown (dashed) until unmarked - right-click it to print, copy or save it */
+  marked?: { page: number; rect: Rect } | null;
   wheelZoom: boolean;
   keepTool: boolean;
   sel: SelItem[];
@@ -1500,6 +1503,10 @@ export function Viewer(props: Props) {
       }
       return;
     }
+    // a click outside the area marked with the Snapshot tool unmarks it (as a selection goes);
+    // a click inside keeps it
+    const mk = P.current.marked;
+    if (e.button === 0 && mk && !(at && at.page === mk.page && at.p[0] >= mk.rect[0] && at.p[0] <= mk.rect[2] && at.p[1] >= mk.rect[1] && at.p[1] <= mk.rect[3])) P.current.onEvent({ type: 'unmark' });
     if (e.button !== 0 || !at) return;
     const { page } = at;
     let p = at.p;
@@ -2403,6 +2410,8 @@ export function Viewer(props: Props) {
         if (draft?.kind === 'ink' && !btnDown.current) { void flushInk(); setTip(null); return; }
         if (draft) { cancelDraft(); return; }
         if (textSel) { setTextSel(null); return; }
+        // (the area marked with the Snapshot tool goes first)
+        if (pr.marked) { pr.onEvent({ type: 'unmark' }); return; }
         if (pr.sel.length) { pr.setSel([]); return; }
         if (pr.tool !== 'select') pr.setTool('select');
         return;
@@ -2676,6 +2685,10 @@ export function Viewer(props: Props) {
       const hl = 4 + lw * 3, hw = hl * 0.45;
       const b: Pt = [t[0] + ux * hl, t[1] + uy * hl];
       out.push(<polygon key={k('eca')} points={`${t[0]},${t[1]} ${b[0] - uy * hw},${b[1] + ux * hw} ${b[0] + uy * hw},${b[1] - ux * hw}`} fill={editor.color} stroke={editor.color} strokeWidth={lw} strokeLinejoin="round" />);
+    }
+    if (props.marked && props.marked.page === page) {
+      const r = props.marked.rect;
+      out.push(<rect key={k('mk')} className="marked" x={r[0]} y={r[1]} width={r[2] - r[0]} height={r[3] - r[1]} strokeWidth={sw * 1.5} strokeDasharray={`${6 * sw} ${4 * sw}`} />);
     }
     if (snapMark && snapMark.page === page) {
       const p = snapMark.p, r = 6 * sw;

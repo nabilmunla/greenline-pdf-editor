@@ -73,7 +73,7 @@ export function Dialogs(p: Props) {
     case 'redact-search': return <RedactSearchDlg {...p} />;
     case 'props': return <PropsDlg {...p} />;
     case 'counttag': return p.doc ? <CountTagDlg doc={p.doc} page={d.page} style={p.settings.styles?.['m-count']} close={close} toast={p.toast} fail={p.fail} setCountGroup={(g) => p.A.setCounting(g)} showTotals={() => p.A.totals()} /> : null;
-    case 'print': return p.doc ? <PrintDlg doc={p.doc} page={d.page} pageSel={p.pageSel} settings={p.settings.print || {}} save={(s) => p.saveSettings({ print: s })} close={close} toast={p.toast} fail={p.fail} /> : null;
+    case 'print': return p.doc ? <PrintDlg doc={p.doc} page={d.page} area={d.area} pageSel={p.pageSel} settings={p.settings.print || {}} save={(s) => p.saveSettings({ print: s })} close={close} toast={p.toast} fail={p.fail} /> : null;
     case 'settings': return <SettingsDlg {...p} />;
     case 'whatsnew': return <WhatsNewDlg {...p} back={!!d.back} />;
     case 'licences': return <LicencesDlg onClose={() => p.setDialog({ k: 'settings' })} />;

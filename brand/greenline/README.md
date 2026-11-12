@@ -32,7 +32,7 @@ How: pages are read from disk only as they're needed, never the whole file at on
 - **Pages:** merge, extract, insert, reorder and rotate thousands of pages; combine files straight from Windows Explorer's right-click menu.
 - **Scans:** OCR in English and Arabic, fully offline.
 - **Export:** BOQs and schedules to Excel, documents to Word.
-- **Print:** A0 sheets fitted onto A3 or A4, or at actual size for drawings to scale, with a preview of every sheet.
+- **Print:** A0 sheets fitted onto A3 or A4, or at actual size for drawings to scale, with a preview of every sheet; or just a marked part of a sheet, enlarged to the paper.
 - **Optional:** an AI assistant (Claude or ChatGPT, with your own key) and an offline translator.
 
 <p align="center"><img src="brand/greenline/screenshots/zoom.gif" width="800" alt="Zooming from a whole A1 sheet into a 1:50 unit plan"></p>

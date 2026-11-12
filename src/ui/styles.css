@@ -764,3 +764,12 @@ body:has(.scrim) .toasts { top: 16px; bottom: auto; }
 .loupe { position: fixed; display: none; pointer-events: none; z-index: 7; width: 180px; height: 180px; border-radius: 50%; border: 2px solid #09302f; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); background: #fff; }
 .ribbon .rsmall { align-self: center; display: flex; align-items: center; gap: 2px; font-size: 12px; margin-left: 2px; }
 .ribbon .rsmall select { font: inherit; padding: 1px 2px; }
+
+/* the area marked with the Snapshot tool (stays until unmarked: right-click it to print / copy / save) */
+.ov .marked { fill: rgba(31, 174, 99, 0.06); stroke: #1fae63; animation: marked-ants 0.8s linear infinite; pointer-events: none; }
+@keyframes marked-ants { to { stroke-dashoffset: -20; } }
+
+/* Number size slider (Measure > Labels) */
+.ribbon .lsz-row { display: flex; align-items: center; gap: 6px; }
+.ribbon .lsz input[type='range'] { width: 110px; accent-color: var(--accent, #1fae63); }
+.ribbon .lsz-v { font-variant-numeric: tabular-nums; min-width: 38px; font-size: 11px; }

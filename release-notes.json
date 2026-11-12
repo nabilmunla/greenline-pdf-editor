@@ -1,4 +1,10 @@
 {
+  "0.9.9": {
+    "New features": [
+      "Number size is now a slider (Measure > Labels, 25% to 400%): nothing selected - every measurement number in the file; measurements selected - only those, bigger or smaller from their own size",
+      "Snapshot keeps its area marked: right-click it to print just that part (enlarged to the paper), copy it or save it as a picture; Esc or a click outside it unmarks it, as with a selection"
+    ]
+  },
   "0.9.8": {
     "General polishing": [
       "Pages already drawn no longer stay blank after Windows was locked or asleep: they are drawn again when you unlock or wake the PC, or when the graphics card's memory is reset (the app kept reusing the wiped pictures - pages seen before showed white until the file was opened again)"

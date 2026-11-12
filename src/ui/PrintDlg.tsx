@@ -1,4 +1,5 @@
 // Print: our own panel (printer, pages, paper, size, markups) with a true preview of each sheet.
+import type { Rect } from '../engine/mu';
 // The engine makes the file for the printer (each page already placed on its sheet, vector),
 // Chromium's PDF engine sends it to the printer.
 import { NumIn } from './numin';
@@ -31,6 +32,8 @@ export interface PrintSettings {
 interface Props {
   doc: PdfDoc;
   page: number;
+  /** an area marked with the Snapshot tool on that page: offered first ("The marked area") */
+  area?: Rect | null;
   pageSel: number[];
   settings: PrintSettings;
   save(s: PrintSettings): void;
@@ -39,7 +42,7 @@ interface Props {
   fail(e: unknown): void;
 }
 
-type Which = 'all' | 'current' | 'view' | 'selected' | 'range';
+type Which = 'all' | 'current' | 'view' | 'area' | 'selected' | 'range';
 interface Printer { name: string; displayName: string; description: string; isDefault: boolean; status: number }
 
 const MM = 72 / 25.4;
@@ -54,7 +57,7 @@ export function PrintDlg(p: Props) {
   const [printer, setPrinter] = useState('');
   const [copies, setCopies] = useState(1);
   const [collate, setCollate] = useState(true);
-  const [which, setWhich] = useState<Which>(p.pageSel.length > 1 ? 'selected' : 'all');
+  const [which, setWhich] = useState<Which>(p.area ? 'area' : p.pageSel.length > 1 ? 'selected' : 'all');
   const [range, setRange] = useState(() => `${p.page + 1}`);
   const [subset, setSubset] = useState<'all' | 'odd' | 'even'>('all');
   const [reverse, setReverse] = useState(false);
@@ -90,10 +93,10 @@ export function PrintDlg(p: Props) {
   const pages = useMemo(() => {
     let l: number[];
     if (which === 'all') l = [...Array(n).keys()];
-    else if (which === 'current' || which === 'view') l = [p.page];
+    else if (which === 'current' || which === 'view' || which === 'area') l = [p.page];
     else if (which === 'selected') l = [...p.pageSel].sort((a, b) => a - b);
     else l = parseRanges(range, n);
-    if (which !== 'current' && which !== 'view') {
+    if (which !== 'current' && which !== 'view' && which !== 'area') {
       if (subset === 'odd') l = l.filter((i) => i % 2 === 0);
       if (subset === 'even') l = l.filter((i) => i % 2 === 1);
     }
@@ -102,7 +105,7 @@ export function PrintDlg(p: Props) {
 
   const paperDef = PAPERS.find((x) => x.name === paper) || null;
   const opts: PrintOpts = {
-    pages, region: which === 'view' ? view : null,
+    pages, region: which === 'view' ? view : which === 'area' ? p.area ?? null : null,
     paper: paper === 'page' ? null : paperDef, orient, scale, pct, margin: marginMm * MM, markups,
     send, gray: !color,
   };
@@ -302,6 +305,7 @@ export function PrintDlg(p: Props) {
               ['all', `All ${n}`],
               ['current', 'This page', `Page ${p.page + 1}`],
               ['view', 'What\'s in view', 'Only the part of this page on screen, enlarged to the paper'],
+              ...(p.area ? [['area', 'The marked area', 'Only the area marked with the Snapshot tool, enlarged to the paper'] as [Which, string, string]] : []),
               ...(p.pageSel.length > 1 ? [['selected', `Selected ${p.pageSel.length}`, 'The pages selected in the Pages panel'] as [Which, string, string]] : []),
               ['range', 'Pages…'],
             ])}

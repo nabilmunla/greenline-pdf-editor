@@ -1,8 +1,8 @@
-PDF EDITOR - version 0.9.8
+PDF EDITOR - version 0.9.9
 ==========================
 
 INSTALL IT
-  Run "PDF Editor Setup 0.9.8.exe" (one file). Install puts it in your own Programs
+  Run "PDF Editor Setup 0.9.9.exe" (one file). Install puts it in your own Programs
   folder - no admin rights - with a Start menu shortcut, a desktop shortcut and PDF
   Editor listed in "Open with" for PDFs. Options: install for everyone on the PC
   (asks for admin rights; Program Files), another folder, no desktop shortcut, not
@@ -11,14 +11,14 @@ INSTALL IT
   (as \\server\share, not a drive letter). Your settings and keys survive reinstalls.
   Remove: Windows Settings > Apps > PDF Editor > Uninstall (or "PDF Editor Setup.exe"
   in the app folder). Optionally removes your settings too; your PDFs are never touched.
-  For IT: "PDF Editor Setup 0.9.8.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
+  For IT: "PDF Editor Setup 0.9.9.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
   [--no-desktop] [--no-open-with] [--updates "\\server\share\PDF Editor"];
   uninstall: "<app folder>\PDF Editor Setup.exe" --uninstall --silent. Log:
   %TEMP%\PDF Editor Setup.log.
   Windows may warn on first run ("Windows protected your PC" > More info > Run anyway)
   because the setup isn't signed with a company code-signing certificate.
   If the setup window stays empty, it switches to plain Windows prompts by itself after
-  a few seconds; "PDF Editor Setup 0.9.8.exe" --plain uses the plain prompts straight away.
+  a few seconds; "PDF Editor Setup 0.9.9.exe" --plain uses the plain prompts straight away.
 
 UPDATES
   An installed copy looks in its updates folder for a newer version at start and every
@@ -106,8 +106,12 @@ PRINTING  (Ctrl+P, or Print on the Home tab / File)
     keep there applies when you print. Paper, copies, sides and colour are set in the panel.
     The paper picked (A3, A4...) is the paper the printer uses.
   - Pages: all, this page, what's in view (the part of the page on screen, enlarged to
-    the paper - handy for a detail of an A0 sheet), the pages selected in the Pages
-    panel, or a list (1-5, 8, 11-). Odd / even only, reverse order.
+    the paper - handy for a detail of an A0 sheet), the marked area (below), the pages
+    selected in the Pages panel, or a list (1-5, 8, 11-). Odd / even only, reverse order.
+  - Print just a part: Home > Tools > Snapshot, drag a box round it - the picture is copied
+    and the area stays marked (green dashes). Right-click it: Print this area (the print
+    panel opens on "The marked area", enlarged to the paper), Copy as picture, Save as
+    picture, Unmark (or Esc, or a click outside it - as with a selection).
   - Document and markups, or document only (form fields always print).
   - Paper (A4...A0, Letter, Legal, Tabloid, or the page's own size), orientation
     (Auto turns the paper to suit each page), size: Fit (inside a margin you set),
@@ -272,9 +276,11 @@ MEASURE  (Measure tab)
   yourself is left alone.
   Number size: new numbers are sized for the zoom you measure at (zoomed in on a detail
   = small on the sheet, normal on screen); a length's line and arrows too. The arrows
-  are always about as long as the number is tall. Labels > Number size changes all of
-  them in the file at once (one Undo) - also older ones, which get the new arrows;
-  one measurement: right panel > Number size.
+  are always about as long as the number is tall. Measure > Labels > Number size is a
+  slider (25% to 400%): with nothing selected it sizes every number in the file at once -
+  also older ones, which get the new arrows, and new ones; with measurements selected it
+  makes only those bigger or smaller, each from its own size (100% = as they are). Let go
+  of the slider to apply it (one Undo). One measurement: right panel > Number size too.
   These are one-off measurements - project take-offs belong in your estimating tool.
 
 SNAPPING  (F9 or the status bar)
