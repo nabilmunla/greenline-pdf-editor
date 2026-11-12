@@ -638,12 +638,20 @@ export function buildSnap(id: string, pg: number): SnapIndex {
 }
 
 /** nearest line end / middle / point on a line within r points */
-export function snapAt(ix: SnapIndex, x: number, y: number, r: number): { x: number; y: number; k: 'end' | 'mid' | 'on' } | null {
+/**
+ * from: the point the line being drawn comes from - then a line near the pointer also offers the
+ * foot of the perpendicular from it (k 'perp'), when that foot is near the pointer too (the
+ * pointer has to come to the right angle - as in the Estimation app since 0.18.1). A line end or
+ * middle nearer than the foot wins.
+ */
+export function snapAt(ix: SnapIndex, x: number, y: number, r: number, from?: number[] | null): { x: number; y: number; k: 'end' | 'mid' | 'on' | 'perp' } | null {
   const c0 = Math.max(0, Math.floor((x - r) / ix.cw)), c1 = Math.min(ix.cols - 1, Math.floor((x + r) / ix.cw));
   const r0 = Math.max(0, Math.floor((y - r) / ix.ch)), r1 = Math.min(ix.rows - 1, Math.floor((y + r) / ix.ch));
   let bestEnd = r * r, end: [number, number] | null = null;
   let bestMid = (r * 0.7) ** 2, mid: [number, number] | null = null;
   let bestOn = (r * 0.6) ** 2, on: [number, number] | null = null;
+  let bestPerp = r * r, perp: [number, number] | null = null;
+  const fx = from ? from[0] : 0, fy = from ? from[1] : 0;
   const s = ix.seg;
   for (let rr = r0; rr <= r1; rr++) for (let cc = c0; cc <= c1; cc++) {
     const cell = rr * ix.cols + cc;
@@ -665,17 +673,29 @@ export function snapAt(ix: SnapIndex, x: number, y: number, r: number): { x: num
         const qx = ax + t * dx, qy = ay + t * dy;
         dd = (qx - x) ** 2 + (qy - y) ** 2;
         if (dd < bestOn) { bestOn = dd; on = [qx, qy]; }
+        // the perpendicular from `from` onto this line (its foot on the line, not at `from` itself)
+        if (from && dd < r * r) {
+          const u = ((fx - ax) * dx + (fy - ay) * dy) / l2;
+          if (u >= 0 && u <= 1) {
+            const px = ax + u * dx, py = ay + u * dy;
+            if ((px - fx) ** 2 + (py - fy) ** 2 > 1e-6) {
+              const dp = (px - x) ** 2 + (py - y) ** 2;
+              if (dp < bestPerp) { bestPerp = dp; perp = [px, py]; }
+            }
+          }
+        }
       }
     }
   }
+  if (perp && !(end && bestEnd <= bestPerp) && !(mid && bestMid < bestPerp)) return { x: perp[0], y: perp[1], k: 'perp' };
   if (end) return { x: end[0], y: end[1], k: 'end' };
   if (mid) return { x: mid[0], y: mid[1], k: 'mid' };
   if (on) return { x: on[0], y: on[1], k: 'on' };
   return null;
 }
 
-export function snap(id: string, pg: number, x: number, y: number, r: number) {
-  return snapAt(buildSnap(id, pg), x, y, r);
+export function snap(id: string, pg: number, x: number, y: number, r: number, from?: number[] | null) {
+  return snapAt(buildSnap(id, pg), x, y, r, from);
 }
 
 /** words with boxes on part of a page (for copy-as-table) */

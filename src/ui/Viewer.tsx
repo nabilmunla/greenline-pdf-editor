@@ -9,10 +9,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefO
 import type { PdfDoc } from './doc';
 import type { AnnotData, AnnotSpec, Pt, Rect } from '../engine/mu';
 import { PageTiles } from './PageTiles';
-import { renderers } from './engines';
+import { renderers, rendererFor } from './engines';
 import { TOOLS, css, type ToolId, type Style, type Gesture, type MeasureHow } from './tools';
 import { wrapText, TEXT_PAD, TYPE_PAD, AUTO_MIN } from '../engine/textwrap';
-import { hitList, geomBox, rectOf, dist, inRect, inPoly, overlaps, ortho, fmtLen, segDist, calloutPath, measureValue, yRatio, realDist, LEGACY_FMT, circlePts, circleOf, CIRCLE_N, isAxisRect, rectKeep, parseTypedLength, zoomToShow, placeOnPage, shiftOnPages, type MeasureFmt, selfCrosses } from './geom';
+import { hitList, geomBox, rectOf, dist, inRect, inPoly, overlaps, ortho, perpFootOn, fmtLen, segDist, calloutPath, measureValue, yRatio, realDist, LEGACY_FMT, circlePts, circleOf, CIRCLE_N, isAxisRect, rectKeep, parseTypedLength, zoomToShow, placeOnPage, shiftOnPages, type MeasureFmt, selfCrosses } from './geom';
 import { gcc } from './api';
 
 const GAP = 14;
@@ -62,10 +62,10 @@ export interface ViewerApi {
   duplicate(): Promise<void>;
   /** corners of an outline / line by corners (right-click menu): the corner under a point (-1:
    *  none), whether it can have corners added / deleted / be continued, and doing it */
-  corners(page: number, id: number, at: Pt): { corner: number; editable: boolean; canDelete: boolean; open: boolean };
+  corners(page: number, id: number, at: Pt): { corner: number; editable: boolean; canDelete: boolean; open: boolean; canContinueFrom: boolean };
   deleteCorner(page: number, id: number, index: number): Promise<void>;
   addCorner(page: number, id: number, at: Pt): Promise<void>;
-  continueLine(page: number, id: number, at?: Pt): void;
+  continueLine(page: number, id: number, at?: Pt, from?: number): void;
 }
 
 /** copied markups - shared by every open file (paste into another tab works) */
@@ -100,6 +100,13 @@ interface Props {
   place: PlaceItem | null;
   countGroup: string;
   snapOn: boolean;
+  /** Ortho (F8): as if Shift were held while drawing */
+  orthoOn?: boolean;
+  /** Crosshair (F6): lines across the view through the pointer */
+  crossOn?: boolean;
+  /** Magnifier (F7): a loupe beside the pointer, at this many times the zoom */
+  loupeOn?: boolean;
+  loupeZoom?: number;
   wheelZoom: boolean;
   keepTool: boolean;
   sel: SelItem[];
@@ -117,8 +124,9 @@ interface Props {
 type Draft =
   | { kind: 'rect'; page: number; a: Pt; b: Pt }
   | { kind: 'two'; page: number; a: Pt; b: Pt; clicked: boolean }
-  /** cont: an existing line being continued (its id; its corners before - the draft's first `base` points) */
-  | { kind: 'poly'; page: number; pts: Pt[]; cur: Pt; cont?: { id: number; base: number } }
+  /** cont: an existing line being continued (its id; its corners before - the draft's first `base` points;
+   *  tail: drawn on from a corner in the middle - the corners after it, kept after the new ones) */
+  | { kind: 'poly'; page: number; pts: Pt[]; cur: Pt; cont?: { id: number; base: number; tail?: Pt[] } }
   | { kind: 'ink'; page: number; strokes: Pt[][]; spec?: Partial<AnnotSpec> }
   | { kind: 'callout'; page: number; tip: Pt; cur: Pt; box?: Rect; sized?: boolean };
 
@@ -613,11 +621,16 @@ export function Viewer(props: Props) {
       corners(page, id, at) {
         const a = (annotsNow.current[page] || []).find((x) => x.id === id);
         const editable = !!a && cornersEditable(a);
-        return { corner: cornerAt(page, id, at), editable, canDelete: editable && a!.vertices!.length > minCorners(a!), open: editable && a!.type === 'PolyLine' };
+        const corner = cornerAt(page, id, at), n = a?.vertices?.length ?? 0;
+        // (drawn on from a corner: any corner of an outline; one in the middle of a line - its ends
+        // are "Continue this line"; not a rectangle or circle kept as one, nor an angle)
+        const canContinueFrom = editable && corner >= 0 && a!.kind !== 'measure-angle' && !rectish(a!) && !circular(a!)
+          && (a!.type === 'Polygon' || (a!.type === 'PolyLine' && corner > 0 && corner < n - 1));
+        return { corner, editable, canDelete: editable && n > minCorners(a!), open: editable && a!.type === 'PolyLine', canContinueFrom };
       },
       deleteCorner: (page, id, index) => deleteCorner(page, id, index),
       addCorner: (page, id, at) => addCorner(page, id, at),
-      continueLine: (page, id, at) => continueLine(page, id, at),
+      continueLine: (page, id, at, from) => continueLine(page, id, at, from),
     };
   });
 
@@ -736,6 +749,11 @@ export function Viewer(props: Props) {
     snapWanted.current = true;
     const r = snapR();
     let best: { p: Pt; k: string } | null = null, bd = r;
+    // the point the line being drawn comes from: a line near the pointer also offers the foot of the
+    // perpendicular from it (⊥, when the pointer is near that foot) - markup edges here, the
+    // drawing's lines in the engine (as in the Estimation app)
+    const from: Pt | null = draft && draft.page === page ? (draft.kind === 'poly' ? draft.pts[draft.pts.length - 1] : draft.kind === 'two' ? draft.a : null) : null;
+    let perp: Pt | null = null, pd = r;
     for (const a of annots[page] || []) {
       if (drag?.mode === 'move' && drag.items.some((s) => s.id === a.id)) continue;
       // a corner being dragged snaps to its own shape's other corners too - only to itself not (a
@@ -747,17 +765,28 @@ export function Viewer(props: Props) {
       }
       const pts: Pt[] = a.vertices || a.line || (a.type === 'Square' || a.type === 'Circle' || a.type === 'FreeText' ? [[a.rect[0], a.rect[1]], [a.rect[2], a.rect[1]], [a.rect[2], a.rect[3]], [a.rect[0], a.rect[3]]] : []);
       pts.forEach((q, i) => { if (i === skip) return; const d = dist(p, q); if (d < bd) { bd = d; best = { p: q, k: 'Markup corner' }; } });
+      if (from && pts.length > 1) {
+        const closed = !!a.vertices && a.type !== 'PolyLine' || !a.vertices && !a.line;
+        for (let i = 0; i < (closed ? pts.length : pts.length - 1); i++) {
+          const f = perpFootOn(from, pts[i], pts[(i + 1) % pts.length]);
+          if (!f || dist(f, from) < 1e-6 || segDist(p, pts[i], pts[(i + 1) % pts.length]) >= r) continue;
+          const d = dist(f, p);
+          if (d < pd) { pd = d; perp = f; }
+        }
+      }
     }
+    // (a corner nearer than the foot wins)
+    if (perp && !(best && bd <= pd)) best = { p: perp, k: 'Perpendicular' };
     if (draft && draft.kind === 'poly' && draft.pts.length > 2) { const d = dist(p, draft.pts[0]); if (d < bd) { bd = d; best = { p: draft.pts[0], k: 'Start point' }; } }
     if (best) { snapRef.current = { page, raw: p, p: best.p, k: best.k }; setSnapMark({ page, p: best.p, k: best.k }); return; }
     if (snapBusy.current) return;
     snapBusy.current = true;
-    renderers[0].call<{ x: number; y: number; k: 'end' | 'mid' | 'on' } | null>('snap', [doc.id, page, p[0], p[1], r]).then((s) => {
+    renderers[0].call<{ x: number; y: number; k: 'end' | 'mid' | 'on' | 'perp' } | null>('snap', [doc.id, page, p[0], p[1], r, from]).then((s) => {
       snapBusy.current = false;
       // the answer may arrive after the click / tool change: then it's no longer wanted
       if (!snapWanted.current) return;
       if (s) {
-        const k = s.k === 'end' ? 'End point' : s.k === 'mid' ? 'Middle' : 'On line';
+        const k = s.k === 'end' ? 'End point' : s.k === 'mid' ? 'Middle' : s.k === 'perp' ? 'Perpendicular' : 'On line';
         snapRef.current = { page, raw: p, p: [s.x, s.y], k };
         setSnapMark({ page, p: [s.x, s.y], k });
       } else { snapRef.current = null; setSnapMark(null); }
@@ -768,6 +797,100 @@ export function Viewer(props: Props) {
     if (s && s.page === page && dist(s.raw, p) < snapR() * 1.5) return s.p;
     return p;
   };
+
+  // ---------------------------------------------------------------- drawing aids (Estimation 0.16)
+  // Crosshair: two lines across the view through the pointer. Magnifier: a loupe beside the pointer
+  // with what is under it at loupeZoom x the zoom - the page as on screen while the pointer moves,
+  // drawn sharp by the engine once it rests; the shape being drawn and the exact point over it.
+  const xhH = useRef<HTMLDivElement>(null), xhV = useRef<HTMLDivElement>(null), loupeRef = useRef<HTMLCanvasElement>(null);
+  const aidAt = useRef<{ cx: number; cy: number; page: number; p: Pt } | null>(null);
+  const loupeSharp = useRef<{ key: string; bmp: ImageBitmap } | null>(null);
+  const loupeTimer = useRef(0);
+  const LOUPE = 180;
+  const paintAids = () => {
+    const pr = P.current, at = aidAt.current, el = scroller.current;
+    const vb = el?.getBoundingClientRect();
+    const inside = !!at && !!vb && at.cx >= vb.left && at.cx <= vb.right && at.cy >= vb.top && at.cy <= vb.bottom;
+    for (const [d, hz] of [[xhH.current, true], [xhV.current, false]] as const) {
+      if (!d) continue;
+      if (!pr.crossOn || !inside) { d.style.display = 'none'; continue; }
+      d.style.display = 'block';
+      if (hz) { d.style.left = vb!.left + 'px'; d.style.width = vb!.width + 'px'; d.style.top = Math.round(at!.cy) + 'px'; }
+      else { d.style.top = vb!.top + 'px'; d.style.height = vb!.height + 'px'; d.style.left = Math.round(at!.cx) + 'px'; }
+    }
+    const cv = loupeRef.current;
+    if (!cv) return;
+    const pgEl = inside ? el!.querySelector(`.pg[data-page="${at!.page}"]`) : null;
+    if (!pr.loupeOn || !inside || !pgEl) { cv.style.display = 'none'; return; }
+    const R = LOUPE / 2, gap = 26, mag = Math.max(2, Math.min(10, pr.loupeZoom || 3));
+    // beside the pointer (up and to the right; the other side near an edge of the view)
+    let lx = at!.cx + gap, ly = at!.cy - gap - LOUPE;
+    if (lx + LOUPE > vb!.right - 4) lx = at!.cx - gap - LOUPE;
+    if (ly < vb!.top + 4) ly = at!.cy + gap;
+    cv.style.display = 'block';
+    cv.style.left = Math.round(lx) + 'px';
+    cv.style.top = Math.round(ly) + 'px';
+    const dpr = window.devicePixelRatio || 1, W = Math.round(LOUPE * dpr);
+    if (cv.width !== W) { cv.width = W; cv.height = W; }
+    const ctx = cv.getContext('2d')!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, LOUPE, LOUPE);
+    const z0 = zRef.current, pb = pgEl.getBoundingClientRect();
+    const cx = at!.p[0] * z0, cy = at!.p[1] * z0;
+    const toL = (q: Pt): Pt => [(q[0] * z0 - cx) * mag + R, (q[1] * z0 - cy) * mag + R];
+    const drawEls = (sel: string) => pgEl.querySelectorAll(sel).forEach((x) => {
+      const h = x as HTMLElement;
+      if (h.style.opacity === '0' || h.style.display === 'none') return;
+      const r = h.getBoundingClientRect();
+      const dx = (r.left - pb.left - cx) * mag + R, dy = (r.top - pb.top - cy) * mag + R;
+      if (dx > LOUPE || dy > LOUPE || dx + r.width * mag < 0 || dy + r.height * mag < 0) return;
+      try { ctx.drawImage(h as unknown as CanvasImageSource, dx, dy, r.width * mag, r.height * mag); } catch { /* not drawn yet */ }
+    });
+    const s = z0 * mag * dpr;
+    const key = `${doc.id}|${at!.page}|${doc.crev[at!.page] ?? 0}|${Math.round(at!.p[0] * s)}|${Math.round(at!.p[1] * s)}|${s.toFixed(4)}`;
+    const sharp = loupeSharp.current;
+    if (sharp && sharp.key === key) ctx.drawImage(sharp.bmp, 0, 0, LOUPE, LOUPE);
+    else { drawEls('canvas.pv'); drawEls('.tl:not(.hl):not(.an) > *'); }
+    drawEls('.tl.hl > *');
+    drawEls('.tl.an > *');
+    // the shape being drawn
+    if (draft && draft.kind === 'poly' && draft.page === at!.page) {
+      const pts = [...draft.pts, at!.p, ...(draft.cont?.tail ?? [])].map(toL);
+      ctx.strokeStyle = css(P.current.style.color);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+      ctx.stroke();
+    } else if (draft && draft.kind === 'two' && draft.page === at!.page) {
+      const a = toL(draft.a), b = toL(at!.p);
+      ctx.strokeStyle = css(P.current.style.color);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+    // the exact point: a fine cross with a gap in the middle (red), the snap kind under it
+    ctx.strokeStyle = '#c92a2a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, R + 0.5); ctx.lineTo(R - 5, R + 0.5); ctx.moveTo(R + 5, R + 0.5); ctx.lineTo(LOUPE, R + 0.5);
+    ctx.moveTo(R + 0.5, 0); ctx.lineTo(R + 0.5, R - 5); ctx.moveTo(R + 0.5, R + 5); ctx.lineTo(R + 0.5, LOUPE);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(9, 48, 47, 0.85)';
+    ctx.font = '600 11px Inter, sans-serif';
+    ctx.fillText('×' + mag, R + 30, LOUPE - 14);
+    // sharp once the pointer rests
+    window.clearTimeout(loupeTimer.current);
+    if (!(sharp && sharp.key === key)) {
+      const page = at!.page, p0 = at!.p;
+      loupeTimer.current = window.setTimeout(() => {
+        const x = Math.round(p0[0] * s - W / 2), y = Math.round(p0[1] * s - W / 2);
+        rendererFor(doc.id, page).call<ImageBitmap>('tile', [doc.id, page, s, x, y, W, W]).then((bmp) => {
+          if (aidAt.current && aidAt.current.p === p0) { loupeSharp.current?.bmp.close(); loupeSharp.current = { key, bmp }; paintAids(); } else bmp.close();
+        }).catch(() => {});
+      }, 140);
+    }
+  };
+  useEffect(() => { paintAids(); }, [props.crossOn, props.loupeOn, props.loupeZoom]);
 
   // ---------------------------------------------------------------- measuring
 
@@ -942,6 +1065,9 @@ export function Viewer(props: Props) {
       // a line continued: the same markup, longer (its arrow heads stay at its ends if drawn on from its start)
       const a = (annotsNow.current[d.page] || []).find((x) => x.id === d.cont!.id);
       if (!a || !a.vertices || d.pts.length <= d.cont.base) return;
+      // (from a corner in the middle - or any corner of an outline: the new corners go in after it,
+      // the rest stays - as in the Estimation app)
+      if (d.cont.tail) { await setCorners(a, [...d.pts, ...d.cont.tail], 'Continue from corner'); return; }
       const rev = a.vertices.length > 0 && (a.vertices[0][0] !== d.pts[0][0] || a.vertices[0][1] !== d.pts[0][1]);
       const pts = rev ? d.pts.slice().reverse() : d.pts;
       await setCorners(a, pts, 'Continue line', rev && a.le ? { le: [a.le[1], a.le[0]] } : {});
@@ -1466,7 +1592,7 @@ export function Viewer(props: Props) {
       case 'poly': {
         if (draft && draft.kind === 'poly' && draft.page === page) {
           const last = draft.pts[draft.pts.length - 1];
-          const q = e.shiftKey ? ortho(last, p) : p;
+          const q = (e.shiftKey || P.current.orthoOn) ? ortho(last, p) : p;
           // double-click or click on the start point: finish
           if (dbl || (draft.pts.length > 2 && dist(q, draft.pts[0]) < 6 / z)) { void finishDraft(draft); return; }
           const pts = [...draft.pts, q];
@@ -1577,6 +1703,12 @@ export function Viewer(props: Props) {
     let p = at.p;
     const tool = props.tool;
     if (TOOLS[tool].snaps || drag?.mode === 'vertex') { doSnap(page, p, e); p = snapped(page, p); } else if (snapMark) setSnapMark(null);
+    if (P.current.crossOn || P.current.loupeOn) {
+      // (the loupe looks at the point a click would put down: snapped, and straightened while drawing)
+      const last = draft && draft.kind === 'poly' && draft.page === page ? draft.pts[draft.pts.length - 1] : null;
+      aidAt.current = { cx: e.clientX, cy: e.clientY, page, p: last && (e.shiftKey || P.current.orthoOn) ? ortho(last, p) : p };
+      requestAnimationFrame(paintAids);
+    }
     // markups stay on the page: points dragged past its edge stop at the edge (a callout's tip
     // could be pulled thousands of points off the sheet, where nobody would find it again)
     if ((drag && (drag.mode === 'vertex' || drag.mode === 'resize')) || draft) {
@@ -1616,7 +1748,7 @@ export function Viewer(props: Props) {
         case 'vertex': {
           const a = (annots[page] || []).find((x) => x.id === drag.id);
           // Shift: the edge from the corner before goes straight (0 / 45 / 90°)
-          const nb = !e.shiftKey || !a ? null : drag.which === 'l' && a.line ? a.line[1 - drag.index] : drag.which === 'v' && a.vertices ? (drag.ins ? a.vertices[drag.index - 1] : drag.index > 0 ? a.vertices[drag.index - 1] : a.type === 'Polygon' ? a.vertices[a.vertices.length - 1] : a.vertices[1]) : null;
+          const nb = !(e.shiftKey || P.current.orthoOn) || !a ? null : drag.which === 'l' && a.line ? a.line[1 - drag.index] : drag.which === 'v' && a.vertices ? (drag.ins ? a.vertices[drag.index - 1] : drag.index > 0 ? a.vertices[drag.index - 1] : a.type === 'Polygon' ? a.vertices[a.vertices.length - 1] : a.vertices[1]) : null;
           let q = nb ? ortho(nb, at.p) : p;
           const pg = pages[page];
           if (pg) q = [Math.max(0, Math.min(pg.w, q[0])), Math.max(0, Math.min(pg.h, q[1]))];
@@ -1685,7 +1817,7 @@ export function Viewer(props: Props) {
         }
         case 'poly': {
           const last = draft.pts[draft.pts.length - 1];
-          const cur = e.shiftKey ? ortho(last, p) : p;
+          const cur = (e.shiftKey || P.current.orthoOn) ? ortho(last, p) : p;
           setDraft({ ...draft, cur });
           if (tool.startsWith('m-')) {
             const pts = [...draft.pts, cur];
@@ -1799,8 +1931,22 @@ export function Viewer(props: Props) {
   };
   /** an open line (polylength, polyline) drawn on from its nearer end */
   const pendingDraft = useRef<Draft | null>(null);
-  const continueLine = (page: number, id: number, at?: Pt) => {
+  const continueLine = (page: number, id: number, at?: Pt, from?: number) => {
     const a = (annotsNow.current[page] || []).find((x) => x.id === id);
+    // from a corner (any corner of an outline; one in the middle of a line): drawn on from it, the
+    // corners after it kept (Estimation 0.17's "continue from a node")
+    if (a && !a.locked && a.vertices && from != null && from >= 0 && from < a.vertices.length && a.kind !== 'measure-angle' && (a.type === 'Polygon' || (a.type === 'PolyLine' && from > 0 && from < a.vertices.length - 1))) {
+      const v = a.vertices;
+      const d: Draft = { kind: 'poly', page, pts: v.slice(0, from + 1), cur: v[from], cont: { id, base: from + 1, tail: v.slice(from + 1) } };
+      const tool: ToolId = a.type === 'PolyLine'
+        ? (a.kind === 'measure-polylength' ? 'm-polylength' : 'polyline')
+        : (a.kind === 'measure-area' ? 'm-area' : a.kind === 'measure-perimeter' ? 'm-perimeter' : a.kind === 'cloud' ? 'cloud' : 'polygon');
+      P.current.setSel([]);
+      if (P.current.tool === tool) setDraft(d);
+      else { pendingDraft.current = d; P.current.setTool(tool); }
+      P.current.onEvent({ type: 'status', text: 'Click the new points after this corner - Enter or double-click to finish (the rest of the shape stays), Ctrl+Z takes back a point.' });
+      return;
+    }
     if (!a || a.locked || a.type !== 'PolyLine' || !a.vertices || a.vertices.length < 2 || a.kind === 'measure-angle') return;
     const v = a.vertices.slice();
     const rev = !!at && dist(at, v[0]) < dist(at, v[v.length - 1]);
@@ -2467,7 +2613,9 @@ export function Viewer(props: Props) {
         const closed = ['polygon', 'cloud', 'm-area', 'm-perimeter'].includes(props.tool);
         // (a cloud's box being dragged out shows as that box)
         const box = btnDown.current ? cloudBox(draft) : null;
-        const pts = box ?? [...draft.pts, draft.cur];
+        // (drawn on from a corner: the rest of the shape follows the pointer, as it will be kept)
+        const tail = draft.cont?.tail;
+        const pts = box ?? [...draft.pts, draft.cur, ...(tail ?? [])];
         out.push(<polyline key={k('d')} points={[...pts, ...(closed && pts.length > 2 ? [pts[0]] : [])].map((p) => p.join(',')).join(' ')} {...sp} fill={closed && s.fill ? css(s.fill, 0.3) : 'none'} />);
         draft.pts.forEach((p, i) => out.push(<circle key={k('dp' + i)} cx={p[0]} cy={p[1]} r={2.5 * sw} className="dpt" />));
       } else if (draft.kind === 'ink') {
@@ -2494,9 +2642,10 @@ export function Viewer(props: Props) {
     if (snapMark && snapMark.page === page) {
       const p = snapMark.p, r = 6 * sw;
       out.push(snapMark.k === 'End point' || snapMark.k === 'Markup corner' || snapMark.k === 'Start point'
-        ? <rect key={k('sn')} x={p[0] - r} y={p[1] - r} width={2 * r} height={2 * r} className="snap" strokeWidth={sw * 1.5} />
-        : snapMark.k === 'Middle' ? <polygon key={k('sn')} points={`${p[0]},${p[1] - r} ${p[0] + r},${p[1] + r} ${p[0] - r},${p[1] + r}`} className="snap" strokeWidth={sw * 1.5} />
-          : <g key={k('sn')}><line x1={p[0] - r} y1={p[1] - r} x2={p[0] + r} y2={p[1] + r} className="snap" strokeWidth={sw * 1.5} /><line x1={p[0] + r} y1={p[1] - r} x2={p[0] - r} y2={p[1] + r} className="snap" strokeWidth={sw * 1.5} /></g>);
+        ? <rect key={k('sn')} data-k={snapMark.k} x={p[0] - r} y={p[1] - r} width={2 * r} height={2 * r} className="snap" strokeWidth={sw * 1.5} />
+        : snapMark.k === 'Perpendicular' ? <g key={k('sn')} data-k={snapMark.k}><line x1={p[0] - r} y1={p[1] + r} x2={p[0] + r} y2={p[1] + r} className="snap" strokeWidth={sw * 1.5} /><line x1={p[0]} y1={p[1] + r} x2={p[0]} y2={p[1] - r} className="snap" strokeWidth={sw * 1.5} /></g>
+        : snapMark.k === 'Middle' ? <polygon key={k('sn')} data-k={snapMark.k} points={`${p[0]},${p[1] - r} ${p[0] + r},${p[1] + r} ${p[0] - r},${p[1] + r}`} className="snap" strokeWidth={sw * 1.5} />
+          : <g key={k('sn')} data-k={snapMark.k}><line x1={p[0] - r} y1={p[1] - r} x2={p[0] + r} y2={p[1] + r} className="snap" strokeWidth={sw * 1.5} /><line x1={p[0] + r} y1={p[1] - r} x2={p[0] - r} y2={p[1] + r} className="snap" strokeWidth={sw * 1.5} /></g>);
     }
     void accent;
     return out;
@@ -2699,7 +2848,7 @@ export function Viewer(props: Props) {
       tabIndex={0}
       onPointerDown={(e) => void onPointerDown(e)}
       onPointerMove={onPointerMove}
-      onPointerLeave={() => setHover(null)}
+      onPointerLeave={() => { setHover(null); aidAt.current = null; paintAids(); }}
       onPointerUp={(e) => void onPointerUp(e)}
       onDoubleClick={onDoubleClick}
       onWheel={onWheel}
@@ -2734,9 +2883,12 @@ export function Viewer(props: Props) {
         })}
         {editorEl()}
       </div>
-      {tip && <div className="vtip" style={{ left: tip.x + (scroller.current?.scrollLeft ?? 0), top: tip.y + (scroller.current?.scrollTop ?? 0) }}>{tip.text}</div>}
+      {tip && <div className="vtip" style={{ left: tip.x + (scroller.current?.scrollLeft ?? 0), top: tip.y + (scroller.current?.scrollTop ?? 0) }}>{tip.text}{snapMark && <span className="vtip-snap">{'  · ' + snapMark.k}</span>}</div>}
       {drawBar()}
       {snapMark && !tip && <div className="vtip snapk" style={{ left: leftOf(snapMark.page) + snapMark.p[0] * z + 12, top: tops[snapMark.page] + snapMark.p[1] * z + 12 }}>{snapMark.k}</div>}
+      <div ref={xhH} className="xhair h" />
+      <div ref={xhV} className="xhair v" />
+      <canvas ref={loupeRef} className="loupe" />
     </div>
   );
 }

@@ -37,7 +37,7 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
     rangeRects(id: string, page: number, start: number, count: number) { return pf.rangeRects(id, page, start, count); },
     find(id: string, needle: string, from: number, to: number, matchCase: boolean, whole: boolean) { return pf.find(id, needle, from, to, matchCase, whole); },
     links(id: string, page: number) { return pf.links(id, page); },
-    snap(id: string, page: number, x: number, y: number, r: number) { return pf.snap(id, page, x, y, r); },
+    snap(id: string, page: number, x: number, y: number, r: number, from?: number[] | null) { return pf.snap(id, page, x, y, r, from); },
     prepareSnap(id: string, page: number) { return pf.buildSnap(id, page).n; },
     charsIn(id: string, page: number, r: number[]) { return pf.charsIn(id, page, r); },
     heap() { return pf.heapBytes(); },

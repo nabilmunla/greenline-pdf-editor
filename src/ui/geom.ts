@@ -339,6 +339,15 @@ export function perimeterOf(text: string): { v: number; unit: string; dec: numbe
   return i < 0 ? null : splitMeasure(t.slice(i + PERIM_SEP.length));
 }
 
+/** the foot of the perpendicular from `from` onto the segment a-b; null when it falls outside it */
+export function perpFootOn(from: Pt, a: Pt, b: Pt): Pt | null {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+  if (l2 < 1e-12) return null;
+  const t = ((from[0] - a[0]) * dx + (from[1] - a[1]) * dy) / l2;
+  if (t < -1e-9 || t > 1 + 1e-9) return null;
+  return [a[0] + t * dx, a[1] + t * dy];
+}
+
 /** constrain to 0/45/90° from a */
 export function ortho(a: Pt, b: Pt): Pt {
   const dx = b[0] - a[0], dy = b[1] - a[1];

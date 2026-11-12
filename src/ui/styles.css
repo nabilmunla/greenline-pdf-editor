@@ -210,6 +210,7 @@ fieldset.rgroup:disabled .rbtns { opacity: 0.45; }
 .ov .dpt { fill: var(--sel); }
 .ov polyline, .ov line, .ov ellipse, .ov rect, .ov polygon { vector-effect: non-scaling-stroke; }
 .vtip { position: absolute; z-index: 5; pointer-events: none; background: rgba(9, 48, 47, 0.92); color: #fff; font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 6px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); font-variant-numeric: tabular-nums; }
+.vtip-snap { color: #f8e189; font-weight: 500; }
 .vtip.snapk { background: #e11d74; font-weight: 600; font-size: 11px; padding: 2px 6px; }
 .ed { position: absolute; z-index: 4; border: 1.5px solid var(--sel); background: rgba(255, 255, 255, 0.96); padding: 2px 3px; outline: none; resize: none; line-height: 1.2; transform-origin: center center; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15); }
 .ed.line { padding: 0 2px; }
@@ -756,3 +757,10 @@ body:has(.scrim) .toasts { top: 16px; bottom: auto; }
 .anon-what summary { cursor: pointer; color: var(--accent); }
 .anon-what p { margin: 6px 0; }
 .anon-example { max-height: 220px; overflow: auto; font-size: 11px; background: var(--drawer); padding: 8px; border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-all; }
+/* drawing aids (Estimation 0.16): crosshair lines across the view, the magnifier beside the pointer */
+.xhair { position: fixed; display: none; pointer-events: none; z-index: 6; background: rgba(9, 48, 47, 0.45); }
+.xhair.h { height: 1px; }
+.xhair.v { width: 1px; }
+.loupe { position: fixed; display: none; pointer-events: none; z-index: 7; width: 180px; height: 180px; border-radius: 50%; border: 2px solid #09302f; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); background: #fff; }
+.ribbon .rsmall { align-self: center; display: flex; align-items: center; gap: 2px; font-size: 12px; margin-left: 2px; }
+.ribbon .rsmall select { font: inherit; padding: 1px 2px; }

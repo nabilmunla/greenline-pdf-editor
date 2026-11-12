@@ -115,9 +115,10 @@ export function startEngines(): Promise<void> {
  * report), the files reopened in the new one. (Not sooner: a dense sheet read in again takes
  * seconds, and that is what the next zoom would wait for.)
  */
-const IDLE_HEAP = Number(localStorage.getItem('pdfed-idle-heap')) || 1.1 * 1024 ** 3;
-const IDLE_MS = Number(localStorage.getItem('pdfed-idle-ms')) || 180_000;
-window.setInterval(() => {
+const stored = (k: string) => { try { return Number(globalThis.localStorage?.getItem(k)) || 0; } catch { return 0; } };
+const IDLE_HEAP = stored('pdfed-idle-heap') || 1.1 * 1024 ** 3;
+const IDLE_MS = stored('pdfed-idle-ms') || 180_000;
+const idleCheck = globalThis.setInterval(() => {
   if (!started) return;
   void (async () => {
     for (const c of renderers) {
@@ -130,6 +131,8 @@ window.setInterval(() => {
     }
   })();
 }, Math.min(30_000, IDLE_MS / 2));
+// (a test run in Node must be able to end with this module loaded)
+(idleCheck as unknown as { unref?: () => void }).unref?.();
 
 /** least busy drawing engine */
 export function renderer(): EngineClient {

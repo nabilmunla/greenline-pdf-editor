@@ -49,6 +49,12 @@ export interface Settings {
   chest?: ChestItem[];
   recent?: string[];
   snap?: boolean;
+  /** lines drawn straight (0 / 45 / 90°) without holding Shift - F8 */
+  ortho?: boolean;
+  /** Crosshair (F6) and Magnifier (F7) while drawing; the magnifier's zoom (x the view's) */
+  cross?: boolean;
+  loupe?: boolean;
+  loupeZoom?: number;
   wheelZoom?: boolean;
   keepTool?: boolean;
   /** last print settings */
@@ -1053,6 +1059,10 @@ export function App() {
     /** Count by tag: the tags written on the drawing found and counted in one go */
     countByTag: () => { if (doc) setDialog({ k: 'counttag', page: viewer.current?.page() ?? pageNo }); },
     toggleSnap: () => saveSettings({ snap: !(S.current.snap ?? true) }),
+    toggleOrtho: () => saveSettings({ ortho: !S.current.ortho }),
+    toggleCross: () => saveSettings({ cross: !S.current.cross }),
+    toggleLoupe: () => saveSettings({ loupe: !S.current.loupe }),
+    loupeZoom: (n: number) => saveSettings({ loupeZoom: n }),
     settings: () => setDialog({ k: 'settings' }),
     whatsNew: () => setDialog({ k: 'whatsnew' }),
     /** Help > Report a problem: the window is captured first (before the dialog covers it) */
@@ -1256,6 +1266,9 @@ export function App() {
       if (e.key === 'F3' && !e.altKey && !e.metaKey && (!typing || (e.target as HTMLElement)?.closest?.('.search-in, .find-in, .search'))) { e.preventDefault(); if (hits.length) setHitIndex((i) => (i + (e.shiftKey ? hits.length - 1 : 1)) % hits.length); return; }
       if (typing || e.altKey || e.metaKey) return;
       if (e.key === 'F9') { e.preventDefault(); A.toggleSnap(); return; }
+      if (e.key === 'F8') { e.preventDefault(); A.toggleOrtho(); return; }
+      if (e.key === 'F6') { e.preventDefault(); A.toggleCross(); return; }
+      if (e.key === 'F7') { e.preventDefault(); A.toggleLoupe(); return; }
       if (e.key === 'F4') { e.preventDefault(); A.togglePanel(); return; }
       if (e.key === 'PageDown' || e.key === 'PageUp') { /* native scrolling */ return; }
       if (e.key === 'Home' && !sel.length) { e.preventDefault(); A.goTo(0); return; }
@@ -1589,7 +1602,7 @@ export function App() {
               <div className="center">
                 <Viewer
                   key={doc.id} doc={doc} rev={ver} tool={tool} setTool={setTool} style={style} place={place}
-                  countGroup={countGroup} snapOn={snapOn} wheelZoom={!!settings.wheelZoom} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
+                  countGroup={countGroup} snapOn={snapOn} orthoOn={!!settings.ortho} crossOn={!!settings.cross} loupeOn={!!settings.loupe} loupeZoom={settings.loupeZoom ?? 3} wheelZoom={!!settings.wheelZoom} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
                   sel={sel} setSel={setSel} hits={hits} hitIndex={hitIndex} onEvent={(e) => void onViewerEvent(e)} apiRef={viewer} readOnly={false}
                   how={settings.measureHow || 'points'}
                 />
@@ -1625,6 +1638,7 @@ export function App() {
             </span>
             <span className="s"><button className={'sb-btn' + (curScale ? ' set' : '')} title="Scale of this page – click to change" onClick={() => A.scale()}>Scale: {curScale ? scaleText(curScale) : 'not set'}</button></span>
             <span className="s"><button className={'sb-btn' + (snapOn ? ' set' : '')} title="Snap to line ends, middles and markup corners (F9). Hold Ctrl to skip snapping for one click." onClick={() => A.toggleSnap()}><Ico n="magnet" size={14} /> Snap {snapOn ? 'on' : 'off'}</button></span>
+            <span className="s"><button className={'sb-btn' + (settings.ortho ? ' set' : '')} title="Ortho (F8): lines and corners go straight - 0, 45 or 90° - without holding Shift" onClick={() => A.toggleOrtho()}><Ico n="ortho" size={14} /> Ortho {settings.ortho ? 'on' : 'off'}</button></span>
             <span className="s grow st">{status}</span>
             <span className="s">{doc.dirty ? 'Unsaved changes' : doc.path ? 'Saved' : ''}</span>
           </>
@@ -1809,6 +1823,7 @@ function ContextMenu({ m, doc, sel, A, close, setSel, viewer, toast, setTool }: 
           return <>
             {c.corner >= 0 ? item('Delete this corner', () => viewer.current?.deleteCorner(m.page, list[0].id, c.corner), !c.canDelete, 'Alt+click') : item('Add a corner here', () => viewer.current?.addCorner(m.page, list[0].id, m.at))}
             {c.open && item('Continue this line', () => viewer.current?.continueLine(m.page, list[0].id, m.at))}
+            {c.corner >= 0 && c.canContinueFrom && item('Continue from this corner', () => viewer.current?.continueLine(m.page, list[0].id, m.at, c.corner))}
             <div className="sep" />
           </>;
         })()}

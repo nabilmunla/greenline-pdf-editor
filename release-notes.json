@@ -1,4 +1,19 @@
 {
+  "0.9.6": {
+    "New features": [
+      "⊥ snapping: while you draw, a line near the pointer offers the point square to it from the point you came from - on the drawing's lines and on markup edges (as in the Estimation app)",
+      "Ortho (F8): lines and corners go straight - 0, 45 or 90° - without holding Shift",
+      "Crosshair (F6): lines across the view through the pointer, to line points up",
+      "Magnifier (F7): a loupe beside the pointer shows the exact point a click puts down, magnified 2 to 8 times",
+      "Continue from this corner: right-click any corner of an outline, or one in the middle of a line, and draw on from it - the rest of the shape stays"
+    ],
+    "General polishing": [
+      "The tip beside the pointer says what it snapped to while you draw"
+    ],
+    "Coming next": [
+      "Drawing engines that can use up to 4 GB each (2 GB now), for the very largest scans"
+    ]
+  },
   "0.9.5": {
     "General polishing": [
       "Big scanned files no longer stop a drawing engine in the middle of drawing: decoded scans are let go by the memory they take, and an engine that has grown big starts afresh quietly before it runs out",
