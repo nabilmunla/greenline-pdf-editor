@@ -10,6 +10,9 @@ import { gcc } from './api';
 import { editor, muFile, muBatch } from './engines';
 import type { FileRef } from '../engine/rpc';
 import type { PdfDoc } from './doc';
+
+/** the printer driver's own preferences window exists only on Windows */
+const WINDOWS = /Windows/i.test(navigator.userAgent);
 import { PAPERS, paperName, sheetLayout, type PrintOpts } from '../engine/printlayout';
 import { parseRanges, toRanges, paperSheets } from './dlgutil';
 
@@ -277,7 +280,8 @@ export function PrintDlg(p: Props) {
     <Modal title="Print" wide="xl" className="printdlg" onClose={() => { if (!busy) p.close(); }}
       actions={<>
         <button className="btn" disabled={!!busy} onClick={() => void savePdf()} title="Save these sheets as a PDF file instead of printing"><Ico n="save" size={14} /> Save as PDF…</button>
-        <button className="btn" disabled={!!busy || !printers?.length || !printer} onClick={() => void prefs()} title={`The preferences of ${pr?.displayName || 'the printer picked'}: tray, quality, stapling… (kept for that printer). Paper, copies, sides and colour are set here.`}>Printer preferences…</button>
+        {/* (Windows only: the driver's own window - on Linux CUPS has none to open from here) */}
+        {WINDOWS && <button className="btn" disabled={!!busy || !printers?.length || !printer} onClick={() => void prefs()} title={`The preferences of ${pr?.displayName || 'the printer picked'}: tray, quality, stapling… (kept for that printer). Paper, copies, sides and colour are set here.`}>Printer preferences…</button>}
         <span className="grow" />
         <button className="btn" disabled={!!busy && !/into a picture|Putting the sheets/.test(busy)} onClick={() => { if (busy) { stop.current = true; setBusy('Stopping…'); return; } p.close(); }}>Cancel</button>
         <button className="btn primary" disabled={!!busy || !pages.length || !printers?.length} onClick={() => void go(false)}><Ico n="print" size={14} /> Print</button>

@@ -945,7 +945,7 @@ function reopenIn(W, files) {
 }
 ipcMain.handle('win:theme', (_e, mode) => {
   const win = winOf(_e);
-  try { if (win && process.platform === 'win32') win.setTitleBarOverlay(mode === 'dark' ? TITLEBAR.dark : TITLEBAR.light); } catch (_) { /* not supported */ }
+  try { if (win && process.platform !== 'darwin') win.setTitleBarOverlay(mode === 'dark' ? TITLEBAR.dark : TITLEBAR.light); } catch (_) { /* not supported */ }
   return true;
 });
 ipcMain.handle('win:title', (_e, t) => { const win = winOf(_e); if (win) win.setTitle(t); return true; });
@@ -1142,6 +1142,7 @@ ipcMain.handle('print:run', async (_e, file, o) => {
  *  red PDF label and the app's G as a badge (the app's own icon alone didn't say "PDF"). */
 const fileIcon = () => path.join(__dirname, '..', 'dist', 'pdf-file.ico');
 async function registerOpenWith() {
+  if (process.platform === 'linux') return linuxDefaultApp();
   if (process.platform !== 'win32') return { ok: false, msg: 'Windows only' };
   const exe = process.execPath;
   const { execFile } = require('child_process');
@@ -1191,6 +1192,54 @@ async function registerCombine(reg, base, exe) {
   ];
 }
 ipcMain.handle('app:registerOpenWith', () => registerOpenWith());
+
+// ---------------------------------------------------------------- Linux: the menu entry
+// The .deb installs the program's menu entry (/usr/share/applications): the menu and "Open with"
+// find it there. An AppImage is just a file: it writes its own entry (for this user, in
+// ~/.local/share/applications) at each start - after the file was moved too - pointing at where
+// the file is now. Which entry: "desktopName" in the app's package.json (scripts/linux.py).
+const linuxDesktopId = () => (process.platform === 'linux' && String(require('../package.json').desktopName || '')) || '';
+function linuxMenuEntry() {
+  const img = process.env.APPIMAGE, id = linuxDesktopId();
+  if (!img || !id || !fs.existsSync(img)) return false;
+  const data = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  const slug = id.replace(/(-appimage)?\.desktop$/, '');
+  const icon = path.join(data, 'icons', 'hicolor', '256x256', 'apps', slug + '-appimage.png');
+  const file = path.join(data, 'applications', id);
+  // (Exec: the path quoted as the desktop-entry rules say - \ " ` $ escaped inside the quotes, then
+  // every \ doubled, % doubled)
+  const exec = '"' + img.replace(/[\\"`$]/g, (c) => '\\' + c).replace(/\\/g, '\\\\').replace(/%/g, '%%') + '" %F';
+  const text = ['[Desktop Entry]', 'Type=Application', 'Name=' + DISPLAY, 'GenericName=PDF Editor',
+    'Comment=View, mark up, measure, edit and print PDF files', 'Exec=' + exec, 'Icon=' + icon, 'Terminal=false',
+    'Categories=Office;Graphics;Viewer;', 'MimeType=application/pdf;', 'StartupWMClass=' + slug, 'StartupNotify=true',
+    'X-AppImage-Version=' + VERSION, ''].join('\n');
+  try {
+    const src = path.join(__dirname, '..', 'dist', 'icon256.png');
+    if (fs.existsSync(src) && (!fs.existsSync(icon) || fs.statSync(icon).size !== fs.statSync(src).size)) {
+      fs.mkdirSync(path.dirname(icon), { recursive: true });
+      fs.copyFileSync(src, icon);
+    }
+    let old = '';
+    try { old = fs.readFileSync(file, 'utf8'); } catch (_) { /* not there yet */ }
+    if (old !== text) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file + '.tmp', text, { mode: 0o755 });
+      fs.renameSync(file + '.tmp', file);
+      log('linux: menu entry ' + file + ' -> ' + img);
+      require('child_process').execFile('update-desktop-database', [path.dirname(file)], () => {});
+    }
+    return true;
+  } catch (e) { log('linux: menu entry: ' + e); return false; }
+}
+/** Settings > "Open PDFs with": on Linux an app may make itself the default (xdg-mime) */
+async function linuxDefaultApp() {
+  const id = linuxDesktopId();
+  if (!id) return { ok: false, msg: 'this copy was not installed from the AppImage or the .deb' };
+  if (process.env.APPIMAGE && !linuxMenuEntry()) return { ok: false, msg: 'its menu entry could not be written' };
+  const r = await new Promise((res) => require('child_process').execFile('xdg-mime', ['default', id, 'application/pdf'], { timeout: 10000 }, (err, _o, se) => res(err ? String(se || err.message || err).trim() : '')));
+  if (r) log('linux: xdg-mime: ' + r);
+  return r ? { ok: false, msg: 'xdg-mime: ' + r } : { ok: true };
+}
 /** already registered (an earlier version): keep it pointing at this copy, with the PDF icon */
 async function refreshRegistration() {
   if (process.platform !== 'win32') return;
@@ -1814,5 +1863,6 @@ app.whenReady().then(() => {
   reports.scheduleFlush(Number(process.env.PDFED_REPORT_FIRST) || 30000);
   setInterval(() => reports.scheduleFlush(1000), 30 * 60 * 1000);
   setTimeout(() => { void refreshRegistration().catch((e) => log('registration: ' + e)); }, 4000);
+  if (process.env.APPIMAGE) setTimeout(() => linuxMenuEntry(), 3000);
 });
 app.on('window-all-closed', () => app.quit());

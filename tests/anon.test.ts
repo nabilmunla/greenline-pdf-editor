@@ -52,3 +52,9 @@ test('long file names with brackets in the log go whole; a year is not a name', 
   assert.ok(s.startsWith('2026-11-09T08:20:25.760Z') && s.includes('2026-11-09T13:02:12.474Z'), 'the times keep their year: ' + s);
   assert.ok(s.includes('Cannot enlarge memory, requested 2147491840 bytes'), s);
 });
+
+test('Linux: the app\'s place goes, its code locations stay; files under /run/media and /opt go', () => {
+  assert.equal(scrub('at load (/opt/greenline-pdf-editor/resources/app/electron/main.cjs:12:5)', who), 'at load (<app>/electron/main.cjs:12:5)');
+  assert.equal(scrub('at load (/tmp/.mount_GreenlAb12Cd/resources/app/electron/main.cjs:3:1)', who), 'at load (<app>/electron/main.cjs:3:1)');
+  for (const t of ["ENOENT '/run/media/jdoe/USB Key/Tower B.pdf'", 'saved /opt/jobs/Falcon/x.pdf', "/media/jdoe/Disk/Bids/a.pdf"]) assert.ok(!/jdoe|Tower|Falcon|Bids/.test(scrub(t, who)), t + ' -> ' + scrub(t, who));
+});

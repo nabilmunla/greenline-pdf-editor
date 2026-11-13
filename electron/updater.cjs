@@ -37,6 +37,17 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
   const source = () => { const s = readSettings(); return typeof s.updateSource === 'string' ? s.updateSource.trim() : setupSaid() ? setupSource() : defaultSource; };
   const previous = () => { const p = readJson(path.join(installDir(), 'resources', 'app.old', 'package.json')); return (p && p.version) || ''; };
   const runtime = process.versions.electron;
+  // Linux (Greenline): the whole program is one package - an AppImage (one file, swapped for the
+  // new one by the app itself: a running AppImage keeps going from the old file) or a .deb (handed
+  // to the system's package installer, which asks for the password). install.json inside the
+  // package says which; the AppImage also needs $APPIMAGE (set by its runtime) - started any other
+  // way it is a copy that doesn't update itself.
+  const linuxKind = () => {
+    const k = (install() || {}).linux;
+    if (k === 'appimage') return process.env.APPIMAGE ? 'appimage' : '';
+    return k === 'deb' ? 'deb' : '';
+  };
+  const linuxInstalled = () => { const k = (install() || {}).linux; return !k || !!linuxKind(); };
 
   /** what the window shows: idle | checking | none | available | downloading | ready | error | off | unreachable | empty | portable
    *  | blocked (the update program can't run here) | setup (this version installs only with its setup, by hand) */
@@ -58,7 +69,9 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     return {
       ...st,
       version,
-      installed: !!ii,
+      installed: !!ii && linuxInstalled(),
+      linux: linuxKind(),
+      pkgFile: latest && latest.pkg ? latest.pkg.file : '',
       scope: ii ? ii.scope || 'user' : '',
       dir: installDir(),
       source: source(),
@@ -147,7 +160,7 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
   /** an offer the card shows (to be kept when a check brings nothing usable) */
   const offered = (s) => ['ready', 'blocked', 'available', 'setup'].includes(s.state);
   async function check(manual) {
-    const ii = install();
+    const ii = install() && linuxInstalled();
     if (!ii) { set({ state: 'portable', err: '' }); return snapshot(); }
     const src = source();
     if (!src) { set({ state: 'off', err: '' }); return snapshot(); }
@@ -188,8 +201,12 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     // (the other edition's release - the public build's in the company folder, say: same key, not ours)
     if (j.build && j.build !== build) return unusable('update refused: a release of another edition (' + j.build + ')', { state: 'error', err: 'The update in that place is for another edition of the app - not installed.' });
     if (!newer(j.version, version)) { latest = null; set({ state: 'none', err: '', available: '' }); return snapshot(); }
+    const lk = linuxKind();
+    // (Linux: the package for this kind of copy, whatever the runtime - it carries its own)
+    const pkg = lk ? j.linux && j.linux[lk] : j.app;
+    if (lk && !(pkg && typeof pkg.file === 'string' && /^[0-9a-f]{64}$/i.test(String(pkg.sha256 || '')) && Number(pkg.size) > 0)) return unusable('no Linux package (' + lk + ') in this release', { state: before.state === 'idle' ? 'idle' : 'none', err: '' });
     // a new runtime (Electron) comes with the whole setup; otherwise just the app part
-    const full = !!(j.runtime && j.runtime !== runtime) || !j.app;
+    const full = !lk && (!!(j.runtime && j.runtime !== runtime) || !j.app);
     // A new runtime needs the whole setup - and that is never started by the app: a program just
     // copied into AppData and started by another program is what malware droppers do, and the
     // company antivirus (Sophos) stopped the 0.8.2 update for "malicious behaviour" right there (the
@@ -207,10 +224,9 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
       set({ state: 'setup', available: l.version, notes: l.notes, groups: l.groups, kind: 'full', size: l.pkg.size, pct: 0, err: '', show: showFull, setupPath });
       return snapshot();
     }
-    const pkg = j.app;
     if (!pkg || !/^[0-9a-f]{64}$/i.test(String(pkg.sha256 || ''))) return unusable('no package for this update', { state: 'error', err: 'latest.json lists no package for this update' });
     if (pkg.present === false) return unusable('package not in the folder yet', { state: before.state === 'idle' ? 'idle' : 'none', err: '' });
-    latest = { version: j.version, notes: Array.isArray(j.notes) ? j.notes.map(String).slice(0, 12) : [], groups: groupsSince(j), kind: 'app', setupFile: j.setup && typeof j.setup.file === 'string' ? path.basename(j.setup.file) : '', pkg: { file: path.basename(String(pkg.file)), sha256: String(pkg.sha256).toLowerCase(), size: Number(pkg.size) } };
+    latest = { version: j.version, notes: Array.isArray(j.notes) ? j.notes.map(String).slice(0, 12) : [], groups: groupsSince(j), kind: lk || 'app', setupFile: j.setup && typeof j.setup.file === 'string' ? path.basename(j.setup.file) : '', pkg: { file: path.basename(String(pkg.file)), sha256: String(pkg.sha256).toLowerCase(), size: Number(pkg.size) } };
     // going back from a version means "not that one": it isn't offered by itself again (also when
     // its package is still here from before)
     const skipped = readSettings().skipUpdate === latest.version;
@@ -368,6 +384,17 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
   async function preflightNow(kind) {
     // (never a downloaded setup: see checkNow)
     if (kind === 'full') return false;
+    // (Linux: no update program - the AppImage's own folder must take the new file; the .deb goes
+    // to the system installer)
+    if (kind === 'appimage' || kind === 'deb') {
+      if (kind === 'deb') return true;
+      try { await fsp.access(path.dirname(process.env.APPIMAGE), fs.constants.W_OK); return true; } catch (e) {
+        log('update: the AppImage folder is read-only (' + (e.code || e) + '): ' + process.env.APPIMAGE);
+        set({ state: 'blocked', err: 'readonly', setupPath: await setupFor(), show: true });
+        return false;
+      }
+    }
+    if (kind === 'rollback' && linuxKind()) return false;
     const r = await probe();
     if (r.ok) {
       // (allowed again - after IT's exception, "Try again"): ready as before
@@ -408,6 +435,7 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     try {
       // (a whole setup is never started from here: see checkNow)
       if (p.kind === 'full') throw new Error('a new runtime installs only with its setup, run by hand');
+      if (p.kind === 'appimage' || p.kind === 'deb') return applyLinux(p);
       // the helper in the app folder itself (0.5.0 ran a copy of it from AppData - company
       // antivirus blocks programs started from there; the app folder is where programs live)
       const exe = helperPath();
@@ -431,6 +459,50 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
       if (p.relaunch) { try { app.relaunch(); } catch (_) { /* */ } }
       return false;
     }
+  }
+
+  /**
+   * Linux, at quit. AppImage: the new file next to the running one, checked again, made runnable
+   * and renamed over it (the running copy goes on from the old file until it ends), then started
+   * if asked. .deb: handed to the system's package installer (it asks for the password); the app
+   * is opened again from the menu after that.
+   */
+  function applyLinux(p) {
+    try { writeSettings({ ...readSettings(), updateTry: { from: version, to: p.version, at: Date.now() } }); } catch (e) { log('update: ' + e); }
+    if (p.kind === 'deb') {
+      log('update: opening the package installer for ' + p.file);
+      const child = spawn('xdg-open', [p.file], { detached: true, stdio: 'ignore' });
+      child.on('error', (e) => log('update: xdg-open: ' + e));
+      child.unref();
+      return true;
+    }
+    const target = process.env.APPIMAGE;
+    const tmp = path.join(path.dirname(target), '.' + path.basename(target) + '.new');
+    try {
+      fs.copyFileSync(p.file, tmp);
+      // (read in pieces: the AppImage is over 100 MB)
+      const hh = require('crypto').createHash('sha256'), fd = fs.openSync(tmp, 'r'), buf = Buffer.alloc(1 << 20);
+      try { for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0;) hh.update(buf.subarray(0, n)); } finally { fs.closeSync(fd); }
+      const h = hh.digest('hex');
+      if (h !== p.sha) throw new Error('the copy next to the app does not match its checksum');
+      fs.chmodSync(tmp, 0o755);
+      fs.renameSync(tmp, target);
+      log('update: ' + target + ' is now ' + p.version);
+    } catch (e) {
+      log('update: could not replace the AppImage: ' + (e.stack || e));
+      try { fs.rmSync(tmp, { force: true }); } catch (_) { /* */ }
+    }
+    // (the AppImage at its usual place - the new one, or the old one if that failed: the card says so)
+    if (p.relaunch) {
+      // (started once this process has ended - it holds the one-copy lock, and a new copy started
+      // before would hand its start over to it and close)
+      const env = { ...process.env };
+      for (const k of ['APPIMAGE', 'APPDIR', 'ARGV0', 'OWD']) delete env[k];
+      const child = spawn('/bin/sh', ['-c', 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec "$0"', target, String(process.pid)], { detached: true, stdio: 'ignore', env });
+      child.on('error', (e) => log('update: restart: ' + e));
+      child.unref();
+    }
+    return true;
   }
 
   /** after an update: the notes once; old downloads cleared - once per run of the app (every new
@@ -471,13 +543,14 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
       if (n.endsWith('.part') && st.state === 'downloading') return; // (being copied now)
       // (a program in here goes at once: none is downloaded any more - 0.8.2's setup, which the
       // antivirus flagged, sat here)
-      if (/^helper-\d+/.test(n) || n.endsWith('.part') || /\.exe$/i.test(n) || (/\.zip$/i.test(n) && (old || n.includes('v' + version + '.')))) fsp.rm(f, { force: true }).catch(() => {});
+      const mine = n.includes('v' + version + '.') || n.includes('-' + version + '-') || n.includes('_' + version + '_');
+      if (/^helper-\d+/.test(n) || n.endsWith('.part') || /\.exe$/i.test(n) || (/\.(zip|AppImage|deb)$/i.test(n) && (old || mine))) fsp.rm(f, { force: true }).catch(() => {});
     })).catch(() => {});
     return updated;
   }
 
   function start() {
-    if (!install()) { st = { state: 'portable' }; return; }
+    if (!install() || !linuxInstalled()) { st = { state: 'portable' }; return; }
     setTimeout(() => void check(false).catch((e) => log('update check: ' + e)), FIRST);
     timer = setInterval(() => void check(false).catch((e) => log('update check: ' + e)), EVERY);
     try { powerMonitor.on('resume', () => setTimeout(() => void check(false).catch(() => {}), 60000)); } catch (_) { /* n/a */ }

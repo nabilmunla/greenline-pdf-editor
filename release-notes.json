@@ -1,4 +1,10 @@
 {
+  "0.10.0": {
+    "New features": [
+      "Linux: Greenline PDF Editor now runs on Linux Mint, Ubuntu, Debian and similar - as an AppImage (one file, runs on most distributions) or a .deb package; both update themselves like the Windows version",
+      "Linux: Settings > \"Make it the default for PDFs\"; printing starts on the system's default printer"
+    ]
+  },
   "0.9.9": {
     "New features": [
       "Number size is now a slider (Measure > Labels, 25% to 400%): nothing selected - every measurement number in the file; measurements selected - only those, bigger or smaller from their own size",

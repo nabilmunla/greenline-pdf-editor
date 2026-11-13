@@ -1885,8 +1885,13 @@ function SettingsDlg(p: Props) {
         <div className="seg"><button className={!wheelZoom ? 'on' : ''} onClick={() => setWheelZoom(false)}>Scrolls (Ctrl+wheel zooms)</button><button className={wheelZoom ? 'on' : ''} onClick={() => setWheelZoom(true)}>Zooms (Alt+wheel scrolls)</button></div>
       </div>
       <div className="row"><label>Open PDFs with {APP_NAME}</label>
-        <button className="btn" style={{ alignSelf: 'flex-start' }} onClick={async () => { const r = await gcc.registerOpenWith(); p.toast(r.ok ? `Registered. Now right-click any PDF > Open with > Choose another app > ${APP_NAME} > tick “Always”.` : 'Could not register: ' + (r.msg || 'Windows refused'), r.ok ? 'ok' : 'err', undefined, 12000); }}>Add to Windows “Open with”</button>
-        <p className="hint">Windows lets only you pick the default app. After this, right-click a PDF → Open with → Choose another app → {APP_NAME} → tick “Always use this app”.</p>
+        {p.info?.platform === 'linux' ? <>
+          <button className="btn" style={{ alignSelf: 'flex-start' }} onClick={async () => { const r = await gcc.registerOpenWith(); p.toast(r.ok ? `Done: PDFs now open in ${APP_NAME} (double-click).` : 'Could not set it: ' + (r.msg || 'refused'), r.ok ? 'ok' : 'err', undefined, 12000); }}>Make it the default for PDFs</button>
+          <p className="hint">PDFs then open in {APP_NAME} when double-clicked. To change it back: right-click a PDF → Open With → Other Application (or the system's Preferred Applications).</p>
+        </> : <>
+          <button className="btn" style={{ alignSelf: 'flex-start' }} onClick={async () => { const r = await gcc.registerOpenWith(); p.toast(r.ok ? `Registered. Now right-click any PDF > Open with > Choose another app > ${APP_NAME} > tick “Always”.` : 'Could not register: ' + (r.msg || 'Windows refused'), r.ok ? 'ok' : 'err', undefined, 12000); }}>Add to Windows “Open with”</button>
+          <p className="hint">Windows lets only you pick the default app. After this, right-click a PDF → Open with → Choose another app → {APP_NAME} → tick “Always use this app”.</p>
+        </>}
       </div>
       <div className="row"><label>Safety</label><p className="hint">Every save writes a new file first and swaps it in, and keeps the previous version in the backups folder (last 40). Unsaved work is copied every 45 s and offered back after a crash.</p>
         <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => void gcc.openExternal(joinPath(p.info?.localDir || p.info?.dataDir || '', 'backups'))}>Open backups folder</button>

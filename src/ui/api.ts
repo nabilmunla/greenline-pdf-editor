@@ -30,7 +30,9 @@ export interface UpdateState {
   /** the source is a web address (GitHub releases) - not a folder; defaultSource: the build's own */
   web?: boolean; defaultSource?: string;
   checked: number; previous: string; pendingAtExit: boolean;
-  available?: string; notes?: string[]; groups?: NoteGroups | null; kind?: 'app' | 'full'; size?: number; pct?: number; err?: string; show?: boolean;
+  /** Linux package this copy came in ('' elsewhere) and the new version's package file */
+  linux?: '' | 'appimage' | 'deb'; pkgFile?: string;
+  available?: string; notes?: string[]; groups?: NoteGroups | null; kind?: 'app' | 'full' | 'appimage' | 'deb'; size?: number; pct?: number; err?: string; show?: boolean;
   /** 'blocked' / 'setup': the setup to run instead (in the updates folder - or, from the web, its download page) */
   setupPath?: string;
 }

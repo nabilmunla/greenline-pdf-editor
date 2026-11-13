@@ -86,8 +86,10 @@ writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ lastRunVersion: '
 await win.locator('.upcard', { hasText: 'Updated to ' + VERSION }).waitFor({ timeout: 8000 }).catch(() => {});
 t = await texts(win);
 const rn = JSON.parse(readFileSync('release-notes.json', 'utf8'));
-const first = (v) => Object.entries(rn[v]).find(([k]) => !k.startsWith('Public: ') && !/^coming next/i.test(k))[1][0];
-ok(['0.9.5', '0.9.6', VERSION].every((v) => t.includes(first(v))), 'Updated from 0.9.4: 0.9.5, 0.9.6 and ' + VERSION + ' all listed (' + t.length + ' lines)');
+const first = (v) => (Object.entries(rn[v]).find(([k]) => !k.startsWith('Public: ') && !/^coming next/i.test(k)) || [])[1]?.[0];
+// (the newest version with notes of this build's own - 0.10.0 had only the public build's: Linux)
+const newest = Object.keys(rn).find((v) => first(v));
+ok(['0.9.5', '0.9.6', newest].every((v) => t.includes(first(v))), 'Updated from 0.9.4: 0.9.5, 0.9.6 and ' + newest + ' all listed (' + t.length + ' lines)');
 ok(!t.includes(first('0.9.4')), 'not 0.9.4\'s own');
 await app.close().catch(() => {});
 

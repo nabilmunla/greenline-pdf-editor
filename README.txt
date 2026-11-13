@@ -1,8 +1,8 @@
-PDF EDITOR - version 0.9.9
+PDF EDITOR - version 0.10.0
 ==========================
 
 INSTALL IT
-  Run "PDF Editor Setup 0.9.9.exe" (one file). Install puts it in your own Programs
+  Run "PDF Editor Setup 0.10.0.exe" (one file). Install puts it in your own Programs
   folder - no admin rights - with a Start menu shortcut, a desktop shortcut and PDF
   Editor listed in "Open with" for PDFs. Options: install for everyone on the PC
   (asks for admin rights; Program Files), another folder, no desktop shortcut, not
@@ -11,14 +11,14 @@ INSTALL IT
   (as \\server\share, not a drive letter). Your settings and keys survive reinstalls.
   Remove: Windows Settings > Apps > PDF Editor > Uninstall (or "PDF Editor Setup.exe"
   in the app folder). Optionally removes your settings too; your PDFs are never touched.
-  For IT: "PDF Editor Setup 0.9.9.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
+  For IT: "PDF Editor Setup 0.10.0.exe" --silent [--all-users] [--dir "D:\Apps\PDF Editor"]
   [--no-desktop] [--no-open-with] [--updates "\\server\share\PDF Editor"];
   uninstall: "<app folder>\PDF Editor Setup.exe" --uninstall --silent. Log:
   %TEMP%\PDF Editor Setup.log.
   Windows may warn on first run ("Windows protected your PC" > More info > Run anyway)
   because the setup isn't signed with a company code-signing certificate.
   If the setup window stays empty, it switches to plain Windows prompts by itself after
-  a few seconds; "PDF Editor Setup 0.9.9.exe" --plain uses the plain prompts straight away.
+  a few seconds; "PDF Editor Setup 0.10.0.exe" --plain uses the plain prompts straight away.
 
 UPDATES
   An installed copy looks in its updates folder for a newer version at start and every

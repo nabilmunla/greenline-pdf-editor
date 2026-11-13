@@ -15,8 +15,15 @@ function defaultFromReg(out) {
   return m[1].split(',')[0].trim();
 }
 
-/** Windows' default printer ('' elsewhere, or when it can't be read) */
+/** the default printer: Windows' (registry) or CUPS' on Linux ('' when it can't be read) */
 function defaultPrinter() {
+  // (Linux: CUPS - "system default destination: <name>"; '' when there is none or no lpstat)
+  if (process.platform === 'linux') {
+    return new Promise((res) => require('child_process').execFile('lpstat', ['-d'], { timeout: 5000, env: { ...process.env, LC_ALL: 'C' } }, (err, so) => {
+      const m = /destination:\s*(\S+)/.exec(String(so || ''));
+      res(!err && m ? m[1] : '');
+    }));
+  }
   if (process.platform !== 'win32') return Promise.resolve('');
   return new Promise((res) => {
     require('child_process').execFile('reg', ['query', KEY, '/v', 'Device'], { windowsHide: true, timeout: 5000 }, (err, so) => res(err ? '' : defaultFromReg(so)));

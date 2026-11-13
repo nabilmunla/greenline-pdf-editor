@@ -20,13 +20,15 @@ function scrub(text, { user = '', pc = '', words = [] } = {}) {
   s = replaceNames(s, { user, pc });
   // 2. the app's own files: their place on this PC goes, the code location stays
   s = s.replace(/\b[A-Za-z]:[\\/][^"'|*?\r\n]*?[\\/]resources[\\/]app(?:\.old)?[\\/]/gi, '<app>/');
+  // (Linux: /opt/<app>/... from the .deb, /tmp/.mount_<id>/... while an AppImage runs)
+  s = s.replace(/(^|[\s"'(=])\/[^\s"'\r\n]*?\/resources\/app(?:\.old)?\//g, '$1<app>/');
   // 3. every other path, to the end of the path: up to a quote, a bracket that closes the line,
   //    or the end of the line (spaces included - "C:\Users\John Smith\Bids\BOQ rev 3.pdf")
   s = s.replace(/file:\/\/\/?[^\s"'<>)]*/gi, '<path>');
   // (a name already taken out in 1 - "<name>" - can sit inside a path: the path goes on through it)
   s = s.replace(/\b[A-Za-z]:[\\/][^"'|*?\r\n]*/g, '<path>');
   s = s.replace(/\\\\[^"'|*?\r\n\\]+\\[^"'|*?\r\n]*/g, '<path>');
-  s = s.replace(/(^|[\s"'(=])\/(?:home|Users|tmp|mnt|media|var|private|Volumes|sessions)\/[^"'\r\n]*/g, '$1<path>');
+  s = s.replace(/(^|[\s"'(=])\/(?:home|Users|tmp|mnt|media|run|srv|opt|root|var|private|Volumes|sessions)\/[^"'\r\n]*/g, '$1<path>');
   // 4. a file name on its own: in quotes whole; after the app's own words ("opened <name>.pdf: 3
   //    pages") whole; else back to the nearest character Windows doesn't allow in a name (a colon,
   //    a quote...) or the start of the line - names of 20 words and brackets ("...WIR-001641[0]_WIR

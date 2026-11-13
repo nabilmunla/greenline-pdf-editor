@@ -49,9 +49,16 @@ Your files never leave your PC. The only things that go online are update checks
 
 ## Install
 
-Windows 10/11. Download **Greenline PDF Editor Setup &lt;version&gt;.exe** from [Releases](https://github.com/nabilmunla/greenline-pdf-editor/releases/latest) and run it. No admin rights needed.
+**Windows 10/11.** Download **Greenline PDF Editor Setup &lt;version&gt;.exe** from [Releases](https://github.com/nabilmunla/greenline-pdf-editor/releases/latest) and run it. No admin rights needed.
 
 The setup isn't code-signed yet, so Windows may say "Windows protected your PC": click **More info**, then **Run anyway**.
+
+**Linux** (64-bit: Mint, Ubuntu, Debian, Fedora and the like). Two choices, both in [Releases](https://github.com/nabilmunla/greenline-pdf-editor/releases/latest):
+
+- **.deb** (Mint, Ubuntu, Debian): double-click `greenline-pdf-editor_<version>_amd64.deb` and click **Install** (asks for your password). It appears in the menu.
+- **AppImage** (any distribution, no install): right-click `Greenline-PDF-Editor-<version>-x86_64.AppImage` → Properties → Permissions → tick **Allow executing file as program**, then double-click it. It adds itself to the menu. Keep it somewhere you can write to (your home folder): it updates by replacing itself.
+
+Settings › **Make it the default for PDFs** opens PDFs in it on double-click.
 
 New versions are announced inside the app (it asks before downloading anything), with what changed in every version since yours. Every update is signed by the publisher and checked before it's installed.
 
@@ -59,8 +66,8 @@ New versions are announced inside the app (it asks before downloading anything),
 
 **File › Report a problem** sends your words to the developer, anonymously. No GitHub account needed.
 
-- **Sent:** what you type, the picture of the window if you keep it, the app and Windows versions, memory, and the app's recent log.
-- **Taken out first:** your Windows user name, the PC's name, every file name, folder and path. The time is rounded to the hour.
+- **Sent:** what you type, the picture of the window if you keep it, the app and Windows (or Linux) versions, memory, and the app's recent log.
+- **Taken out first:** your user name, the PC's name, every file name, folder and path. The time is rounded to the hour.
 - **Never sent:** your PDF files. (The picture of the window, if you keep it, shows whatever is on screen: untick it when that's private.)
 - **Crash reports** are **off** until you turn them on (Settings › Help). Only crashes from then on are sent. The same page lists what's sent, with an example.
 - **Where they go:** the developer's own [small open receiver](reports-receiver/worker.js), hosted on Cloudflare. No analytics or crash-reporting company. Like any web host, Cloudflare sees your internet address; the receiver doesn't keep it. Read only by the developer, deleted after 6 months.
@@ -69,14 +76,14 @@ Prefer to talk in public? [Open an issue](https://github.com/nabilmunla/greenlin
 
 ## Building from source
 
-Needs Node.js 22, Python 3 (with Pillow), Go 1.24 and `rsvg-convert`.
+Needs Node.js 22, Python 3 (with Pillow), Go 1.24 and `rsvg-convert`; for the Linux packages also `mksquashfs` (squashfs-tools) and `dpkg-deb`.
 
 ```
 npm ci
 npm run build        # the app (dist/) and its background engines
 npm test             # unit tests
 node_modules/.bin/electron . --no-sandbox     # run it
-python3 scripts/publish.py <out>              # Windows setup + update package
+python3 scripts/publish.py <out>              # Windows setup + update package, Linux AppImage + .deb
 ```
 
 `publish.py` signs the update list with `keys/update-signing-key.pem`, which is not in this repository: make your own key pair for your own builds (`electron/updsig.cjs` holds the public key copies trust). The sample drawings and scans used by most end-to-end tests aren't published either.

@@ -60,6 +60,14 @@ subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'pack.py'), out], 
 # 3. the setup
 subprocess.run([sys.executable, os.path.join(ROOT, 'installer', 'build.py'), ez, os.path.join(out, f'app-v{ver}.zip'), out], cwd=ROOT, check=True)
 
+# 4. Linux (the public build only): an AppImage and a .deb, listed in latest.json for its copies
+linux = None
+if pkg.get('brand'):
+    subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'linux.py'), out], cwd=ROOT, check=True)
+    lj = os.path.join(out, '.linux.json')
+    linux = json.load(open(lj))
+    os.remove(lj)
+
 app = os.path.join(out, f'app-v{ver}.zip')
 NAME = pkg.get('displayName') or pkg.get('productName') or 'PDF Editor'
 setup = os.path.join(out, f'{NAME} Setup {ver}.exe')
@@ -110,6 +118,9 @@ latest = {
     **({'groups': groups} if groups else {}),
     'history': history,
     'app': {'file': os.path.basename(app), 'sha256': sha(app), 'size': os.path.getsize(app)},
+    # (Linux copies take theirs from here - an AppImage or a .deb, each as it was installed;
+    # Windows copies before 0.10.0 don't look at it)
+    **({'linux': linux} if linux else {}),
     # which edition this is (signed with the rest): the company build refuses the public one's
     # releases and the other way round - both are signed with the same key
     'build': pkg.get('brand') or 'company',
@@ -140,9 +151,9 @@ if FEED:
      app-v{ver}.zip
      {NAME} Setup {ver}.exe
      source-v{ver}.zip
-     latest.json
-   (all four in the same release - installed copies read latest.json from the latest release
-   and fetch the app or setup from it).
+     latest.json{''.join(chr(10) + '     ' + e['file'] for e in (linux or {}).values())}
+   (all in the same release - installed copies read latest.json from the latest release
+   and fetch the app, setup{' or Linux package' if linux else ''} from it).
 3. Publish, marked as the latest release. Installed copies see it at their next check.
 
 To hold a version back: publish it as a pre-release (or as a draft) - "latest" stays on the

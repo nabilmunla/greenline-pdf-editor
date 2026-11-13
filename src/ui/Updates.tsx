@@ -132,17 +132,24 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
       {u.state === 'ready' && (
         <>
           <div className="up-head"><Ico n="check" size={16} /><b>{u.available} is ready</b></div>
-          <p className="up-sub">{APP_NAME} restarts to finish and reopens your files. You're asked to save changes first.</p>
+          <p className="up-sub">{u.linux === 'deb'
+            ? <>{APP_NAME} closes and the system's package installer opens (it asks for your password). Open {APP_NAME} again after that - your files reopen. You're asked to save changes first.</>
+            : <>{APP_NAME} restarts to finish and reopens your files. You're asked to save changes first.</>}</p>
           {admin}
           <div className="up-btns">
             <RestartBtn now={false} label="When I close it" />
-            <RestartBtn now primary label="Restart now" />
+            <RestartBtn now primary label={u.linux === 'deb' ? 'Close and install' : 'Restart now'} />
           </div>
         </>
       )}
       {u.state === 'blocked' && (
         <>
-          {u.err === 'unfinished' ? <>
+          {u.linux ? <>
+            <div className="up-head err"><Ico n="warn" size={16} /><b>{u.err === 'unfinished' ? `The update to ${u.available} didn't finish` : `${APP_NAME} can't replace its own file`}</b></div>
+            <p className="up-sub">{u.err === 'unfinished'
+              ? <>{APP_NAME} started again on {u.version}. Nothing was lost. Try again - or download <b>{setupName(u)}</b>{fromWhere(u)} and {u.linux === 'deb' ? 'open it' : 'put it in place of the old one'}.</>
+              : <>The folder it is in can't be written to, so nothing was closed or changed. Download <b>{setupName(u)}</b>{fromWhere(u)} and put it in place of the old one.</>}</p>
+          </> : u.err === 'unfinished' ? <>
             <div className="up-head err"><Ico n="warn" size={16} /><b>The update to {u.available} didn't finish</b></div>
             <p className="up-sub">{APP_NAME} started again on {u.version}. Nothing was lost. Try again - or, if it keeps failing (the antivirus or Windows stopping it), close {APP_NAME} and run <b>{setupName(u)}</b>{fromWhere(u)}: your files and settings stay.</p>
           </> : <>
@@ -151,7 +158,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
           </>}
           <div className="up-btns">
             <button className="btn sm" onClick={() => void gcc.updateLater()}>Later</button>
-            <RestartBtn now label="Try again" title="After IT has allowed it" />
+            <RestartBtn now label="Try again" title={u.linux ? undefined : 'After IT has allowed it'} />
             <SetupBtn u={u} />
           </div>
         </>
@@ -191,7 +198,7 @@ function SetupBtn({ u }: { u: UpdateState }) {
     ? <button className="btn sm primary" onClick={() => void gcc.openLink(u.setupPath!)}>Open the download page</button>
     : <button className="btn sm primary" onClick={() => void gcc.showInFolder(u.setupPath!)}>Show the setup</button>;
 }
-const setupName = (u: UpdateState) => (u.setupPath && /\.exe$/i.test(u.setupPath) ? u.setupPath.split(/[\\/]/).pop() : `${APP_NAME} Setup ${u.available}.exe`);
+const setupName = (u: UpdateState) => (u.linux && u.pkgFile ? u.pkgFile : u.setupPath && /\.exe$/i.test(u.setupPath) ? u.setupPath.split(/[\\/]/).pop() : `${APP_NAME} Setup ${u.available}.exe`);
 
 function statusLine(u: UpdateState): string {
   switch (u.state) {
@@ -199,9 +206,10 @@ function statusLine(u: UpdateState): string {
     case 'none': return 'You have the newest version (' + ago(u.checked) + ').';
     case 'available': return `Version ${u.available} is available.`;
     case 'downloading': return `Getting ${u.available}… ${Math.round((u.pct || 0) * 100)}%`;
-    case 'ready': return u.pendingAtExit ? `Version ${u.available} is installed when you close ${APP_NAME}.` : `Version ${u.available} is ready.`;
+    case 'ready': return u.pendingAtExit ? (u.linux === 'deb' ? `The installer for ${u.available} opens when you close ${APP_NAME}.` : `Version ${u.available} is installed when you close ${APP_NAME}.`) : `Version ${u.available} is ready.`;
     case 'error': return 'Problem: ' + (u.err || 'unknown');
-    case 'blocked': return u.err === 'unfinished'
+    case 'blocked': return u.linux ? `Version ${u.available} is downloaded, but ${u.err === 'unfinished' ? "the update didn't finish" : "the app's folder can't be written to"} - install "${setupName(u)}"${fromWhere(u)}.`
+      : u.err === 'unfinished'
       ? `The update to ${u.available} didn't finish - try again, or install it with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'}.`
       : `Version ${u.available} is downloaded, but this PC doesn't let ${APP_NAME} run its update program (antivirus) - install it with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'}.`;
     case 'setup': return `Version ${u.available} is available - it installs with "${setupName(u)}"${fromWhere(u) || ' from the updates folder'} (run it by hand; it can't update itself).`;
@@ -246,7 +254,7 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
           <div className="hrow">
             <button className="btn sm" disabled={!u.source || u.state === 'checking' || u.state === 'downloading'} onClick={async () => { await commit(src ?? ''); await gcc.updateCheck(); }}>Check now</button>
             {u.state === 'available' && <button className="btn sm primary" onClick={() => void gcc.updateDownload()}>Update ({mb(u.size)})</button>}
-            {(u.state === 'ready' || u.state === 'blocked') && !u.pendingAtExit && <RestartBtn now primary label={u.state === 'blocked' ? 'Try again' : 'Restart now'} />}
+            {(u.state === 'ready' || u.state === 'blocked') && !u.pendingAtExit && <RestartBtn now primary label={u.state === 'blocked' ? 'Try again' : u.linux === 'deb' ? 'Close and install' : 'Restart now'} />}
             {u.state === 'setup' && <SetupBtn u={u} />}
             <span className="hint up-status">{statusLine(u)}</span>
           </div>
