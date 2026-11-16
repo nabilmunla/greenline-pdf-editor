@@ -11,14 +11,20 @@ import path from 'node:path';
 
 /** mtime: the base file as it was when the changes (delta) were written against it - a file saved
  *  over in between is refused (its start is not what the changes belong to) */
-export interface FileSrc { path: string; size?: number; delta?: string; mtime?: number }
+export interface FileSrc { path: string; size?: number; delta?: string; mtime?: number; extra?: ExtraPart[] }
+/**
+ * More parts after the file (and its changes): what the drawing engines see on top of the
+ * document - heavy pages' merged line work (display only, never saved): stream files written
+ * once, and small pieces (object headers, the page objects, the cross-reference) inline.
+ */
+export type ExtraPart = { path: string; size: number } | { bytes: Uint8Array };
 export type Src = Uint8Array | FileSrc;
 export const isFileSrc = (s: unknown): s is FileSrc => !!s && typeof s === 'object' && !ArrayBuffer.isView(s) && typeof (s as FileSrc).path === 'string';
 
 /** what the engines read a document from (no file system in the engines themselves) */
 export interface Reader { readonly size: number; read(buf: Uint8Array, off: number, len: number, pos: number): number; close(): void }
 
-interface Part { fd: number; start: number; len: number }
+interface Part { fd: number; start: number; len: number; buf?: Uint8Array }
 
 /** a source read in pieces; several files back to back */
 export class VFile implements Reader {
@@ -43,10 +49,22 @@ export class VFile implements Reader {
       if (src.delta && src.size != null && full < src.size) throw new Error('The file was changed meanwhile');
       const baseLen = src.delta ? Math.min(full, src.size ?? full) : full;
       this.parts.push({ fd: a, start: 0, len: baseLen });
+      let at = baseLen;
       if (src.delta) {
         const b = fs.openSync(src.delta, 'r');
         fds.push(b);
-        this.parts.push({ fd: b, start: baseLen, len: fs.fstatSync(b).size });
+        const len = fs.fstatSync(b).size;
+        this.parts.push({ fd: b, start: at, len });
+        at += len;
+      }
+      for (const x of src.extra ?? []) {
+        if ('bytes' in x) { this.parts.push({ fd: -1, start: at, len: x.bytes.length, buf: x.bytes }); at += x.bytes.length; continue; }
+        const f = fs.openSync(x.path, 'r');
+        fds.push(f);
+        // (a part shorter than said: the copy is broken - refused, as a changed base is)
+        if (fs.fstatSync(f).size < x.size) throw new Error('A drawing part is missing (' + path.basename(x.path) + ')');
+        this.parts.push({ fd: f, start: at, len: x.size });
+        at += x.size;
       }
     } catch (e) {
       for (const f of fds) try { fs.closeSync(f); } catch { /* */ }
@@ -64,6 +82,7 @@ export class VFile implements Reader {
       if (at >= p.start + p.len || at < p.start) continue;
       const want = Math.min(len - done, p.start + p.len - at);
       let got = 0;
+      if (p.buf) { buf.set(p.buf.subarray(at - p.start, at - p.start + want), off + done); got = want; }
       while (got < want) {
         const n = fs.readSync(p.fd, buf, off + done + got, want - got, at - p.start + got);
         if (n <= 0) break; // file shorter than expected
@@ -77,7 +96,7 @@ export class VFile implements Reader {
   close() {
     if (this.closed) return;
     this.closed = true;
-    for (const p of this.parts) try { fs.closeSync(p.fd); } catch { /* already closed */ }
+    for (const p of this.parts) if (p.fd >= 0) try { fs.closeSync(p.fd); } catch { /* already closed */ }
   }
 }
 

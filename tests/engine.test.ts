@@ -876,73 +876,8 @@ test('another program\'s text box: turned / pasted with its own drawing; edited 
   mu.close('ft');
 });
 
-test('heavy page merging: a path split across content parts, two pages sharing one content - merged once, same drawing', async () => {
-  const zlib = await import('node:zlib');
-  const { mergeStrokes } = await import('../src/engine/strokes');
-  // (the app's merger, with a low stroke count so a test-sized page qualifies)
-  mu.setContentMerger((parts) => {
-    const decs = parts.map((raw) => zlib.inflateSync(raw));
-    const dec = Buffer.concat(decs.flatMap((b, k) => (k ? [Buffer.from('\n'), b] : [b])));
-    const r = mergeStrokes(new Uint8Array(dec.buffer, dec.byteOffset, dec.byteLength), 1000);
-    if (!r) return null;
-    const out = zlib.deflateSync(r.out);
-    return new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
-  });
-  try {
-    // ~1M short strokes at scattered places (scattered so the content stays big when compressed)
-    let seed = 7;
-    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
-    const lines: string[] = [];
-    for (let i = 0; i < 1_000_000; i++) { const x = (rnd() * 1180).toFixed(3), y = (rnd() * 830).toFixed(3); lines.push(`${x} ${y} m ${(+x + 0.8).toFixed(3)} ${(+y + 0.6).toFixed(3)} l S`); }
-    const d = new mupdf.PDFDocument();
-    // part 1 ends in the middle of a path (red), part 2 strokes it and goes on
-    const p1 = d.addStream('q 1 0 0 RG 2 w 100 100 m 600 500 l', {});
-    const p2 = d.addStream('S 0 0 1 RG 0.1 w\n' + lines.join('\n') + '\nQ', {});
-    const contents = d.newArray(); contents.push(p1); contents.push(p2);
-    for (let k = 0; k < 2; k++) { const pg = d.addPage([0, 0, 1190, 842], 0, {}, ''); pg.put('Contents', contents); d.insertPage(-1, pg); }
-    const bytes = d.saveToBuffer('compress').asUint8Array().slice();
-    mu.setHeavyRaw(8e6);
-    assert.ok(bytes.length > 9e6, 'test file big enough to be looked at: ' + bytes.length);
-    const r = mu.open('hv', bytes);
-    assert.equal(r.heavy, 2, 'both pages (one shared content)');
-    const saved = mu.save('hv');
-    mu.close('hv');
-    assert.ok(saved.length < bytes.length * 1.2, `merged once, not twice: ${bytes.length} -> ${saved.length}`);
-    const draw = (b: Uint8Array, page: number) => {
-      const doc = mupdf.Document.openDocument(b, 'application/pdf');
-      const pix = doc.loadPage(page).toPixmap(mupdf.Matrix.scale(0.5, 0.5), mupdf.ColorSpace.DeviceRGB, false, true);
-      let red = 0; const px = pix.getPixels();
-      for (let i = 0; i < px.length; i += 3) if (px[i] > 200 && px[i + 1] < 80 && px[i + 2] < 80) red++;
-      return red;
-    };
-    const red0 = draw(bytes, 0);
-    assert.ok(red0 > 100, 'the red line is there: ' + red0);
-    assert.equal(draw(saved, 0), red0, 'the stroke split across the parts is still drawn (page 1)');
-    assert.equal(draw(saved, 1), red0, 'page 2 too');
-    const sd = mupdf.Document.openDocument(saved, 'application/pdf').asPDF()!;
-    assert.equal(sd.findPage(0).get('Contents').asIndirect(), sd.findPage(1).get('Contents').asIndirect(), 'still one shared content');
-    // saved again: still in full (the old line work isn't appended back - it doubled the file)
-    const r2 = mu.open('hv2', saved);
-    void r2;
-    mu.close('hv2');
-    mu.setHeavyRaw(30e6);
-    // a page below the bar when opening, simplified on request (it took the drawing engine down)
-    mu.open('hv3', bytes);
-    assert.equal(mu.simplifyPage('hv3', 0), true);
-    const s3 = mu.save('hv3', { incremental: true });
-    const s4 = mu.save('hv3', { incremental: true });
-    assert.ok(s4.length < bytes.length * 1.2 && s3.length < bytes.length * 1.2, `simplified page saved in full both times: ${bytes.length} -> ${s3.length}, ${s4.length}`);
-    assert.equal(draw(s4, 0), red0, 'simplified page: the split stroke still drawn');
-    assert.ok(mu.undo('hv3').ok, 'one undo step');
-    mu.close('hv3');
-    mu.open('hv4', new Uint8Array(readFileSync('tests/data/long-spec.pdf')));
-    assert.throws(() => mu.simplifyPage('hv4', 0), /can't be simplified/, 'a text page: nothing to simplify');
-    mu.close('hv4');
-  } finally {
-    mu.setContentMerger(null);
-    mu.setHeavyRaw(30e6);
-  }
-});
+// (heavy page merging - split stroke, shared content, simplify on request, a text page that can't be
+// simplified - is display only since PLAN 3.1/3.3: tests/plan-3-1.test.ts)
 
 test('another program\'s text box without /P turns the same way as its frame (clockwise as seen)', () => {
   mu.open('fp', foreignTextDoc(false));

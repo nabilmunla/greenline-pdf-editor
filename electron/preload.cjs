@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('gcc', {
   renderers: Number((process.argv.find((a) => a.startsWith('--gcc-renderers=')) || '').split('=')[1]) || 0,
   info: () => ipcRenderer.invoke('app:info'),
   user: () => ipcRenderer.invoke('app:user'),
+  freemem: () => ipcRenderer.invoke('app:freemem'),
+  off: () => ipcRenderer.invoke('app:off'),
   settings: () => ipcRenderer.invoke('settings:get'),
   viewGet: (p) => ipcRenderer.invoke('view:get', p),
   viewSet: (p, v) => ipcRenderer.invoke('view:set', p, v),

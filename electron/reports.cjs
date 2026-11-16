@@ -157,7 +157,9 @@ function create({ version, readSettings, writeSettings, log, logFile, source, ap
         const since = s.anonCrashReports ? Number(s.anonCrashSince) || 0 : 0;
         await dropUnsendable(since);
         if (!(await waiting())) { last = { ...last, state: 'idle' }; return status(); }
-        r = await runJob(['post', endpoint, queueDir(), String(since), await wordsFile()]);
+        // (the names file is only for that one job: removed when it is over, sent or not)
+        const words = await wordsFile();
+        try { r = await runJob(['post', endpoint, queueDir(), String(since), words]); } finally { if (words) await fsp.rm(words, { force: true }).catch(() => {}); }
       } else r = await runJob(['put', queueDir(), src]);
       for (const f of r.done || []) await fsp.rm(path.join(queueDir(), f), { force: true }).catch(() => {});
       const sent = (r.done || []).filter((f) => f.endsWith('.json')).length;

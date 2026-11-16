@@ -1769,6 +1769,7 @@ function RedactSearchDlg(p: Props) {
     // every hit: one search gives back at most 5,000 (everything after the 5,000th was left
     // unmarked under "Found 5,000") - a part with that many is searched again in halves
     const search = async (t: string, from: number, to: number): Promise<Hit[]> => {
+      await doc.ensurePages(Array.from({ length: to - from }, (_, i) => from + i));
       const r = await renderers[0].call<Hit[]>('find', [doc.id, t, from, to, mc, ww]);
       if (r.length < MAX) return r;
       if (to - from <= 1) { capped = true; return r; }

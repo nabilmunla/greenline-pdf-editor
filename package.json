@@ -1,14 +1,16 @@
 {
   "name": "pdf-editor",
   "productName": "PDF Editor",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Greenline PDF Editor - opens huge construction PDFs without freezing; markups, scale and measuring.",
   "main": "electron/main.cjs",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "vite build && node scripts/build-engines.mjs",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "bench:synthetic": "bash tests/bench/make-synthetic.sh",
+    "bench:engine": "tsx tests/bench/bench-engine.ts"
   },
   "devDependencies": {
     "@embedpdf/pdfium": "2.15.1",

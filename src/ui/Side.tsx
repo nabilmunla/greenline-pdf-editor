@@ -97,6 +97,8 @@ export function SidePanel(p: Props) {
 
 /** where each open file's thumbnails were scrolled to */
 const thumbScroll = new Map<string, { top: number; page: number }>();
+/** the document closed: its thumbnails' place is forgotten */
+export function forgetThumbScroll(docId: string) { thumbScroll.delete(docId); }
 
 function Thumbs(p: Props & { width: number }) {
   const { doc } = p;
@@ -1159,6 +1161,8 @@ async function searchDoc(doc: PdfDoc, q: string, mc: boolean, ww: boolean, cap: 
     while (!stop && next < pieces.length) {
       if (stopped()) { stop = true; return; }
       const k = next++;
+      // (heavy pages looked at first: PLAN 3.2)
+      await doc.ensurePages(Array.from({ length: Math.min(n, pieces[k] + step) - pieces[k] }, (_, i) => pieces[k] + i));
       got[k] = await eng.call<FoundHit[]>('find', [doc.id, q, pieces[k], pieces[k] + step, mc, ww]).catch(() => []);
       found += got[k]!.length;
       if (found > cap) stop = true;

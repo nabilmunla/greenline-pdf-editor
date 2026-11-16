@@ -6,6 +6,11 @@ import bidiFactory from 'bidi-js';
 import type { FontRef } from './fonts';
 
 const bidi = bidiFactory();
+// One HarfBuzz buffer for every run: harfbuzzjs (1.6.4) has no destroy() and frees a buffer only
+// when the JS object is collected - which does not happen inside a layout loop (wrapping shapes
+// every candidate prefix), so a buffer per run filled the wasm memory. Shaping is synchronous, so
+// one buffer, reset before each run, is safe.
+let shapeBuf: hb.Buffer | null = null;
 
 /** u: the text this glyph stands for (a ligature: several letters; a mark split off: '') */
 export interface Glyph { f: FontRef; gid: number; x: number; dx: number; dy: number; adv: number; u: string; rtl: boolean }
@@ -65,7 +70,8 @@ function shapeRange(text: string, levels: Uint8Array, s: number, e: number, stac
   const glyphs: Glyph[] = [];
   let x = 0;
   for (const r of runs) {
-    const buf = new hb.Buffer();
+    const buf = shapeBuf ??= new hb.Buffer();
+    buf.reset();
     buf.addText(text, r.s, r.e - r.s);
     buf.guessSegmentProperties();
     buf.setDirection(r.level % 2 ? hb.Direction.RTL : hb.Direction.LTR);

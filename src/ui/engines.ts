@@ -7,6 +7,7 @@
 import { EngineClient } from '../engine/rpc';
 import { gcc } from './api';
 import { APP_NAME } from './brand';
+import { offOf } from '../engine/off';
 
 let started: Promise<void> | null = null;
 export const renderers: EngineClient[] = [];
@@ -141,6 +142,56 @@ export function renderer(): EngineClient {
   return best;
 }
 
+// ---- PLAN 7.3 / 5.5: a merged or simplified page is read by one drawing engine only, on a PC short of memory
+/** under this much free memory (bytes) when the window learns a page is merged / simplified, the page is pinned */
+export const LOW_FREE = 2 * 2 ** 30;
+// pin: engine 1 only; light: decided, spreads. Only pinHeavyPage decides - no page is judged by what
+// an engine's heap did (PLAN 5.5: the probe cost 50 % on scrolling a set, and is gone)
+const pageState = new Map<string, Map<number, 'pin' | 'light'>>();
+const setState = (doc: string, page: number, v: 'pin' | 'light') => {
+  let m = pageState.get(doc);
+  if (!m) pageState.set(doc, m = new Map());
+  m.set(page, v);
+};
+/** the PC's free memory, asked of the main process at most every 2 s */
+let free: { at: number; v: Promise<number | undefined> } | null = null;
+/** pin switched off (asked of the main process once; PDFED_OFF=pin): the rule never fires */
+let pinOff: Promise<boolean> | null = null;
+const pinSwitchedOff = () => pinOff ??= Promise.resolve(gcc.off?.()).then((v) => offOf(v).has('pin'), () => false);
+/** (tests) ask for PDFED_OFF again */
+export function forgetOff() { pinOff = null; }
+/** the PC's free memory (bytes) if a merged / simplified page is to be pinned now (under LOW_FREE, pin not switched off), else null */
+const freeIfLow = async (): Promise<number | null> => {
+  try {
+    if (await pinSwitchedOff()) return null;
+    const now = Date.now();
+    if (!free || now - free.at > 2000) free = { at: now, v: Promise.resolve(gcc.freemem?.()).catch(() => undefined) };
+    const f = await free.v;
+    return typeof f === 'number' && f < LOW_FREE ? f : null;
+  } catch { return null; }
+};
+/** (tests) forget the free memory last asked */
+export function forgetFree() { free = null; }
+/** pages of the file pinned to drawing engine 1 (PLAN 5.0: the bench records it; 0 with 2 GB or more free) */
+export function pinCount(doc: string): number {
+  let n = 0;
+  for (const v of pageState.get(doc)?.values() ?? []) if (v === 'pin') n++;
+  return n;
+}
+/** the pages pinned per file, each with the PC's free memory (bytes) when it was pinned (the bench records it; empty when nothing was pinned) */
+const pinLogs = new Map<string, { page: number; free: number }[]>();
+export function pinLog(doc: string): { page: number; free: number }[] { return [...(pinLogs.get(doc) ?? [])]; }
+/** the file is closed: its pages are no longer pinned (pins stay until then) */
+export function clearPins(doc: string) { pageState.delete(doc); pinLogs.delete(doc); }
+/** the window knows this page is heavy (merged / simplified) and no engine has read it yet: pinned if the PC has under LOW_FREE free */
+export async function pinHeavyPage(doc: string, page: number): Promise<void> {
+  if (pageState.get(doc)?.has(page)) return;
+  const f = await freeIfLow();
+  if (pageState.get(doc)?.has(page)) return;
+  setState(doc, page, f === null ? 'light' : 'pin');
+  if (f !== null) { let l = pinLogs.get(doc); if (!l) pinLogs.set(doc, l = []); l.push({ page, free: f }); }
+}
+
 /**
  * The drawing engine for a picture of one page. Before an engine can draw any part of a page
  * it reads the whole page in - seconds and ~800 MB for a dense A0 sheet - and keeps it. Drawing
@@ -149,6 +200,8 @@ export function renderer(): EngineClient {
  * held twice, not four times, and more drawings fit before engines have to start afresh.
  */
 export function rendererFor(doc: string, page: number): EngineClient {
+  // (PLAN 7.3: a merged / simplified page on a PC short of memory lives in engine 1 only)
+  if (pageState.get(doc)?.get(page) === 'pin') return renderers[0];
   if (renderers.length <= 2) return renderer();
   let h = page * 31;
   for (let i = 0; i < doc.length; i++) h = (h * 33 + doc.charCodeAt(i)) >>> 0;

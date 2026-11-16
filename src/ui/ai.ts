@@ -80,6 +80,7 @@ export async function pageTexts(doc: PdfDoc, pages: number[], onProgress?: (done
   const worker = async (k: number) => {
     while (next < runs.length) {
       const [a, b] = runs[next++];
+      await doc.ensurePages(Array.from({ length: b - a }, (_, i) => a + i));
       const t = await renderers[k % renderers.length].call<string[]>('texts', [doc.id, a, b]);
       t.forEach((s, i) => out.set(a + i, s.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').trim()));
       done += b - a;

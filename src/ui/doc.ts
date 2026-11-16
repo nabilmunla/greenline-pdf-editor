@@ -1,19 +1,21 @@
 // One open PDF (one tab). MuPDF (editing worker) holds the document of record; the
 // PDFium workers hold a copy for drawing, refreshed when page content changes.
 import { gcc, baseName, dirName, joinPath } from './api';
-import { mu, muFile, renderers, editor, onEngineRestart } from './engines';
+import { mu, muFile, muBatch, renderers, editor, onEngineRestart, pinHeavyPage, clearPins } from './engines';
 import type { EngineClient } from '../engine/rpc';
 import { tiles } from './tiles';
+import { offOf } from '../engine/off';
+import { forgetDragged } from './pagedrag';
 import { fileArg, isEngineDown, engineDown, type FileRef } from '../engine/rpc';
 import type { AnnotData, PageInfo, AnnotSpec, Rect, Pt, TBlock, TextStyle, PageMark, MarkContext, SaveOpts, OutNode } from '../engine/mu';
 
 export type { AnnotData, PageInfo, AnnotSpec, Rect, Pt };
 
 /** a PDF on disk as the engines read it: a file, or a file + a file of changes after it */
-export interface FileSpec { path: string; size?: number; delta?: string; mtime?: number }
-const toArg = (f: FileSpec | Uint8Array) => (f instanceof Uint8Array ? f.slice() : fileArg(f.path, { size: f.size, delta: f.delta, mtime: f.mtime }));
+export interface FileSpec { path: string; size?: number; delta?: string; mtime?: number; extra?: ({ path: string; size: number } | { bytes: Uint8Array })[] }
+const toArg = (f: FileSpec | Uint8Array) => (f instanceof Uint8Array ? f.slice() : fileArg(f.path, { size: f.size, delta: f.delta, mtime: f.mtime, ...(f.extra ? { extra: f.extra } : {}) }));
 /** temp files of a source (ours; the user's file never is) */
-const tempsOf = (f: FileSpec | null | undefined) => (f ? [f.delta, f.path].filter((x): x is string => !!x) : []);
+const tempsOf = (f: FileSpec | null | undefined) => (f ? [f.delta, f.path, ...(f.extra ?? []).map((x) => ('path' in x ? x.path : ''))].filter((x): x is string => !!x) : []);
 
 /** open documents (so they can be reopened when an engine had to restart) */
 const openDocs = new Set<PdfDoc>();
@@ -21,7 +23,8 @@ onEngineRestart(async (c, kind) => {
   if (kind === 'batch') return;
   for (const d of openDocs) {
     try {
-      if (kind === 'edit') await d.reopenAfterCrash();
+      // (the merged line work of heavy pages lived in the editing engine: attached again on the next look)
+      if (kind === 'edit') { d.lookAgain(); await d.reopenAfterCrash(); }
       else await d.reopenIn(c);
     } catch (e) { gcc.log('reopen after engine restart: ' + e); }
   }
@@ -114,6 +117,10 @@ export interface DocData {
 
 import { orientScale, inViewport } from './geom';
 
+/** a file this big is always written in full by the editing engine (mu.ts STREAM_SAVE), even
+ *  when only changes were asked for */
+const FULL_REWRITE = 350e6;
+
 export class PdfDoc {
   id = 'd' + seq++ + '-' + Math.random().toString(36).slice(2, 7);
   path: string | null;
@@ -198,7 +205,7 @@ export class PdfDoc {
    */
   async load(src: FileSpec | Uint8Array, password?: string, temp = false): Promise<'ok' | 'password'> {
     const user = await gcc.user(); // (the author's name, else the Windows user - not the whole settings file)
-    const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; hasForms: boolean; size?: number }>('open', this.id, toArg(src), password, user);
+    const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; look?: boolean; hasForms: boolean; size?: number }>('open', this.id, toArg(src), password, user);
     if (r.needsPassword) return 'password';
     if (temp && !(src instanceof Uint8Array)) for (const t of tempsOf(src)) this.temps.add(t);
     this.src = src;
@@ -210,11 +217,18 @@ export class PdfDoc {
     this.hasForms = r.hasForms;
     this.signed = !!(r as { signed?: boolean }).signed;
     this.annRev = r.pages.map(() => 0);
+    // (3.2: heavy pages are looked at before the drawing engines read them)
+    this.look = !!r.look;
+    // (PLAN 5.4: PDFED_OFF=prelook - known before the first save, which can't wait to ask)
+    if (this.look) void Promise.resolve(gcc.off?.()).then((v) => { this.noPrelook = offOf(v).has('prelook'); }, () => {});
+    if (this.look) tiles.setGate(this.id, { ready: (p) => { if (this.looked.has(p)) return true; this.askLook(p); return false; }, busy: (p) => this.preparing.has(p) });
     this.crev = r.pages.map((_, k) => -(k + 1));
     this.size = src instanceof Uint8Array ? src.length : r.size ?? 0;
     // a repaired file: give PDFium MuPDF's clean copy (PDFium may choke on the broken one)
     // (also a file whose pages MuPDF had to straighten, and a protected one)
     if (r.repaired || r.fixedTurn || password) await this.redraw(await mu<FileSpec>('drawSnapshot', this.id, true));
+    // (heavy pages drawn from merged line work: the file as it is + that, on top)
+    else if (r.heavy) await this.redraw(await mu<FileSpec>('drawSnapshot', this.id, false));
     else await this.redraw(src);
     this.data = await mu<DocData>('getData', this.id);
     await this.refreshHistory();
@@ -333,6 +347,8 @@ export class PdfDoc {
     const r = await mu<{ pages: PageInfo[]; needsPassword: boolean }>('open', this.id, toArg(from), this.password, user);
     if (r.needsPassword) return;
     if (rec) this.src = from; // the recovery file stays until this tab closes
+    // (a whole recovery copy may number its objects anew: its merges are made again - PLAN 4.1)
+    if (rec && !rec.base) this.merges.clear();
     // work brought back from the recovery copy is not in the file: unsaved, whatever happens
     // next (a redraw that failed below left it "saved" - closing asked nothing and deleted the copy)
     this.dirty = !!rec || this.dirty;
@@ -369,11 +385,27 @@ export class PdfDoc {
     openDocs.delete(this);
     // nothing more drawn for it: queued tiles dropped, late ones refused, its pictures and notes go
     tiles.closeDoc(this.id);
+    clearPins(this.id);
     this.closed = true;
+    // (nobody waits for a page of a closed file)
+    this.releaseLookWaiters();
     await gcc.recoveryClear(this.id).catch(() => {});
     await Promise.all([...renderers.map((w) => w.call('close', [this.id]).catch(() => {})), mu('close', this.id).catch(() => {})]);
     if (this.temps.size) await gcc.dropTemp([...this.temps]).catch(() => {});
     gcc.docsClosed();
+    // the JS side: the per-document caches, the listeners and the bytes the tab was opened from
+    // (a file-backed source is only a path). The object itself is kept by whoever still holds it.
+    this.annotCache.clear();
+    this.allCache = null;
+    this.charCache.clear();
+    this.blockCache.clear();
+    this.linkCache.clear();
+    this.listeners.clear();
+    this.viewListeners.clear();
+    this.visRects.clear();
+    if (this.src instanceof Uint8Array) this.src = null;
+    if (this.drawSrc instanceof Uint8Array) this.drawSrc = null;
+    forgetDragged(this.id);
   }
 
   // -------------------------------------------------------------- tiles
@@ -509,6 +541,7 @@ export class PdfDoc {
     const before = this.pages.length;
     if (pages) this.pages = pages;
     else this.pages = await mu<PageInfo[]>('pageInfos', this.id);
+    this.lookChanged(ch);
     this.baseRev++;
     // what the drawing engines show: the file + only the changed parts (small, quick).
     // MuPDF has the change already: if this fails (a drawing engine went down meanwhile...) the
@@ -568,8 +601,204 @@ export class PdfDoc {
   }
 
   rotate(pages: number[], delta: number) { return this.content<PageInfo[]>('rotatePages', { pages }, pages, delta); }
+  // ---------------------------------------------------------------- heavy pages (PLAN 3.2)
+  /**
+   * Pages whose content may be millions of little strokes are looked at just before the drawing
+   * engines first read them (drawn, searched, their text read) - not when the file opens (that
+   * read every page's content objects: 25,800 reads for a 490-page set; merging one sheet held
+   * the file shut for 8-10 s). A heavy one is merged in the batch engine meanwhile (the page
+   * shows "Preparing..."), the editing engine attaches it for display, the drawing engines get
+   * a new copy; then the page is drawn.
+   */
+  private look = false;
+  private looked = new Set<number>();
+  /** callers waiting for a page to be looked at (each page resolves on its own: text on a light
+   *  page doesn't wait for a neighbour's 8-10 s merge - PLAN 4.1) */
+  private lookWaiters = new Map<number, (() => void)[]>();
+  private lookQueue = new Set<number>();
+  /** pages queued, being looked at or merging (asked again meanwhile: only a waiter is added) */
+  private lookPending = new Set<number>();
+  /** bumped when the page list changes or the file is opened again: a look or merge started
+   *  before it is for pages that may now be elsewhere - those page numbers are looked at again */
+  private lookGen = 0;
+  private lookRun: Promise<void> | null = null;
+  /** heavy pages waiting for their merge (and the new drawing copy), in order */
+  private mergeQueue: { page: number; key: string; streams: number[]; size: number; gen: number; rev: number }[] = [];
+  private shownQueue = new Map<number, { gen: number; rev: number }>();
+  /** per page, bumped when its content changes in place (a 'pages' change: an edit, a rotation):
+   *  a look or merge started before it is for the old content - that page is looked at again
+   *  (Phase 6 sweep: it was marked looked when the old merge ended, and its new content drawn
+   *  unmerged - attachDisplay had rightly refused the stale merge) */
+  private pageRev = new Map<number, number>();
+  private rev(p: number) { return this.pageRev.get(p) ?? 0; }
+  private mergeRun: Promise<void> | null = null;
+  /** pages being merged now (shown as such) */
+  readonly preparing = new Set<number>();
+  /** merges made so far, by content (object numbers and size: a stale entry - objects renumbered
+   *  by a full save - can't match another content): attached again after the editing engine
+   *  restarted; emptied when the file is opened again from a new copy */
+  private merges = new Map<string, { streams: number[]; file: { path: string; size: number } }>();
+  /** the editing engine restarted: every page is looked at again (its attachments are gone) */
+  lookAgain() { this.looked.clear(); this.lookGen++; }
+  /** pages changed (moved, added, removed, replaced): what's at those numbers is looked at again
+   *  (a heavy page moved to a page number already looked at was drawn unmerged) */
+  private lookChanged(ch: Change) {
+    if ('none' in ch) return;
+    if ('pages' in ch) { for (const p of ch.pages) { this.looked.delete(p); this.pageRev.set(p, this.rev(p) + 1); } return; }
+    this.looked.clear();
+    this.lookGen++;
+  }
+  private markLooked(p: number) {
+    this.looked.add(p);
+    this.lookPending.delete(p);
+    const w = this.lookWaiters.get(p);
+    if (w) { this.lookWaiters.delete(p); for (const f of w) f(); }
+    // (the window's tiles of this page waited at the gate: the tile queue is told, once per
+    // batch. Nothing else may start them - the first screen of a file is all held for its look,
+    // and with no tile in flight none ends to pump the queue: blank until a scroll. Phase 5)
+    if (!this.gatePing) {
+      this.gatePing = true;
+      queueMicrotask(() => { this.gatePing = false; if (!this.closed) tiles.gateChanged(); });
+    }
+  }
+  private gatePing = false;
+  /** PDFED_OFF=prelook (PLAN 5.4) */
+  private noPrelook = false;
+  /**
+   * PLAN 5.4 (Q6): a save the editing engine writes in full holds it for seconds to minutes (a 490-page
+   * drawing set: 24 s), and a page not yet looked at waited behind it - nothing drawn there until the save
+   * ended. One look at every such page goes ahead of the save (one call, ~0.5 s for 490 pages): the
+   * light ones are drawn meanwhile. The heavy ones (and pages showing merged line work) are left as
+   * they were - looked at, merged and drawn after the save, the ordinary way: never drawn unmerged,
+   * no merge beside a save. An answer for an older page list is not taken (lookGen).
+   */
+  private prelook() {
+    const pages: number[] = [];
+    for (let p = 0; p < this.pages.length; p++) if (!this.looked.has(p)) pages.push(p);
+    if (!pages.length) return;
+    const gen = this.lookGen, t0 = performance.now(), revs = pages.map((p) => this.rev(p));
+    void mu<{ candidates: { page: number }[]; shown: number[] }>('heavyCandidates', this.id, pages).then((r) => {
+      // (the bench reads this line: the look's time apart from the save's)
+      gcc.log(`pre-save look: ${pages.length} pages, ${r.candidates.length + r.shown.length} left for after the save, ${Math.round(performance.now() - t0)} ms`);
+      if (gen !== this.lookGen || this.closed) return;
+      const wait = new Set(r.candidates.map((c) => c.page).concat(r.shown));
+      pages.forEach((p, k) => { if (!wait.has(p) && !this.looked.has(p) && this.rev(p) === revs[k]) this.markLooked(p); });
+    }, (e) => gcc.log('pre-save look: ' + e));
+  }
+  /** the page may be read by the drawing engines (looked at; merged if heavy) */
+  ensurePage(page: number): Promise<void> { return this.ensurePages([page]); }
+  /** the tile gate's ask: the look of page p, nobody waiting on it (the gate is asked at every pump -
+   *  a waiter each time piled up while a merge ran; Phase 6 sweep). markLooked tells the queue */
+  private askLook(p: number) {
+    if (this.closed || this.lookPending.has(p)) return;
+    this.lookPending.add(p);
+    this.lookQueue.add(p);
+    this.startLook();
+  }
+  ensurePages(pages: Iterable<number>): Promise<void> {
+    if (!this.look || this.closed) return Promise.resolve();
+    const waits: Promise<void>[] = [];
+    for (const p of pages) {
+      if (this.looked.has(p)) continue;
+      if (!this.lookPending.has(p)) { this.lookPending.add(p); this.lookQueue.add(p); }
+      waits.push(new Promise<void>((r) => { const l = this.lookWaiters.get(p); if (l) l.push(r); else this.lookWaiters.set(p, [r]); }));
+    }
+    if (!waits.length) return Promise.resolve();
+    this.startLook();
+    return Promise.all(waits).then(() => undefined);
+  }
+  private startLook() {
+    if (!this.lookQueue.size) return;
+    if (!this.lookRun) {
+      this.lookRun = (async () => {
+        // (the pages asked for together - a screenful, a range to search - in one look)
+        await new Promise((r) => setTimeout(r, 0));
+        while (this.lookQueue.size && !this.closed) {
+          const batch = [...this.lookQueue];
+          this.lookQueue.clear();
+          await this.lookAt(batch);
+        }
+      })().finally(() => { this.lookRun = null; if (this.closed) this.releaseLookWaiters(); else this.startLook(); });
+    }
+  }
+  /** pages whose look or merge was overtaken by a change of the page list: looked at again */
+  private lookAgainAt(pages: number[]) {
+    for (const p of pages) { this.looked.delete(p); this.lookPending.add(p); this.lookQueue.add(p); }
+    this.startLook();
+  }
+  private releaseLookWaiters() { for (const p of [...this.lookWaiters.keys()]) this.markLooked(p); }
+  /** which of these pages are heavy: the others are drawn at once; the heavy ones go to the merge run */
+  private async lookAt(pages: number[]) {
+    type C = { page: number; key: string; streams: number[]; size: number };
+    const gen = this.lookGen, revs = new Map(pages.map((p) => [p, this.rev(p)]));
+    const r = await mu<{ candidates: C[]; shown: number[] }>('heavyCandidates', this.id, pages).catch((e) => { gcc.log('heavy look: ' + e); return { candidates: [] as C[], shown: [] as number[] }; });
+    if (gen !== this.lookGen) { this.lookAgainAt(pages); return; }
+    // (a page whose content changed meanwhile: the answer is for its old content)
+    const changed = pages.filter((p) => this.rev(p) !== revs.get(p));
+    const wait = new Set(r.candidates.map((c) => c.page).concat(r.shown, changed));
+    for (const p of pages) if (!wait.has(p)) this.markLooked(p);
+    if (changed.length) { for (const p of changed) this.lookPending.delete(p); this.lookAgainAt(changed); }
+    const cands = r.candidates.filter((c) => !changed.includes(c.page)), shownNow = r.shown.filter((p) => !changed.includes(p));
+    if (!cands.length && !shownNow.length) return;
+    for (const c of cands) { this.preparing.add(c.page); this.mergeQueue.push({ ...c, gen, rev: revs.get(c.page)! }); }
+    for (const p of shownNow) this.shownQueue.set(p, { gen, rev: revs.get(p)! });
+    tiles.gateChanged();
+    // (not awaited: the next pages are looked at while this one merges)
+    if (!this.mergeRun) this.mergeRun = this.runMerges().finally(() => { this.mergeRun = null; });
+  }
+  private async runMerges() {
+    while ((this.mergeQueue.length || this.shownQueue.size) && !this.closed) {
+      const batch = this.mergeQueue.splice(0);
+      const shown = [...this.shownQueue];
+      this.shownQueue.clear();
+      let redraw = shown.length > 0;
+      try {
+        let src: FileSpec | null | undefined;
+        for (const c of batch) {
+          if (this.closed) return;
+          const key = c.key + '@' + c.size;
+          let m = this.merges.get(key);
+          if (!m) {
+            src ??= await mu<FileSpec | null>('sourceOf', this.id).catch(() => null);
+            const t0 = performance.now();
+            const f = src ? await muBatch<{ path: string; size: number } | null>('mergeForDisplay', toArg(src), c.streams, false).catch((e) => { gcc.log('heavy page ' + (c.page + 1) + ': ' + e); return null; }) : null;
+            if (f) { this.temps.add(f.path); m = { streams: c.streams, file: f }; this.merges.set(key, m); gcc.log(`heavy page ${c.page + 1} merged for display in ${Math.round(performance.now() - t0)} ms`); }
+          }
+          if (m && (await mu<boolean>('attachDisplay', this.id, c.page, c.key, m.streams, m.file).catch(() => false))) {
+            redraw = true;
+            await pinHeavyPage(this.id, c.page); // (7.3: before any engine reads the merged page)
+          }
+        }
+        // (a new drawing copy with the merged line work, before those pages are drawn)
+        if (redraw && !this.closed) await this.runRedraw();
+      } catch (e) {
+        // (drawn as they are - never left waiting)
+        gcc.log('heavy pages: ' + e);
+      } finally {
+        // (pages moved meanwhile: those numbers are looked at again; the merges made are kept)
+        const again: number[] = [];
+        for (const c of batch) { this.preparing.delete(c.page); if (c.gen === this.lookGen && c.rev === this.rev(c.page)) this.markLooked(c.page); else { this.lookPending.delete(c.page); again.push(c.page); } }
+        for (const [p, { gen, rev }] of shown) if (gen === this.lookGen && rev === this.rev(p)) this.markLooked(p); else { this.lookPending.delete(p); again.push(p); }
+        if (again.length && !this.closed) this.lookAgainAt(again);
+        tiles.gateChanged();
+      }
+    }
+  }
+
   /** a page too heavy for the drawing engines: its line work simplified (strokes merged) */
-  simplify(page: number) { return this.content<boolean>('simplifyPage', { pages: [page] }, page); }
+  async simplify(page: number) {
+    // (display only: the drawing engines get simplified line work for it, the file is not changed -
+    // nothing to save, nothing to undo)
+    const ok = await mu<boolean>('simplifyPage', this.id, page);
+    if (ok) await pinHeavyPage(this.id, page);
+    await this.redraw(await mu<FileSpec>('drawSnapshot', this.id, false));
+    const old = this.crev[page];
+    this.crev = this.crev.slice();
+    this.crev[page] = nextRev();
+    tiles.dropRevs(this.id, new Set([old]));
+    this.emit();
+    return ok;
+  }
   arrange(order: number[], name?: string) { return this.content<PageInfo[]>('arrangePages', { order }, order, name); }
   deletePages(pages: number[]) { const del = new Set(pages); return this.content<PageInfo[]>('deletePages', { order: this.pages.map((_, i) => i).filter((i) => !del.has(i)) }, pages); }
   insertBlank(at: number, w: number, h: number, count = 1) { return this.content<PageInfo[]>('insertBlank', { insert: at, count }, at, w, h, count); }
@@ -641,6 +870,7 @@ export class PdfDoc {
   // -------------------------------------------------------------- text
 
   async chars(page: number) {
+    await this.ensurePage(page);
     await this.drawReady();
     const k = this.baseRev + ':' + page;
     let c = this.charCache.get(k);
@@ -652,6 +882,7 @@ export class PdfDoc {
     return c;
   }
   async rangeRects(page: number, start: number, count: number) {
+    await this.ensurePage(page);
     await this.drawReady();
     return renderers[0].call<number[][]>('rangeRects', [this.id, page, start, count]);
   }
@@ -661,6 +892,7 @@ export class PdfDoc {
     const k = this.baseRev + ':' + page;
     let l = this.linkCache.get(k);
     if (!l) {
+      await this.ensurePage(page);
       l = await renderers[0].call<{ rect: number[]; url?: string; page?: number }[]>('links', [this.id, page]).catch(() => []);
       this.linkCache.set(k, l);
       if (this.linkCache.size > 200) this.linkCache.delete(this.linkCache.keys().next().value as string);
@@ -735,6 +967,8 @@ export class PdfDoc {
     // written straight into the target's folder (hidden name), then swapped in: a 300 MB file
     // is not written to the temp folder first and copied across drives afterwards
     const part = joinPath(dirName(target), '.~' + baseName(target) + '.' + Math.random().toString(36).slice(2, 8) + '.part');
+    // (PLAN 5.4: sent just before the save - ahead of it in the editing engine's queue)
+    if (this.look && !this.closed && !this.noPrelook && (!opts.incremental || this.size > FULL_REWRITE)) this.prelook();
     let f: FileRef;
     try { f = await editor.call<FileRef>('save', [this.id, opts], part); }
     catch (e) {
@@ -796,6 +1030,11 @@ export class PdfDoc {
     const r = await mu<{ pages: PageInfo[] }>('open', this.id, toArg(src), this.password, user);
     this.src = src;
     this.pages = r.pages;
+    // (a new copy: objects renumbered - every page looked at again, no merge of the old numbering
+    // attached - PLAN 4.1; the engine now holds the new file's merges, none yet)
+    this.looked.clear();
+    this.lookGen++;
+    this.merges.clear();
     // (renumbered by the full save: the Bookmarks panel reads its list again)
     this.marksRev++;
     this.crev = r.pages.map(nextRev);

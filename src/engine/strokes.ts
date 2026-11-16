@@ -7,7 +7,7 @@
 // (a 46 MB landscape sheet that only one other reader could open).
 
 /** how many strokes go into one merged stroke: few enough that a tile skips the ones far away */
-const BATCH = 1500;
+export const BATCH = 1500;
 /** pages with fewer strokes are left alone: up to a few million the drawing engines cope, and
  *  merged strokes spread over a sheet make zoomed-in tiles slower (they can't be skipped) */
 export const MIN_STROKES = 4_000_000;

@@ -464,7 +464,11 @@ async function commitFile(src, file, keepBackup) {
         // the new file takes the name (an antivirus may hold the fresh copy for a moment: tried
         // again); if it still can't, the old file goes back - the original is never left missing
         try { await retrying(() => fsp.rename(tmp, file)); } catch (e2) {
-          await retrying(() => fsp.rename(old, file)).catch((e3) => log('could not put back ' + file + ': ' + e3.message));
+          let back = null;
+          await retrying(() => fsp.rename(old, file)).catch((e3) => { back = e3; log('could not put back ' + file + ': ' + e3.message + ' (the original stays as ' + old + ')'); });
+          // (the original is then only under the hidden name: said, with where it is. It is not put on
+          // the delete-later list - it is the one copy of the person's file)
+          if (back) throw Object.assign(new Error(`"${path.basename(file)}" couldn't be saved, and its previous version couldn't be put back in its place. It is kept, hidden, as "${old}" in the same folder: rename it to get it back.`), { code: 'EIO' });
           throw e2;
         }
         oldFiles.push(old);
@@ -477,12 +481,15 @@ async function commitFile(src, file, keepBackup) {
       }
     }
   } catch (e) {
-    await fsp.unlink(tmp).catch(() => {});
+    // (the engine's file is kept for a retry - the save would otherwise be made again from the
+    // start: the staging copy goes, and if the file was moved into staging (rename) it is moved back)
+    if (await fsp.access(src).then(() => true, () => false)) await fsp.unlink(tmp).catch(() => {});
+    else await fsp.rename(tmp, src).catch(() => fsp.unlink(tmp).catch(() => {}));
     throw e;
-  } finally {
-    if (inWork(src)) fsp.rm(path.dirname(src), { recursive: true, force: true }).catch(() => {});
-    else if (isPart(src)) fsp.unlink(src).catch(() => {});
   }
+  // (saved: the engine's file - and its work folder - is not needed any more)
+  if (inWork(src)) fsp.rm(path.dirname(src), { recursive: true, force: true }).catch(() => {});
+  else if (isPart(src)) fsp.unlink(src).catch(() => {});
   sweepStaging(file);
   const st = await fsp.stat(file);
   return { size: st.size, mtime: st.mtimeMs, inPlace };
@@ -758,13 +765,19 @@ const recDir = () => path.join(localDir(), 'recovery');
 /** whose copy each one is (window's webContents id): one window doesn't offer another's live work back */
 const recOwner = new Map();
 const recKey = (key) => String(key).replace(/[^\w-]/g, '_');
+/** a small file written whole or not at all (a power cut or a crash mid-write leaves the old one,
+ *  never half a .json that the recovery list then skips): written beside, then renamed over */
+async function writeAtomic(file, text) {
+  const tmp = stagingName(file, 'tmp');
+  try { await fsp.writeFile(tmp, text); await retrying(() => fsp.rename(tmp, file)); } catch (e) { await fsp.unlink(tmp).catch(() => {}); throw e; }
+}
 ipcMain.handle('recovery:write', async (_e, key, data, meta) => {
   // (the key made safe as a file name, as everywhere here: never a path out of the folder)
   const k = recKey(key);
   recOwner.set(k, _e.sender.id);
   await fsp.mkdir(recDir(), { recursive: true });
   await writeSafe(path.join(recDir(), k + '.pdf'), Buffer.from(data), false);
-  await fsp.writeFile(path.join(recDir(), k + '.json'), JSON.stringify({ ...meta, time: Date.now() }));
+  await writeAtomic(path.join(recDir(), k + '.json'), JSON.stringify({ ...meta, time: Date.now() }));
   return true;
 });
 /** where the engine writes a recovery copy */
@@ -775,14 +788,15 @@ ipcMain.handle('recovery:path', async (_e, key) => {
 });
 ipcMain.handle('recovery:meta', async (_e, key, meta) => {
   recOwner.set(recKey(key), _e.sender.id);
-  await fsp.writeFile(path.join(recDir(), String(key).replace(/[^\w-]/g, '_') + '.json'), JSON.stringify({ ...meta, time: Date.now() }));
+  await writeAtomic(path.join(recDir(), recKey(key) + '.json'), JSON.stringify({ ...meta, time: Date.now() }));
   return true;
 });
 ipcMain.handle('recovery:clear', async (_e, key) => {
   const k = recKey(key);
   recOwner.delete(k);
   await fsp.unlink(path.join(recDir(), k + '.json')).catch(() => {});
-  await fsp.unlink(path.join(recDir(), k + '.pdf')).catch(() => {});
+  // (still open by a tab - Windows refuses: "Discard" is remembered, so cleanRecovery removes it at the next start)
+  await fsp.unlink(path.join(recDir(), k + '.pdf')).catch((e) => { if (e.code !== 'ENOENT') fsp.writeFile(path.join(recDir(), k + '.discard'), '').catch(() => {}); });
   // (a copy the engine was still writing when it stopped: unsaved work too, gone with "Discard")
   await fsp.unlink(path.join(recDir(), k + '.pdf.tmp')).catch(() => {});
   // (the copy of a saved-over file the changes were written against; still open by a restored
@@ -790,17 +804,22 @@ ipcMain.handle('recovery:clear', async (_e, key) => {
   await fsp.unlink(path.join(recDir(), k + '.base.pdf')).catch(() => {});
   return true;
 });
-/** recovery files left without their .json (cleared while a tab still read them) */
+/** recovery files left without their .json. A copy that was discarded while a tab still read it
+ *  (marked ".discard") goes; a whole copy with no .json and no mark stays - the app stopped between
+ *  writing the copy and its .json, and it may be the only copy of unsaved work (logged, so it can
+ *  be found) */
 async function cleanRecovery() {
   try {
     const all = await fsp.readdir(recDir());
     const keys = new Set(all.filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)));
+    const discarded = new Set(all.filter((f) => f.endsWith('.discard')).map((f) => f.slice(0, -8)));
     // a .json may name another key's base copy (a restored file saved again): those stay too
     const used = new Set();
     for (const k of keys) { try { const m = JSON.parse(await fsp.readFile(path.join(recDir(), k + '.json'), 'utf8')); if (m.base && m.base.path) used.add(path.basename(m.base.path)); } catch (_) { /* skip */ } }
     for (const f of all) {
       const k = f.replace(/(\.base)?\.pdf(\.tmp)?$/i, '');
       if (f.endsWith('.json') || keys.has(k) || used.has(f)) continue;
+      if (/\.pdf$/i.test(f) && !/\.base\.pdf$/i.test(f) && !discarded.has(k)) { log('recovery: ' + f + ' has no .json - kept'); continue; }
       await fsp.unlink(path.join(recDir(), f)).catch(() => {});
     }
   } catch (_) { /* no folder yet */ }
@@ -866,6 +885,10 @@ ipcMain.handle('dialog:confirm', async (_e, o) => {
 // ---------------------------------------------------------------- app services
 
 // (the name markups are signed with: the author set in Settings, else the Windows user)
+// (free memory of the PC, bytes: the window pins heavy pages to one drawing engine when it is short - PLAN 7.3)
+ipcMain.handle('app:freemem', () => os.freemem());
+// (PDFED_OFF / PDFED_ON=giveway,pin: switches for the 7.5 / 7.3 rules - the engines read them themselves, the window asks here)
+ipcMain.handle('app:off', () => ({ off: String(process.env.PDFED_OFF || ''), on: String(process.env.PDFED_ON || '') }));
 ipcMain.handle('app:user', () => readSettings().author || os.userInfo().username);
 ipcMain.handle('app:info', () => {
   const s = readSettings();
@@ -1451,6 +1474,8 @@ const deaths = new Map();
 const planned = new Map();
 /** drawing engines per window - as the window counts them (engines.ts RENDERERS) */
 const renderersPerWindow = () => Number(arg('renderers') || process.env.GCC_RENDERERS) || Math.max(2, Math.min(4, Math.floor((os.cpus().length || 4) / 3)));
+/** what an engine's name stands for: render0.. -> drawing engine 1.., edit, batch */
+const engineKind = (name) => /^render(\d+)$/.test(name) ? 'drawing engine ' + (Number(name.slice(6)) + 1) : name === 'edit' ? 'editing engine' : name === 'batch' ? 'batch engine' : name;
 function spawnEngine(wc, name, role, restarted, code) {
   const key = wc.id + ':' + name;
   const now0 = Date.now();
@@ -1459,6 +1484,12 @@ function spawnEngine(wc, name, role, restarted, code) {
   const proc = utilityProcess.fork(path.join(engineDir(), role + '.mjs'), [resDir()], { serviceName: APP + ' ' + name, stdio: 'pipe', env });
   const e = { role, proc, gen: (engines.get(key)?.gen ?? 0) + 1, born: Date.now(), wc, name };
   engines.set(key, e);
+  // (pid -> what the process is, for the window benchmark's per-process memory: getAppMetrics gives pids only)
+  const kind = engineKind(name);
+  const note = () => { if (proc.pid) (globalThis.__pdfedEngines ??= {})[proc.pid] = kind; };
+  note();
+  proc.once('spawn', note);
+  proc.once('exit', () => { if (proc.pid && globalThis.__pdfedEngines) delete globalThis.__pdfedEngines[proc.pid]; });
   const out = (b) => String(b).split('\n').filter(Boolean).forEach((l) => log('[' + name + '] ' + l));
   proc.stdout?.on('data', out);
   proc.stderr?.on('data', out);

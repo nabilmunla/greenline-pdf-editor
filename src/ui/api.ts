@@ -114,6 +114,10 @@ export interface GccApi {
   dropTemp(paths: string[]): Promise<boolean>;
   toTemp(src: string): Promise<string>;
   docsClosed(): void;
+  /** the PC's free memory, bytes */
+  freemem(): Promise<number>;
+  /** PDFED_OFF and PDFED_ON, as set when the app was started (PLAN 5.0; pin is off unless PDFED_ON names it, Phase 5 run 2) */
+  off?(): Promise<{ off: string; on: string } | string>;
   recoveryPath(key: string): Promise<string>;
   recoveryMeta(key: string, meta: Record<string, unknown>): Promise<boolean>;
   dragStart(file: string, png: Uint8Array | null): void;

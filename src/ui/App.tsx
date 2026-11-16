@@ -4,7 +4,7 @@ import { loadFonts } from './fontlist';
 import { UpdateCard, useUpdates } from './Updates';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { gcc, baseName, dirName, joinPath, type AppInfo, type Recovery, type TabMove, type UpdatedInfo } from './api';
-import { startEngines, rendererFor, renderers, mu, editor as editWorker } from './engines';
+import { startEngines, rendererFor, renderers, mu, editor as editWorker, pinCount, pinLog } from './engines';
 import { PdfDoc, onCrash, wasPlannedRestart, plannedRestartLostWork, type Scale } from './doc';
 import { previewCache, tiles } from './tiles';
 import type { PrintSettings } from './PrintDlg';
@@ -12,7 +12,7 @@ import { Viewer, markClip, type ViewerApi, type ViewerEvent, type SelItem, type 
 import { Ribbon, TAB_NAMES, type RibbonTab, type RibbonCmd } from './Ribbon';
 import { ToolSearch, type ExtraCmd, type FoundCmd } from './ToolSearch';
 import { AiPanel, forgetAiFor, type AiSettings } from './AiPanel';
-import { SidePanel, type SideKind } from './Side';
+import { SidePanel, forgetThumbScroll, type SideKind } from './Side';
 import { PropsPanel, panelEditsDone } from './PropsPanel';
 import { Ico } from './icons';
 import { type Toast } from './Modal';
@@ -221,7 +221,7 @@ export function App() {
   // (tests: a tab dropped at a screen point, as a drag out of the strip ends)
   const moveRef = useRef<(id: string, x: number, y: number) => Promise<void>>(async () => {});
   moveRef.current = async (id, x, y) => { const d = docsRef.current.find((k) => k.id === id); if (d) await moveTab(d, await gcc.tabTarget(x, y), x, y); };
-  useEffect(() => { (window as unknown as { __gcc: unknown }).__gcc = { moveTo: (id: string, x: number, y: number) => moveRef.current(id, x, y), docs: () => docsRef.current, active: () => docsRef.current.find((d) => d.id === activeRef.current) || null, viewer: () => viewer.current, tiles, engines: { mu, renderers, editor: editWorker }, ocr: (lang: OcrLang) => { const d = docsRef.current.find((x) => x.id === activeRef.current)!; return ocrPage(d.id, 0, d.pages[0].w, d.pages[0].h, { lang }); } }; }, []);
+  useEffect(() => { (window as unknown as { __gcc: unknown }).__gcc = { moveTo: (id: string, x: number, y: number) => moveRef.current(id, x, y), docs: () => docsRef.current, active: () => docsRef.current.find((d) => d.id === activeRef.current) || null, viewer: () => viewer.current, tiles, pinCount, pinLog, engines: { mu, renderers, editor: editWorker }, ocr: (lang: OcrLang) => { const d = docsRef.current.find((x) => x.id === activeRef.current)!; return ocrPage(d.id, 0, d.pages[0].w, d.pages[0].h, { lang }); } }; }, []);
 
   // ---------------------------------------------------------------- start-up
 
@@ -731,6 +731,7 @@ export function App() {
     // remember where it was left: it reopens at the same page, spot and zoom
     if (d.path && d.view.anchor) void gcc.viewSet(d.path, { anchor: d.view.anchor, z: d.view.z, fit: d.view.fit, pages: d.pages.length }).catch(() => {});
     forgetAiFor(d.id);
+    forgetThumbScroll(d.id);
     // the tab goes at once; the engines let go of the file in the background
     const pc = d.close().catch((e) => gcc.log('close: ' + e));
     closing.add(pc);
@@ -1160,6 +1161,7 @@ export function App() {
   /** an area of a page as it is shown - the page and its markups - at s pixels per point */
   async function areaPicture(d: PdfDoc, page: number, r: Rect, s: number): Promise<OffscreenCanvas> {
     const x = Math.round(r[0] * s), y = Math.round(r[1] * s), w = Math.max(1, Math.round((r[2] - r[0]) * s)), h = Math.max(1, Math.round((r[3] - r[1]) * s));
+    await d.ensurePage(page);
     const base = await rendererFor(d.id, page).call<ImageBitmap>('tile', [d.id, page, s, x, y, w, h]);
     const hl = await editWorker.call<ImageBitmap | null>('annotTile', [d.id, page, s, x, y, w, h, [], 'hl']);
     const ann = await editWorker.call<ImageBitmap | null>('annotTile', [d.id, page, s, x, y, w, h, [], 'rest']);
@@ -1204,6 +1206,7 @@ export function App() {
 
   async function copyTable(d: PdfDoc, page: number, r: Rect) {
     const rows = await busy('Reading the table…', async (set) => {
+      await d.ensurePage(page);
       await d.drawReady();
       const chars = await rendererFor(d.id, page).call<{ c: string; b: number[] }[]>('charsIn', [d.id, page, r]);
       let words = charsToWords(chars);
@@ -1223,6 +1226,7 @@ export function App() {
 
   async function readArea(d: PdfDoc, page: number, r: Rect) {
     const text = await busy('Reading…', async () => {
+      await d.ensurePage(page);
       await d.drawReady();
       const chars = await rendererFor(d.id, page).call<{ c: string; b: number[] }[]>('charsIn', [d.id, page, r]);
       let words = charsToWords(chars);

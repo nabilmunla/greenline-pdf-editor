@@ -14,10 +14,16 @@ let P: WrappedPdfiumModule | null = null;
 /** the most the engine's memory may grow to: 4 GB less one 64 KB page (as Emscripten's own 4 GB builds) */
 export const MEMORY_MAX = 65535 * 65536;
 
+/** what the .wasm's memory may really grow to (a build that cannot be lifted stops at 2 GB) */
+let memoryLimitNow = MEMORY_MAX;
+export const memoryLimit = () => memoryLimitNow;
+
 /**
  * The .wasm says its memory may grow to 2 GB (32768 pages); raised here to 65535 pages, in a
  * copy (the number is 3 bytes long either way: nothing else moves). Only that exact
- * declaration is changed: anything else (another build) is left as it is.
+ * declaration is changed: anything else (another build) is left as it is - and said so in the
+ * log, with the limit it leaves the engine at (memoryLimit(); the host restarts the engine
+ * before that: an engine that reaches it stops mid-call instead).
  */
 export function liftMemoryMax(wasm: ArrayBuffer): ArrayBuffer {
   const b = new Uint8Array(wasm);
@@ -25,23 +31,35 @@ export function liftMemoryMax(wasm: ArrayBuffer): ArrayBuffer {
     let r = 0, k = 0;
     for (;;) { const x = b[i++]; r += (x & 0x7f) * 2 ** k; k += 7; if (x < 0x80 || k > 35) return [r, i]; }
   };
-  if (b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return wasm;
+  // (what is left as it is: the limit is then taken as the 2 GB the stock build has, or as what the file says)
+  const left = (why: string, limit = 32768 * 65536): ArrayBuffer => {
+    memoryLimitNow = limit;
+    console.error(`PDFium wasm left as it is (${why}): its memory stops at ${(limit / 2 ** 30).toFixed(2)} GB, not 4 GB`);
+    return wasm;
+  };
+  if (b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return left('not a wasm file');
   for (let i = 8; i < b.length;) {
     const id = b[i];
     const [size, at] = leb(i + 1);
     // the memory section: one memory, with a maximum, 32768 pages as 80 80 02
     if (id === 5) {
       const [count, j] = leb(at);
-      if (count !== 1 || b[j] !== 1) return wasm;
+      if (count !== 1 || b[j] !== 1) return left('memory section is not one memory with a maximum');
       const [, k] = leb(j + 1);
-      if (b[k] !== 0x80 || b[k + 1] !== 0x80 || b[k + 2] !== 0x02) return wasm;
+      if (b[k] !== 0x80 || b[k + 1] !== 0x80 || b[k + 2] !== 0x02) {
+        // (another build: one that already allows 4 GB is fine as it is)
+        const [pages] = leb(k);
+        if (pages >= 65535) { memoryLimitNow = MEMORY_MAX; return wasm; }
+        return left('memory maximum is not 32768 pages', pages * 65536);
+      }
       const out = b.slice();
       out.set([0xff, 0xff, 0x03], k);
+      memoryLimitNow = MEMORY_MAX;
       return out.buffer;
     }
     i = at + size;
   }
-  return wasm;
+  return left('no memory section');
 }
 
 export async function startPdfium(wasm: ArrayBuffer): Promise<void> {
@@ -72,7 +90,7 @@ const malloc = (n: number) => {
 };
 const free = (p: number) => M().wasmExports.free(p);
 
-interface PageCache { ptr: number; text: number; aff: number[]; inv: number[]; w: number; h: number; chars?: CharInfo; heavy?: boolean; /** its pictures, decoded (bytes, estimated) */ pics?: number }
+interface PageCache { ptr: number; text: number; aff: number[]; inv: number[]; w: number; h: number; chars?: CharInfo; heavy?: boolean; /** how much the engine's heap grew while the page was read in (PLAN 7.3) */ grew?: number; /** its pictures, decoded (bytes, estimated) */ pics?: number; /** big pictures, few objects: may be drawn in slabs (PLAN 3.5) */ slabby?: boolean; /** drawn in slabs: its second tile was slow (undefined: not known yet) */ slab?: boolean; /** tiles drawn on their own to find that out */ tried?: number }
 export interface CharInfo { text: string; box: Float32Array }
 
 interface Doc { mem: number; fa: number; slot: number; reader: Reader | null; doc: number; pages: Map<number, PageCache>; order: number[]; snaps: Map<number, SnapIndex> }
@@ -124,38 +142,69 @@ export function openDoc(id: string, src: Uint8Array | Reader, password = ''): Op
     if (slot) readers.delete(slot);
     throw new Error('PDFium could not open this file (error ' + err + ')');
   }
-  closeDoc(id);
   const d: Doc = { mem, fa, slot, reader: src instanceof Uint8Array ? null : src, doc, pages: new Map(), order: [], snaps: new Map() };
-  docs.set(id, d);
-  const n = q.FPDF_GetPageCount(doc);
   const pages: { w: number; h: number }[] = [];
-  const sz = malloc(16);
-  for (let i = 0; i < n; i++) {
-    // size of the page as shown: load lightly (cheap: PDFium parses content lazily)
-    q.FPDF_GetPageSizeByIndexF(doc, i, sz);
-    const f = new Float32Array(M().HEAPU8.buffer, sz, 2);
-    pages.push({ w: f[0], h: f[1] });
+  let sz = 0;
+  try {
+    sz = malloc(16);
+    // (the document is registered only once every page is sized: a throw in here left it in `docs`
+    // half made, and for good. Now what was taken for it is given back and the old copy stays open)
+    const n = q.FPDF_GetPageCount(doc);
+    for (let i = 0; i < n; i++) {
+      // size of the page as shown: load lightly (cheap: PDFium parses content lazily)
+      // (a page PDFium cannot size leaves the buffer as it was: the one before's size, or whatever
+      // was in the memory - so the buffer is cleared first and the result checked; such a page gets
+      // the default size rather than its neighbour's)
+      M().HEAPU8.fill(0, sz, sz + 16);
+      const ok = q.FPDF_GetPageSizeByIndexF(doc, i, sz);
+      const f = new Float32Array(M().HEAPU8.buffer, sz, 2);
+      pages.push(ok ? { w: f[0], h: f[1] } : { w: DEFAULT_PAGE.w, h: DEFAULT_PAGE.h });
+    }
+  } catch (e) {
+    q.FPDF_CloseDocument(doc);
+    if (mem) free(mem);
+    if (fa) free(fa);
+    if (slot) readers.delete(slot);
+    throw e;
+  } finally {
+    if (sz) free(sz);
   }
-  free(sz);
+  closeDoc(id);
+  docs.set(id, d);
   return { pages };
 }
 
+/** the size given to a page PDFium cannot size (A4, in points) */
+const DEFAULT_PAGE = { w: 595, h: 842 };
+
+// (tests) the PDFium module itself, to stub a call in it
+/** (tests, PLAN 7.5 spike) a page's PDFium handle, read in if needed */
+export const pageForTests = (id: string, pg: number) => page(mustDoc(id), pg).ptr;
+export const engineForTests = () => Q() as unknown as Record<string, unknown> & { pdfium: { wasmExports: { malloc(n: number): number; free(p: number): void } } };
+
+/** closes the document and gives back everything it held, even if closing one page throws (the
+ *  first failure is logged; nothing that comes after it is skipped) */
 export function closeDoc(id: string): void {
   const d = docs.get(id);
   if (!d) return;
   const q = Q();
+  const fails: unknown[] = [];
+  const attempt = (f: () => void) => { try { f(); } catch (e) { fails.push(e); } };
+  attempt(() => closeProgressive(d));
   for (const p of d.pages.values()) {
-    if (p.text) q.FPDFText_ClosePage(p.text);
-    q.FPDF_ClosePage(p.ptr);
+    if (p.text) attempt(() => q.FPDFText_ClosePage(p.text));
+    attempt(() => q.FPDF_ClosePage(p.ptr));
   }
   for (let k = heavy.length - 1; k >= 0; k--) if (heavy[k].d === d) heavy.splice(k, 1);
-  dropSnaps(d);
-  q.FPDF_CloseDocument(d.doc);
-  if (d.mem) free(d.mem);
-  if (d.fa) free(d.fa);
+  dropSlabs(d);
+  attempt(() => dropSnaps(d));
+  attempt(() => q.FPDF_CloseDocument(d.doc));
+  if (d.mem) attempt(() => free(d.mem));
+  if (d.fa) attempt(() => free(d.fa));
   if (d.slot) readers.delete(d.slot);
-  d.reader?.close();
+  if (d.reader) attempt(() => d.reader!.close());
   docs.delete(id);
+  if (fails.length) console.error(`closing document ${id}: ${fails.length} step(s) failed, the rest was released:`, fails[0]);
 }
 
 export const openIds = () => [...docs.keys()];
@@ -204,10 +253,10 @@ const PIC_BUDGET = 640 * 1024 ** 2;
 /** a page with more objects than this isn't a scan (its pictures aren't counted: a drawing of
  *  millions of lines would take seconds just to list) */
 const PIC_SCAN_OBJECTS = 400;
-function picBytes(ptr: number): number {
+function picBytes(ptr: number, limit = PIC_SCAN_OBJECTS): number {
   const q = Q();
   const n = q.FPDFPage_CountObjects(ptr);
-  if (n <= 0 || n > PIC_SCAN_OBJECTS) return 0;
+  if (n <= 0 || n > limit) return 0;
   const wh = malloc(8);
   let total = 0;
   try {
@@ -229,6 +278,7 @@ export const pageStats = { loads: 0, heavyLoads: 0, dropped: 0 };
 function loadPage(d: Doc, i: number): PageCache {
   const q = Q();
   const t0 = performance.now();
+  const heap0 = heapBytes();
   const ptr = q.FPDF_LoadPage(d.doc, i);
   if (!ptr) throw new Error('Could not read page ' + (i + 1));
   const w = q.FPDF_GetPageWidthF(ptr), h = q.FPDF_GetPageHeightF(ptr);
@@ -238,8 +288,13 @@ function loadPage(d: Doc, i: number): PageCache {
   const isHeavy = slow || pics > PIC_HEAVY;
   pageStats.loads++;
   if (isHeavy) pageStats.heavyLoads++;
-  return { ptr, text: 0, aff, inv: invert(aff), w, h, heavy: isHeavy, pics };
+  // (big pictures on a page with more objects than a scan - a drawing with photos - count too;
+  // and a page slow to read in for its one big scan: its objects are counted, not timed)
+  const slabby = (pics || picBytes(ptr, SLAB_SCAN_OBJECTS)) > SLAB_PICS;
+  return { ptr, text: 0, aff, inv: invert(aff), w, h, heavy: isHeavy, pics, slabby, grew: Math.max(0, heapBytes() - heap0) };
 }
+/** how much the heap grew when this page was read in (0: not held by this engine) - PLAN 7.3 */
+export const pageGrew = (id: string, i: number) => docs.get(id)?.pages.get(i)?.grew ?? 0;
 function freePage(p: PageCache) {
   const q = Q();
   if (p.text) q.FPDFText_ClosePage(p.text);
@@ -248,6 +303,8 @@ function freePage(p: PageCache) {
 function dropPage(d: Doc, i: number) {
   const o = d.pages.get(i);
   if (!o) return;
+  closeProgressive(d, i);
+  dropSlabs(d, i);
   freePage(o);
   d.pages.delete(i);
   d.order = d.order.filter((x) => x !== i);
@@ -266,6 +323,7 @@ function dropIdleHeavy(keep: number) {
 
 /** before reading a page in: memory already grown -> keep one heavy page (the newest) besides the one coming */
 function makeRoom() {
+  if (heapBytes() > SOFT_HEAP) slabs.length = 0;
   if (heavy.length > 1 && heapBytes() > SOFT_HEAP) dropIdleHeavy(1);
 }
 /** heavy pages' pictures held within PIC_BUDGET: the least recently used go first (the newest - the
@@ -355,15 +413,114 @@ function boxToPage(m: number[], l: number, r: number, b: number, t: number): [nu
  * Page content only: annotations and form fields are drawn by the MuPDF layer.
  */
 export function render(id: string, pg: number, scale: number, x: number, y: number, w: number, h: number, annots = false): Uint8ClampedArray {
-  const q = Q();
   const d = mustDoc(id);
   const p = page(d, pg);
+  // a page of big pictures: the tile is cut out of a slab drawn once (PLAN 3.5)
+  if (!annots && p.slabby && p.slab !== false && slabStats.on && Number.isInteger(x) && Number.isInteger(y)) {
+    // (the page's first two tiles are drawn on their own, the second timed - the first pays for
+    // reading its pictures in once: only a page whose tiles stay slow - its pictures worked through
+    // whole on every call - is worth a slab; many pictures draw fast once read)
+    if (p.slab === undefined && slabStats.slowMs > 0) {
+      const t = performance.now();
+      const px = drawArea(p, scale, x, y, w, h, annots);
+      if ((p.tried = (p.tried ?? 0) + 1) >= 2) p.slab = performance.now() - t >= slabStats.slowMs;
+      return px;
+    }
+    const s = slabFor(d, pg, p, scale, x, y, w, h);
+    if (s) {
+      slabStats.served++;
+      const cw = Math.min(w, s.sx + s.w - x), ch = Math.min(h, s.sy + s.h - y);
+      const px = new Uint8ClampedArray(w * h * 4);
+      // (the window sizes the page with ceil, PDFium with round: a last row or column a pixel past
+      // the page is white, as on a tile drawn on its own)
+      if (cw < w || ch < h) px.fill(255);
+      for (let r = 0; r < ch; r++) { const at = ((y - s.sy + r) * s.w + (x - s.sx)) * 4; px.set(s.px.subarray(at, at + cw * 4), r * w * 4); }
+      return px;
+    }
+  }
+  return drawArea(p, scale, x, y, w, h, annots);
+}
+// ------------------------------------------------------------- drawing that gives way (PLAN 7.5, D6)
+/**
+ * A tile of line work drawn in slices of about `sliceMs` (PDFium's progressive drawing, its pause
+ * hook asked between page objects: at most every 61-69 ms on the merged heavy sheets, no time
+ * lost). Between slices `giveWay` runs - short calls waiting (text, snap, links) go then, not
+ * after a 4 s tile - and says whether the tile is still wanted; a tile no longer wanted (its zoom
+ * level left) stops there. Picture pages draw as before (slabs; inside a picture the hook is asked
+ * thousands of times: +18 %).
+ */
+export class GaveWay extends Error { readonly stale = true; constructor() { super('stale tile'); } }
+export const progressiveStats = { on: true, sliceMs: 50, slices: 0, gaveWay: 0 };
+let pauseStruct = 0;
+let sliceStart = 0;
+function pauseHook(): number {
+  if (!pauseStruct) {
+    const P = (Q() as unknown as { pdfium: { addFunction(f: () => number, sig: string): number } }).pdfium;
+    const fn = P.addFunction(() => (performance.now() - sliceStart >= progressiveStats.sliceMs ? 1 : 0), 'ii');
+    const at = malloc(12); // (throws when the engine has no 12 bytes left: never written at 0)
+    // IFSDK_PAUSE { version = 1, NeedToPauseNow, user }. Unsigned index: an engine past 2 GB (the 4 GB
+    // patch) makes it above 2 GB, where `at >> 2` is negative and the writes went nowhere - every
+    // line-work tile then failed ("drawing failed", a blank page). Phase 6, found by e2e-4gb.
+    const H = M().HEAP32, i = at >>> 2;
+    H[i] = 1; H[i + 1] = fn; H[i + 2] = 0;
+    pauseStruct = at;
+  }
+  return pauseStruct;
+}
+/** the draw in progress (one at a time per engine): closed first when its page or file goes */
+let progressive: { d: Doc; pg: number; ptr: number; closed: boolean } | null = null;
+function closeProgressive(d: Doc, pg?: number) {
+  const g = progressive;
+  if (!g || g.d !== d || (pg !== undefined && g.pg !== pg) || g.closed) return;
+  g.closed = true;
+  Q().FPDF_RenderPage_Close(g.ptr);
+}
+export async function renderGivingWay(id: string, pg: number, scale: number, x: number, y: number, w: number, h: number, giveWay: () => Promise<boolean>): Promise<Uint8ClampedArray> {
+  const d = mustDoc(id);
+  const p = page(d, pg);
+  if (!progressiveStats.on || p.slabby || progressive || !Number.isInteger(x) || !Number.isInteger(y)) return render(id, pg, scale, x, y, w, h);
+  const q = Q();
+  const bmp = q.FPDFBitmap_Create(w, h, 1);
+  if (!bmp) throw new Error('Out of memory for a ' + w + '×' + h + ' render');
+  const me = { d, pg, ptr: p.ptr, closed: false };
+  progressive = me;
+  try {
+    q.FPDFBitmap_FillRect(bmp, 0, 0, w, h, 0xffffffff);
+    slabStats.calls++;
+    sliceStart = performance.now();
+    let r = q.FPDF_RenderPageBitmap_Start(bmp, p.ptr, -x, -y, Math.round(p.w * scale), Math.round(p.h * scale), 0, 0x10, pauseHook());
+    progressiveStats.slices++;
+    // (1: to be continued, 2: done, 3: failed)
+    while (r === 1) {
+      if ((await giveWay()) || me.closed) { progressiveStats.gaveWay++; throw new GaveWay(); }
+      sliceStart = performance.now();
+      r = q.FPDF_RenderPage_Continue(p.ptr, pauseHook());
+      progressiveStats.slices++;
+    }
+    if (r !== 2) throw new Error('drawing failed');
+    const buf = q.FPDFBitmap_GetBuffer(bmp) >>> 0;
+    const stride = q.FPDFBitmap_GetStride(bmp);
+    const heap = M().HEAPU8;
+    if (stride === w * 4) return new Uint8ClampedArray(heap.buffer, buf, w * h * 4).slice();
+    const px = new Uint8ClampedArray(w * h * 4);
+    for (let row = 0; row < h; row++) px.set(heap.subarray(buf + row * stride, buf + row * stride + w * 4), row * w * 4);
+    return px;
+  } finally {
+    if (!me.closed) { me.closed = true; q.FPDF_RenderPage_Close(p.ptr); }
+    if (progressive === me) progressive = null;
+    q.FPDFBitmap_Destroy(bmp);
+  }
+}
+
+function drawArea(p: PageCache, scale: number, x: number, y: number, w: number, h: number, annots = false): Uint8ClampedArray {
+  const q = Q();
   const bmp = q.FPDFBitmap_Create(w, h, 1);
   if (!bmp) throw new Error('Out of memory for a ' + w + '×' + h + ' render');
   try {
     q.FPDFBitmap_FillRect(bmp, 0, 0, w, h, 0xffffffff);
     // 0x10 = RGBA byte order (straight into ImageData); 0x01 = annotations (only for thumbnails of other files)
     const flags = 0x10 | (annots ? 0x01 : 0);
+    slabStats.calls++;
     q.FPDF_RenderPageBitmap(bmp, p.ptr, -Math.round(x), -Math.round(y), Math.round(p.w * scale), Math.round(p.h * scale), 0, flags);
     const buf = q.FPDFBitmap_GetBuffer(bmp) >>> 0;
     const stride = q.FPDFBitmap_GetStride(bmp);
@@ -376,6 +533,93 @@ export function render(id: string, pg: number, scale: number, x: number, y: numb
     q.FPDFBitmap_Destroy(bmp);
   }
 }
+
+// ---------------------------------------------------------------- picture pages in slabs (PLAN 3.5, D1)
+/**
+ * A page whose pictures are big (a 75-megapixel scan, a drawing with 128 MP of photos) costs about
+ * the same to draw whatever the size of the area: PDFium works through the whole picture each time
+ * (310-830 ms a call, measured). Drawn as 512 px tiles a view cost 12-48 such calls; now one slab
+ * of up to 4,608 x 3,584 px, centred on the first tile asked for (the middle of the view), and
+ * the view's tiles are cut out of it: one call a view - on a page of few objects whose tiles,
+ * drawn on their own and timed, stay slow. Slabs are held in the engine (RGBA,
+ * outside the engine's own memory), two at most. Cut-out tiles look as drawn on their own, not
+ * bit for bit: a scaled picture's resampling rounds a few values differently with another clip
+ * (up to 2 levels of 255, about 1 value in 1,000).
+ */
+/** a slab's size: a screen's shape - a 1,920 x 1,080 view at 175 % with the half tile around it
+ *  (4,384 x 2,914 px) fits, wherever it falls on the 512 px grid (~63 MB) */
+const SLAB_W = 4608, SLAB_H = 3584;
+/** pictures (decoded, estimated) above which a page is drawn in slabs: ~16 megapixels */
+const SLAB_PICS = 64 * 1024 ** 2;
+/** only a page of few objects is drawn in slabs: a scan, photos with a few lines or words (a scanned
+ *  sheet: 1 object; a sheet of a drawing set with a site photo: 520). A drawing with pictures (a merged sheet: 16,000 objects and 138 MB of
+ *  pictures) costs by the area drawn - a slab there took 5.6 s where the view's tiles took 0.3 s */
+const SLAB_SCAN_OBJECTS = 2000;
+/** a page's second tile slower than this: its tiles come out of slabs (a scanned sheet: 400-800 ms a tile,
+ *  every time; a 228-page set's page of pictures: 450 ms the first time, then ~10 ms - a slab
+ *  there cost 0.5 s and 200 MB) */
+const SLAB_SLOW_MS = 150;
+/** slabs kept: a view takes one (centred on it); the one before stays for going back (up to 64 MB each) */
+const SLAB_KEEP = 2;
+const SLAB_BYTES = 128 * 1024 ** 2;
+type Slab = { d: Doc; pg: number; scale: number; sx: number; sy: number; px: Uint8ClampedArray; w: number; h: number };
+const slabs: Slab[] = [];
+/** (tests) PDFium draws, slabs drawn, tiles served from them, slabs refused for want of room;
+ *  on = slabs used; idleMs = slabs let go after this long unused */
+export const slabStats = { calls: 0, drawn: 0, served: 0, refused: 0, on: true, idleMs: 20000, slowMs: SLAB_SLOW_MS };
+export const slabsHeld = () => slabs.length;
+/**
+ * Room for a slab (`bytes`: its picture in the engine's memory and the copy kept) - set by the
+ * engine host: the engine's memory stays below its planned restart point, and the PC keeps free
+ * memory (the Cloudflare reports: a PC with 355 MB of 16 GB free). No room: the tile is drawn on
+ * its own, as before 3.5, and the slabs held are let go. Tests: always room.
+ */
+let slabRoom: (bytes: number) => boolean = () => true;
+export function setSlabRoom(f: (bytes: number) => boolean) { slabRoom = f; }
+let slabTimer: ReturnType<typeof setTimeout> | null = null;
+/** slabs are let go once a page of pictures hasn't been drawn for a while */
+function touchSlabs() {
+  if (slabTimer) clearTimeout(slabTimer);
+  slabTimer = setTimeout(() => { slabs.length = 0; slabTimer = null; }, slabStats.idleMs);
+  (slabTimer as { unref?: () => void }).unref?.();
+}
+/** a slab holds a tile: inside it, or reaching a pixel past it where the slab ends at the page's edge */
+function holds(s: Slab, x: number, y: number, w: number, h: number, W: number, H: number) {
+  const fits = (a: number, n: number, sa: number, sn: number, edge: number) => a >= sa && (a + n <= sa + sn || (sa + sn === edge && a + n - (sa + sn) <= 1 && a < sa + sn));
+  return fits(x, w, s.sx, s.w, W) && fits(y, h, s.sy, s.h, H);
+}
+/**
+ * The slab a tile comes out of: one already drawn that holds it, or a new one centred on it. The
+ * window asks for the tiles of a view centre first, so the first slab - centred on the middle of
+ * the view - holds the whole view (a view is smaller than a slab): one draw.
+ */
+function slabFor(d: Doc, pg: number, p: PageCache, scale: number, x: number, y: number, w: number, h: number): Slab | null {
+  const W = Math.round(p.w * scale), H = Math.round(p.h * scale);
+  const k = slabs.findIndex((s) => s.d === d && s.pg === pg && s.scale === scale && holds(s, x, y, w, h, W, H));
+  if (k >= 0) { const s = slabs.splice(k, 1)[0]; slabs.push(s); touchSlabs(); return s; }
+  // (on the 512 px grid of the tiles: PDFium's resampling of a picture then rounds as on a tile
+  // drawn on its own; moved back from the page's far edge when it still holds the tile)
+  const at = (a: number, n: number, edge: number, size: number) => {
+    const c = Math.max(0, Math.round((a + n / 2 - size / 2) / 512) * 512), e = Math.floor(Math.max(0, edge - size) / 512) * 512;
+    return e < c && e + size >= a + n ? e : c;
+  };
+  const sx = at(x, w, W, SLAB_W), sy = at(y, h, H, SLAB_H);
+  const sw = Math.min(SLAB_W, W - sx), sh = Math.min(SLAB_H, H - sy);
+  if (sw <= 0 || sh <= 0) return null;
+  const s: Slab = { d, pg, scale, sx, sy, px: new Uint8ClampedArray(0), w: sw, h: sh };
+  // (a tile no slab can hold - more than a slab, or off the page: drawn on its own)
+  if (!holds(s, x, y, w, h, W, H)) return null;
+  if (!slabRoom(sw * sh * 4 * 2)) { slabStats.refused++; slabs.length = 0; return null; }
+  // (no room for a slab after all: the tile is drawn on its own, as before)
+  try { s.px = drawArea(p, scale, sx, sy, sw, sh); } catch (e) { if (/out of memory/i.test(String((e as Error)?.message))) { slabs.length = 0; return null; } throw e; }
+  slabStats.drawn++;
+  slabs.push(s);
+  touchSlabs();
+  const bytes = () => slabs.reduce((t, x) => t + x.px.length, 0);
+  while (slabs.length > SLAB_KEEP || (slabs.length > 1 && bytes() > SLAB_BYTES)) slabs.shift();
+  return s;
+}
+function dropSlabs(d: Doc, pg?: number) { for (let k = slabs.length - 1; k >= 0; k--) if (slabs[k].d === d && (pg === undefined || slabs[k].pg === pg)) slabs.splice(k, 1); }
 
 /** every character on the page with its box in page space (cached per page) */
 export function chars(id: string, pg: number): CharInfo {
@@ -560,7 +804,17 @@ export function toUser(id: string, pg: number, x: number, y: number): [number, n
  *  middle is a real middle (4) - a piece of a curve has none of those but its first / last end */
 export interface SnapIndex { seg: Float32Array; kind: Uint8Array; n: number; cols: number; rows: number; cw: number; ch: number; start: Int32Array; ids: Int32Array; w: number; h: number }
 
-const SNAP_MAX = 4e6;
+let SNAP_MAX = 4e6;
+/** most entries of a page's snap grid (4 bytes each); tests may lower it */
+let SNAP_CELLS_MAX = 16e6;
+export function setSnapCellsMax(n: number) { SNAP_CELLS_MAX = n; }
+/** tests: a lower limit (a page over it is quick to make) */
+export function setSnapMax(n: number) { SNAP_MAX = n; }
+/** tests: what a page cache holds of a page (its handle, matrix and size) - the page is read in if it is not */
+export function snapPageForTests(id: string, pg: number): { ptr: number; aff: number[]; w: number; h: number } {
+  const p = page(mustDoc(id), pg);
+  return { ptr: p.ptr, aff: p.aff, w: p.w, h: p.h };
+}
 /**
  * Snap indexes held, across all open files, most recent last: they are ordinary memory, outside
  * the engine's own (heapBytes) - kept within a budget besides the 6 per file (several drawing sets
@@ -587,10 +841,14 @@ export function buildSnap(id: string, pg: number): SnapIndex {
   const q = Q();
   const p = page(d, pg);
   const { w, h } = p;
+  // (the engine's own exports, called straight: the wrappers in `q` pass every call through three
+  // layers of argument handling - ~0.4 us a call, ~25 x the call itself: over the objects of a
+  // page it was most of the time)
+  const X = M().wasmExports as unknown as Record<string, (...a: number[]) => number>;
   let seg = new Float32Array(1 << 18);
   let kd = new Uint8Array(1 << 16);
   let n = 0;
-  /** path pieces seen so far (counted while indexing, not in a pass of its own: that cost seconds) */
+  /** path pieces on the page (counted object by object before any is read) */
   let total = 0, tooMany = false;
   const push = (x0: number, y0: number, x1: number, y1: number, kind = 7) => {
     if (Math.abs(x1 - x0) + Math.abs(y1 - y0) < 0.6) return;
@@ -606,7 +864,7 @@ export function buildSnap(id: string, pg: number): SnapIndex {
    * control polygon - snap marks floated off arcs and rounded corners, up to 14 % of the radius.
    * Only the curve's own two ends are line ends; the chords have no middles of their own.
    */
-  const curve = (x0: number, y0: number, c: number[]) => {
+  const curve = (x0: number, y0: number, c: ArrayLike<number>) => {
     const len = Math.hypot(c[0] - x0, c[1] - y0) + Math.hypot(c[2] - c[0], c[3] - c[1]) + Math.hypot(c[4] - c[2], c[5] - c[3]);
     const k = Math.max(2, Math.min(16, Math.ceil(len / 8)));
     let ax = x0, ay = y0;
@@ -619,70 +877,100 @@ export function buildSnap(id: string, pg: number): SnapIndex {
     }
   };
   const mat = malloc(24), xy = malloc(8);
-  const F = () => new Float32Array(M().HEAPU8.buffer);
-  const mulM = (A: number[], B: number[]) => [
-    A[0] * B[0] + A[2] * B[1], A[1] * B[0] + A[3] * B[1], A[0] * B[2] + A[2] * B[3], A[1] * B[2] + A[3] * B[3],
-    A[0] * B[4] + A[2] * B[5] + A[4], A[1] * B[4] + A[3] * B[5] + A[5],
-  ];
-  const visit = (obj: number, T: number[], depth: number) => {
-    const type = q.FPDFPageObj_GetType(obj);
+  const mod = M();
+  // one view over the engine's memory for the whole build, taken again only if the memory grew
+  // (a new view per segment was an allocation per segment)
+  let f32 = new Float32Array(mod.HEAPU8.buffer);
+  const mi = mat >>> 2, xi = xy >>> 2;
+  /** the points of the curve being read (a curve comes as three points of type "bezier") */
+  const bz = new Float64Array(6);
+  /** the object's matrix on the page's: T (6 numbers) x the object's own, the same sums as before, no array per object */
+  const visit = (obj: number, t0: number, t1: number, t2: number, t3: number, t4: number, t5: number, depth: number) => {
+    const type = X.FPDFPageObj_GetType(obj);
     if (type !== 2 && type !== 5) return;
-    let Mx = [1, 0, 0, 1, 0, 0];
-    if (q.FPDFPageObj_GetMatrix(obj, mat)) { const f = F(); const i = mat >>> 2; Mx = [f[i], f[i + 1], f[i + 2], f[i + 3], f[i + 4], f[i + 5]]; }
-    const A = mulM(T, Mx);
+    let b0 = 1, b1 = 0, b2 = 0, b3 = 1, b4 = 0, b5 = 0;
+    if (X.FPDFPageObj_GetMatrix(obj, mat)) {
+      if (mod.HEAPU8.buffer !== f32.buffer) f32 = new Float32Array(mod.HEAPU8.buffer);
+      b0 = f32[mi]; b1 = f32[mi + 1]; b2 = f32[mi + 2]; b3 = f32[mi + 3]; b4 = f32[mi + 4]; b5 = f32[mi + 5];
+    }
+    const a0 = t0 * b0 + t2 * b1, a1 = t1 * b0 + t3 * b1, a2 = t0 * b2 + t2 * b3, a3 = t1 * b2 + t3 * b3;
+    const a4 = t0 * b4 + t2 * b5 + t4, a5 = t1 * b4 + t3 * b5 + t5;
     if (type === 5) {
       if (depth > 6) return;
-      const c = q.FPDFFormObj_CountObjects(obj);
-      for (let k = 0; k < c; k++) visit(q.FPDFFormObj_GetObject(obj, k), A, depth + 1);
+      const c = X.FPDFFormObj_CountObjects(obj);
+      for (let k = 0; k < c; k++) visit(X.FPDFFormObj_GetObject(obj, k), a0, a1, a2, a3, a4, a5, depth + 1);
       return;
     }
-    const cnt = q.FPDFPath_CountSegments(obj);
-    // (a page of tens of millions of line pieces: given up as soon as that's clear)
-    if ((total += cnt) > SNAP_MAX) { n = 0; tooMany = true; return; }
-    let sx = 0, sy = 0, px = 0, py = 0, has = false;
-    /** the points of a curve being read (a curve comes as three points of type "bezier") */
-    const bz: number[] = [];
+    const cnt = X.FPDFPath_CountSegments(obj);
+    let sx = 0, sy = 0, px = 0, py = 0, has = false, nb = 0;
     for (let k = 0; k < cnt; k++) {
-      const sg = q.FPDFPath_GetPathSegment(obj, k);
-      if (!q.FPDFPathSegment_GetPoint(sg, xy, xy + 4)) continue;
-      const f = F();
-      const ux = f[xy >>> 2], uy = f[(xy >>> 2) + 1];
-      const X = A[0] * ux + A[2] * uy + A[4], Y = A[1] * ux + A[3] * uy + A[5];
-      const t = q.FPDFPathSegment_GetType(sg);
-      if (t === 2 || !has) { sx = X; sy = Y; has = true; bz.length = 0; }
+      const sg = X.FPDFPath_GetPathSegment(obj, k);
+      if (!X.FPDFPathSegment_GetPoint(sg, xy, xy + 4)) continue;
+      if (mod.HEAPU8.buffer !== f32.buffer) f32 = new Float32Array(mod.HEAPU8.buffer);
+      const ux = f32[xi], uy = f32[xi + 1];
+      const gx = a0 * ux + a2 * uy + a4, gy = a1 * ux + a3 * uy + a5;
+      const t = X.FPDFPathSegment_GetType(sg);
+      if (t === 2 || !has) { sx = gx; sy = gy; has = true; nb = 0; }
       else if (t === 1) {
-        bz.push(X, Y);
+        bz[nb++] = gx; bz[nb++] = gy;
         // (the curve's start stays where it was until its last point is in)
-        if (bz.length < 6) continue;
+        if (nb < 6) continue;
         curve(px, py, bz);
-        bz.length = 0;
-      } else push(px, py, X, Y);
-      px = X; py = Y;
-      if (q.FPDFPathSegment_GetClose(sg) && (px !== sx || py !== sy)) { push(px, py, sx, sy); px = sx; py = sy; }
+        nb = 0;
+      } else push(px, py, gx, gy);
+      px = gx; py = gy;
+      if (X.FPDFPathSegment_GetClose(sg) && (px !== sx || py !== sy)) { push(px, py, sx, sy); px = sx; py = sy; }
     }
+  };
+  /** adds up the path pieces of an object (forms entered as visit() does) without reading a point; false once over the limit */
+  const countPieces = (obj: number, depth: number): boolean => {
+    const type = X.FPDFPageObj_GetType(obj);
+    if (type === 5) {
+      if (depth > 6) return true;
+      const c = X.FPDFFormObj_CountObjects(obj);
+      for (let k = 0; k < c; k++) if (!countPieces(X.FPDFFormObj_GetObject(obj, k), depth + 1)) return false;
+      return true;
+    }
+    return type !== 2 || (total += X.FPDFPath_CountSegments(obj)) <= SNAP_MAX;
   };
   const count = q.FPDFPage_CountObjects(p.ptr);
   // a page of tens of millions of line pieces (a traced scan): no snapping there - reading them
-  // all would take a minute and hundreds of MB
-  for (let i = 0; i < count && !tooMany; i++) visit(q.FPDFPage_GetObject(p.ptr, i), p.aff, 0);
-  if (tooMany) n = 0;
+  // all would take a minute and hundreds of MB. Counted first, piece counts only: it is given up
+  // at once (reading pieces until the count ran over took ~2.8 s on the merged heavy sheets)
+  for (let i = 0; i < count && !tooMany; i++) if (!countPieces(X.FPDFPage_GetObject(p.ptr, i), 0)) tooMany = true;
+  if (!tooMany) for (let i = 0; i < count; i++) visit(X.FPDFPage_GetObject(p.ptr, i), p.aff[0], p.aff[1], p.aff[2], p.aff[3], p.aff[4], p.aff[5], 0);
   free(mat); free(xy);
   const cols = 128, rows = Math.max(16, Math.round((128 * h) / w));
   const cw = w / cols, ch = h / rows;
+  // (each piece goes into every cell of its box: long slanting pieces over a whole sheet add up -
+  // past SNAP_CELLS_MAX entries the page is too dense to snap, as with too many pieces, rather than
+  // an index of gigabytes or a count that wraps; Phase 6 sweep)
+  let entries = 0;
+  for (let i = 0; i < n && entries <= SNAP_CELLS_MAX; i++) {
+    const c0 = Math.max(0, Math.floor(Math.min(seg[i * 4], seg[i * 4 + 2]) / cw)), c1 = Math.min(cols - 1, Math.floor(Math.max(seg[i * 4], seg[i * 4 + 2]) / cw));
+    const r0 = Math.max(0, Math.floor(Math.min(seg[i * 4 + 1], seg[i * 4 + 3]) / ch)), r1 = Math.min(rows - 1, Math.floor(Math.max(seg[i * 4 + 1], seg[i * 4 + 3]) / ch));
+    entries += Math.max(0, c1 - c0 + 1) * Math.max(0, r1 - r0 + 1);
+  }
+  if (entries > SNAP_CELLS_MAX) n = 0;
   const counts = new Int32Array(cols * rows + 1);
-  const cellsOf = (i: number, f: (c: number) => void) => {
+  // (the cells each piece touches, twice - counted, then filled: written out, not as a callback per cell)
+  for (let i = 0; i < n; i++) {
     const x0 = Math.min(seg[i * 4], seg[i * 4 + 2]), x1 = Math.max(seg[i * 4], seg[i * 4 + 2]);
     const y0 = Math.min(seg[i * 4 + 1], seg[i * 4 + 3]), y1 = Math.max(seg[i * 4 + 1], seg[i * 4 + 3]);
     const c0 = Math.max(0, Math.floor(x0 / cw)), c1 = Math.min(cols - 1, Math.floor(x1 / cw));
     const r0 = Math.max(0, Math.floor(y0 / ch)), r1 = Math.min(rows - 1, Math.floor(y1 / ch));
-    if (c1 < c0 || r1 < r0) return;
-    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) f(r * cols + c);
-  };
-  for (let i = 0; i < n; i++) cellsOf(i, (c) => counts[c + 1]++);
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) counts[r * cols + c + 1]++;
+  }
   for (let c = 0; c < cols * rows; c++) counts[c + 1] += counts[c];
   const ids = new Int32Array(counts[cols * rows]);
   const fill = counts.slice();
-  for (let i = 0; i < n; i++) cellsOf(i, (c) => (ids[fill[c]++] = i));
+  for (let i = 0; i < n; i++) {
+    const x0 = Math.min(seg[i * 4], seg[i * 4 + 2]), x1 = Math.max(seg[i * 4], seg[i * 4 + 2]);
+    const y0 = Math.min(seg[i * 4 + 1], seg[i * 4 + 3]), y1 = Math.max(seg[i * 4 + 1], seg[i * 4 + 3]);
+    const c0 = Math.max(0, Math.floor(x0 / cw)), c1 = Math.min(cols - 1, Math.floor(x1 / cw));
+    const r0 = Math.max(0, Math.floor(y0 / ch)), r1 = Math.min(rows - 1, Math.floor(y1 / ch));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) ids[fill[r * cols + c]++] = i;
+  }
   const ix = { seg: seg.slice(0, n * 4), kind: kd.slice(0, n), n, cols, rows, cw, ch, start: counts, ids, w, h };
   d.snaps.set(pg, ix);
   // (a heavy A0 sheet's index is ~14 MB: the few sheets measured on last are kept)

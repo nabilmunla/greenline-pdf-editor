@@ -11,6 +11,8 @@
 //  - out: the finished file the call makes is written to a temp file (or the given path)
 //    straight from engine memory, and comes back as { $file: { path, size } }
 //  - pictures come back as { $img: 1, w, h, px }
+import { CallQueue, VIEW_TILE, type QCall } from './callq';
+import { offList } from './off';
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import path from 'node:path';
@@ -29,14 +31,20 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
   const pf = await import('./pdfium');
   const wasm = fs.readFileSync(path.join(resDir, 'pdfium.wasm'));
   await pf.startPdfium(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength) as ArrayBuffer);
+  pf.setSlabRoom((bytes) => slabRoomFor(bytes, pf.heapBytes(), pf.memoryLimit(), os.freemem()));
   // (tests only - e2e-4gb: PDFED_TEST_FILL=2.1 takes the engine's memory up to 2.1 GB first, so
   // all its work lands past it)
   const fill = Number(process.env.PDFED_TEST_FILL);
   if (fill > 0) pf.fillBelow(fill * 2 ** 30, fill * 2 ** 30);
+  // (PDFED_OFF=giveway: view tiles drawn in one call - the engines inherit the app's environment)
+  pf.progressiveStats.on = !offList(process.env.PDFED_OFF, process.env.PDFED_ON).has('giveway');
   return {
     open(id: string, src: VFile | Uint8Array, password?: string) { return pf.openDoc(id, src, password); },
     close(id: string) { pf.closeDoc(id); return true; },
     tile(id: string, page: number, scale: number, x: number, y: number, w: number, h: number) { return img(pf.render(id, page, scale, x, y, w, h), w, h); },
+    // (a tile of the view: dropped unrun once its scale is no longer wanted - see callq.ts)
+    // (drawn in slices: short calls go in between, and it stops when no longer wanted - PLAN 7.5)
+    async viewTile(id: string, page: number, scale: number, x: number, y: number, w: number, h: number) { return img(await pf.renderGivingWay(id, page, scale, x, y, w, h, giveWay), w, h); },
     thumb(id: string, page: number, scale: number, w: number, h: number, annots: boolean) { return img(pf.render(id, page, scale, 0, 0, w, h, annots), w, h); },
     chars(id: string, page: number) { const c = pf.chars(id, page); return { text: c.text, box: c.box }; },
     rangeRects(id: string, page: number, start: number, count: number) { return pf.rangeRects(id, page, start, count); },
@@ -46,8 +54,10 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
     prepareSnap(id: string, page: number) { return pf.buildSnap(id, page).n; },
     charsIn(id: string, page: number, r: number[]) { return pf.charsIn(id, page, r); },
     heap() { return pf.heapBytes(); },
+    /** heap growth of the page's read-in (PLAN 7.3: a page that grew the engine by over 500 MB is pinned) */
+    pageGrew(id: string, page: number) { return pf.pageGrew(id, page); },
     /** pages read in so far (tests) */
-    pageStats() { return { ...pf.pageStats, heap: pf.heapBytes() }; },
+    pageStats() { return { ...pf.pageStats, progressive: { slices: pf.progressiveStats.slices, gaveWay: pf.progressiveStats.gaveWay }, heap: pf.heapBytes(), slabs: { ...pf.slabStats, held: pf.slabsHeld() } }; },
     /** plain text of pages [from, to) (AI assistant, translation) */
     texts(id: string, from: number, to: number) { const out: string[] = []; for (let i = from; i < to; i++) { try { out.push(pf.pageText(id, i)); } catch { out.push(''); } } return out; },
   };
@@ -66,14 +76,28 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
  */
 const ENGINES = Number(process.env.PDFED_RENDERERS) || Math.max(2, Math.min(4, Math.floor((os.cpus().length || 4) / 3)));
 const RECYCLE_AT = Number(process.env.PDFED_RECYCLE_AT) || Math.min(3 * 1024 ** 3, Math.max(1.4 * 1024 ** 3, (os.totalmem() * 0.4) / ENGINES));
+/** the restart point for an engine whose memory can grow to `limit` bytes: never so close to it that
+ *  a page read in at that point would stop the engine mid-call (a wasm that could not be lifted
+ *  to 4 GB stops at 2 GB, below the 3 GB this may be set to) */
+export const recycleAtFor = (limit: number, at = RECYCLE_AT) => Math.min(at, limit - 0.2 * 1024 ** 3);
 /** not straight after starting (a page that needs that much would loop): 30 s, twice that for each
  *  planned restart of this engine in the last 10 minutes (the app counts them: PDFED_RECYCLES) -
  *  a page bigger than the restart point, worked on, restarted the engine every 30 s */
 const MIN_UP = 30 * 2 ** Math.min(4, Number(process.env.PDFED_RECYCLES) || 0);
+/** a protected file is copied decrypted for drawing its merged heavy pages up to this size (each
+ *  drawing copy is then a whole one, made from a second copy in memory: an edit rewrites it) */
+const PLAIN_MAX = 150e6;
+/**
+ * Room for a slab of `bytes` (PLAN 3.5): the engine's memory with it stays below the planned
+ * restart point (a slab never brings a restart - or the 2/4 GB ceiling - closer), and the PC keeps
+ * more than SLAB_FREE free.
+ */
+const SLAB_FREE = 1.5 * 1024 ** 3;
+export const slabRoomFor = (bytes: number, heap: number, limit: number, free: number, at = RECYCLE_AT) => heap + bytes <= recycleAtFor(limit, at) && free - bytes > SLAB_FREE;
 export async function renderRecycle(): Promise<boolean> {
   const pf = await import('./pdfium');
   // never straight after starting (a page that needs that much would loop)
-  try { return process.uptime() > MIN_UP && pf.heapBytes() > RECYCLE_AT; } catch { return false; }
+  try { return process.uptime() > MIN_UP && pf.heapBytes() > recycleAtFor(pf.memoryLimit()); } catch { return false; }
 }
 
 /** where each open document reads from, and how that file looked when opened */
@@ -124,32 +148,13 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
   guard.traceMupdfErrors((m, e) => { const n = guard.mupdfErrors(); if (n <= 50 || n % 100 === 0) console.error(`mupdf error #${n} in ${m}: ${String((e as Error)?.message || e).slice(0, 120)}`); });
   needsRecycle = () => guard.mupdfErrors() >= guard.MUPDF_ERROR_LIMIT;
   mu.setGlyphlessFont(new Uint8Array(fs.readFileSync(path.join(resDir, 'glyphless.ttf'))));
-  // pages of millions of separate little strokes: merged when opened (see strokes.ts)
-  const { mergeStrokes, MIN_STROKES } = await import('./strokes');
-  /** about how many stroke operators ("S" between white space) - native searches, no parsing */
-  const roughStrokes = (b: Buffer): number => {
-    let n = 0;
-    for (const pat of ['S\n', 'S ', 'S\r']) {
-      const p = Buffer.from(pat);
-      for (let i = b.indexOf(p); i >= 0 && n < MIN_STROKES; i = b.indexOf(p, i + 2)) { const c = b[i - 1]; if (c === 32 || c === 10 || c === 13) n++; }
-    }
-    return n;
-  };
-  mu.setContentMerger((parts, force) => {
-    const t0 = Date.now();
-    // (a page's content parts are one content: joined with a line break between them)
-    const decs = parts.map((raw) => zlib.inflateSync(raw));
-    const dec = decs.length === 1 ? decs[0] : Buffer.concat(decs.flatMap((b, k) => (k ? [Buffer.from('\n'), b] : [b])));
-    // (a quick count first: a big but ordinary sheet - a couple of million strokes - is not
-    // read through stroke by stroke for nothing; that cost seconds on opening)
-    if (!force && (dec.length < MIN_STROKES * 10 || roughStrokes(dec) < MIN_STROKES * 0.8)) return null;
-    // (asked for on a page that took the drawing engine down: any page of many strokes)
-    const r = mergeStrokes(new Uint8Array(dec.buffer, dec.byteOffset, dec.byteLength), force ? 50_000 : MIN_STROKES);
-    if (!r) return null;
-    const out = zlib.deflateSync(r.out, { level: 6 });
-    console.error(`merged a heavy page: ${r.strokesIn} strokes -> ${r.strokesOut}, ${Math.round(dec.length / 1e6)} -> ${Math.round(r.out.length / 1e6)} MB, ${Date.now() - t0} ms`);
-    return new Uint8Array(out.buffer, out.byteOffset, out.byteLength);
-  });
+  // pages of millions of separate little strokes: drawn from merged line work (see heavy.ts,
+  // strokes.ts and mu.displayOverlay) - kept in a temp file the drawing engines read
+  const heavy = await import('./heavy');
+  mu.setContentMerger(heavy.makeMerger((line) => console.error(line)));
+  mu.setDisplayStore((bytes) => { const p = tempPath('merged.bin'); writeView(p, bytes, 0); return { path: p, size: bytes.length }; });
+  const { lastXref } = await import('./overlay');
+  const tailOf = (p: string, size: number) => { const n = Math.min(4096, size); const b = new Uint8Array(n); const fd = fs.openSync(p, 'r'); try { fs.readSync(fd, b, 0, n, size - n); } finally { fs.closeSync(fd); } return b; };
   const h: Record<string, Handler> = {};
   for (const [k, v] of Object.entries(mu)) if (typeof v === 'function') h[k] = v as Handler;
   Object.assign(h, {
@@ -173,17 +178,37 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       const t = mu.thumbOf(src, page, width);
       return { bmp: img(t.px, t.w, t.h), w: t.w, h: t.h, s: t.s };
     },
-    close(id: string) { mu.close(id); sources.delete(id); return true; },
+    close(id: string) {
+      mu.close(id);
+      // (the copy of the original that baseFor made is of no use once the document is closed)
+      const s = sources.get(id);
+      sources.delete(id);
+      if (s?.copied) removeTemp([s.src.path]);
+      return true;
+    },
     /**
      * The current state as a file for the drawing engines: the original + a small file of
      * changes when possible (the original must still be the file that was opened).
      */
     drawSnapshot(id: string, full = false): FileSrc {
       const s = baseOrNull(id);
-      const canDelta = !full && !!s;
+      // (a protected file with heavy pages drawn merged: a decrypted whole copy, up to PLAIN_MAX -
+      // larger ones are drawn as they are; PLAN 4.3)
+      const plain = mu.drawPlain(id) && (s?.stat.size ?? 0) <= PLAIN_MAX;
+      const canDelta = !full && !!s && !plain;
       const out = tempPath(canDelta ? 'changes.bin' : 'snapshot.pdf');
-      const r = mu.snapshotTo(id, (v, from) => writeView(out, v, canDelta ? from : 0), !canDelta, (fill) => writePieces(out, fill));
-      return canDelta && r.base > 0 ? { path: s!.src.path, size: r.base, delta: out, mtime: s!.stat.mtime } : { path: out };
+      const r = mu.snapshotTo(id, (v, from) => writeView(out, v, canDelta ? from : 0), !canDelta, (fill) => writePieces(out, fill), plain);
+      const delta = canDelta && r.base > 0;
+      const src: FileSrc = delta ? { path: s!.src.path, size: r.base, delta: out, mtime: s!.stat.mtime } : { path: out };
+      // heavy pages drawn from merged line work: one more update on top of the copy (display only)
+      if (mu.displayFiles(id).length) {
+        const outSize = statOf(out)?.size ?? 0;
+        const len = delta ? r.base + outSize : outSize;
+        const prev = delta && !outSize ? lastXref(tailOf(s!.src.path, r.base)) : lastXref(tailOf(out, outSize));
+        const extra = mu.displayOverlay(id, len, prev, plain);
+        if (extra) src.extra = extra;
+      }
+      return src;
     },
     /** recovery copy of unsaved work: written next to `file` as `file` (+ `.base.json` when it is only the changes) */
     writeRecovery(id: string, file: string, big: number) {
@@ -333,24 +358,30 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
     const r = mu.readerOf(id);
     if (!r) return null;
     const copy = tempPath('base.pdf');
-    const fd = fs.openSync(copy, 'w');
     try {
-      const CH = 16 << 20;
-      const buf = new Uint8Array(CH);
-      for (let at = 0; at < r.size; at += CH) {
-        const want = Math.min(CH, r.size - at);
-        // (every piece in full: a short read - the file cut short by another program - gave a
-        // short copy, and changes written against it landed at the wrong place)
-        const n = r.read(buf, 0, want, at);
-        if (n !== want) throw new Error('The file was changed by another program while open (it is shorter now).');
-        for (let w = 0; w < n;) w += fs.writeSync(fd, buf, w, n - w);
-      }
-    } finally { fs.closeSync(fd); }
-    const cs = statOf(copy);
-    if (!cs || cs.size !== r.size) throw new Error('Could not keep a copy of the original file (is the disk full?).');
-    const ns = { src: { path: copy }, stat: cs, copied: true };
-    sources.set(id, ns);
-    return ns;
+      const fd = fs.openSync(copy, 'w');
+      try {
+        const CH = 16 << 20;
+        const buf = new Uint8Array(CH);
+        for (let at = 0; at < r.size; at += CH) {
+          const want = Math.min(CH, r.size - at);
+          // (every piece in full: a short read - the file cut short by another program - gave a
+          // short copy, and changes written against it landed at the wrong place)
+          const n = r.read(buf, 0, want, at);
+          if (n !== want) throw new Error('The file was changed by another program while open (it is shorter now).');
+          for (let w = 0; w < n;) w += fs.writeSync(fd, buf, w, n - w);
+        }
+      } finally { fs.closeSync(fd); }
+      const cs = statOf(copy);
+      if (!cs || cs.size !== r.size) throw new Error('Could not keep a copy of the original file (is the disk full?).');
+      const ns = { src: { path: copy }, stat: cs, copied: true };
+      sources.set(id, ns);
+      return ns;
+    } catch (e) {
+      // (a copy that failed - half written, disk full - is no use to anyone and can be big)
+      removeTemp([copy]);
+      throw e;
+    }
   }
 
   /** baseFor, or null (a whole copy is written instead) when the base can't be had */
@@ -416,71 +447,137 @@ function isFatal(e: unknown): boolean {
   return /^Aborted|memory access out of bounds|unreachable/i.test(m);
 }
 
-let chain: Promise<void> = Promise.resolve();
+/**
+ * Run a call whose finished file goes straight to disk (the `out` of a call): to a temp file, or
+ * to the path given. The file is made as the first piece arrives; if the call throws after that,
+ * the part written is removed (a big one left behind stayed until the next start).
+ */
+export function runToFile(sink: Sink | null, out: boolean | string, run: () => unknown): unknown {
+  if (!sink) throw new Error('this engine does not write files');
+  const target = typeof out === 'string' ? out : tempPath('out.pdf');
+  let wrote = false;
+  // (a big file comes in pieces: the first opens the file, the rest go after it)
+  let fd = -1;
+  let value: unknown;
+  try {
+    try {
+      value = sink((v) => {
+        if (fd < 0) { fs.mkdirSync(path.dirname(target), { recursive: true }); fd = fs.openSync(target, 'w'); }
+        for (let w = 0; w < v.length;) w += fs.writeSync(fd, v, w, Math.min(16 << 20, v.length - w));
+        wrote = true;
+      }, run);
+    } finally { if (fd >= 0) fs.closeSync(fd); }
+    if (wrote) {
+      const file = { $file: { path: target, size: fs.statSync(target).size } };
+      if (value instanceof Uint8Array) value = file;
+      else if (value && typeof value === 'object' && (value as { bytes?: unknown }).bytes instanceof Uint8Array) value = { ...(value as object), bytes: file };
+    }
+  } catch (e) {
+    // (a path the caller gave is touched only if writing started; our own temp file always goes, with its folder)
+    if (fd >= 0 || wrote) try { fs.rmSync(target, { force: true }); } catch { /* still open somewhere */ }
+    if (typeof out !== 'string') removeTemp([target]);
+    throw e;
+  }
+  return value;
+}
+
 let exiting = false;
 let recycle: (() => Promise<boolean>) | null = null;
 let calls = 0;
+
+type Call = QCall & { port: PortMain; id: number; out?: boolean | string };
+/** calls waiting, in the order they run (short calls ahead of tiles, stale view tiles dropped: PLAN 3.9) */
+const queue = new CallQueue<Call>();
+let arrived = 0;
+let running = false;
 
 function serve(port: PortMain) {
   ports.push(port);
   port.on('close', () => { const k = ports.indexOf(port); if (k >= 0) ports.splice(k, 1); });
   port.on('message', (e) => {
-    const { id, method, args, out } = e.data as { id: number; method: string; args: unknown[]; out?: boolean | string };
-    chain = chain.then(async () => {
-      if (exiting) return; // the app starts a fresh engine and asks again
-      const files: VFile[] = [];
-      let fatal = false;
-      let failed = false;
-      try {
-        const handlers = await ready;
-        const h = handlers[method];
-        if (!h) throw new Error('unknown call ' + method);
-        const a = (args || []).map((x) => inArgs(x, files));
-        let value: unknown;
-        if (out) {
-          const target = typeof out === 'string' ? out : tempPath('out.pdf');
-          if (!withSink) throw new Error('this engine does not write files');
-          let wrote = false;
-          // (a big file comes in pieces: the first opens the file, the rest go after it)
-          let fd = -1;
-          try {
-            value = withSink((v) => {
-              if (fd < 0) { fs.mkdirSync(path.dirname(target), { recursive: true }); fd = fs.openSync(target, 'w'); }
-              for (let w = 0; w < v.length;) w += fs.writeSync(fd, v, w, Math.min(16 << 20, v.length - w));
-              wrote = true;
-            }, () => h(...a));
-          } finally { if (fd >= 0) fs.closeSync(fd); }
-          if (wrote) {
-            const file = { $file: { path: target, size: fs.statSync(target).size } };
-            if (value instanceof Uint8Array) value = file;
-            else if (value && typeof value === 'object' && (value as { bytes?: unknown }).bytes instanceof Uint8Array) value = { ...(value as object), bytes: file };
-          }
-        } else value = await h(...a);
-        port.postMessage({ id, ok: true, value });
-      } catch (err) {
-        failed = true;
-        fatal = isFatal(err);
-        // (a port the window has closed meanwhile can't take the answer: nobody is waiting for it)
-        try { port.postMessage({ id, ok: false, error: err instanceof Error ? err.message : String(err), fatal }); } catch { /* gone */ }
-      } finally {
-        if (failed || !KEEPS.has(method)) for (const f of files) f.close();
-        else if (files.length > 1) for (const f of files.slice(1)) f.close();
-      }
-      calls++;
-      // planned restart: tell the window (it writes fresh recovery copies, then calls exitNow)
-      if (!recycleAsked && needsRecycle()) { recycleAsked = true; for (const p of ports) { try { p.postMessage({ id: 0, notice: 'recycle' }); } catch { /* a window that has gone */ } } }
-      // (broken now: the calls queued behind this one are not run on it - a save run in those 50 ms
-      // could write what a broken engine made over the person's file; they wait for the new engine,
-      // which the window asks again)
-      if (fatal) { exiting = true; parentPort.postMessage({ type: 'fatal' }); setTimeout(() => process.exit(70), 50); }
-      else if (recycle && (await recycle())) { exiting = true; setTimeout(() => process.exit(75), 20); }
-    }).catch((err) => {
-      // (the chain must never stay rejected: every later call would be skipped and the engine
-      // would never answer again - the app looked frozen, with nothing in the log)
-      console.error('engine call ' + method + ' failed outside its handler: ' + (err instanceof Error ? err.message : String(err)));
-    });
+    const d = e.data as { id: number; method: string; args: unknown[]; out?: boolean | string; want?: { doc: string; scales: number[] | null } };
+    // (the scales the window still wants for a document: taken at once, not queued)
+    if (d.want) { queue.wantScales(d.want.doc, d.want.scales); return; }
+    queue.push({ port, id: d.id, method: d.method, args: d.args, out: d.out, seq: arrived++ });
+    pump();
   });
   port.start();
+}
+
+function pump() {
+  if (running || exiting) return;
+  const { call, stale, jumped } = queue.next();
+  for (const c of stale) { try { c.port.postMessage({ id: c.id, ok: false, error: 'stale tile', stale: true }); } catch { /* gone */ } }
+  if (!call) return;
+  running = true;
+  if (jumped) { try { call.port.postMessage({ id: 0, running: call.id }); } catch { /* gone */ } }
+  run(call).catch((err) => {
+    // (the queue must never stop: every later call would wait for ever and the engine would never
+    // answer again - the app looked frozen, with nothing in the log)
+    console.error('engine call ' + call.method + ' failed outside its handler: ' + (err instanceof Error ? err.message : String(err)));
+  }).finally(() => {
+    running = false;
+    // (the next call after the messages that came meanwhile: a short call or a change of view
+    // arriving while a tile was drawn counts before the tiles queued)
+    setImmediate(pump);
+  });
+}
+
+/** the view tile being drawn (PLAN 7.5) */
+let current: Call | null = null;
+/**
+ * A tile's pause: the messages that came meanwhile are taken in, the short calls waiting at the
+ * front run now (in the order they came), and the answer says whether the tile is still wanted.
+ */
+async function giveWay(): Promise<boolean> {
+  await new Promise((r) => setImmediate(r));
+  for (let c = queue.takeShort(); c && !exiting; c = queue.takeShort()) {
+    try { c.port.postMessage({ id: 0, running: c.id }); } catch { /* gone */ }
+    await run(c);
+  }
+  return exiting || (!!current && queue.isStale(current));
+}
+
+async function run(call: Call) {
+  const prev = current;
+  if (call.method === VIEW_TILE) current = call;
+  try { await runOne(call); } finally { current = prev; }
+}
+
+async function runOne({ port, id, method, args, out }: Call) {
+  if (exiting) return; // the app starts a fresh engine and asks again
+  const files: VFile[] = [];
+  let fatal = false;
+  let failed = false;
+  try {
+    const handlers = await ready;
+    const h = handlers[method];
+    if (!h) throw new Error('unknown call ' + method);
+    const a = (args || []).map((x) => inArgs(x, files));
+    let value: unknown;
+    if (out) value = runToFile(withSink, out, () => h(...a));
+    else value = await h(...a);
+    port.postMessage({ id, ok: true, value });
+  } catch (err) {
+    failed = true;
+    fatal = isFatal(err);
+    // (a port the window has closed meanwhile can't take the answer: nobody is waiting for it)
+    // (a tile that gave way - no longer wanted - is "stale": not drawn, nothing went wrong)
+    const stale = !!(err as { stale?: boolean })?.stale;
+    if (stale) { failed = false; queue.stale++; }
+    try { port.postMessage({ id, ok: false, error: err instanceof Error ? err.message : String(err), fatal, ...(stale ? { stale: true } : {}) }); } catch { /* gone */ }
+  } finally {
+    if (failed || !KEEPS.has(method)) for (const f of files) f.close();
+    else if (files.length > 1) for (const f of files.slice(1)) f.close();
+  }
+  calls++;
+  // planned restart: tell the window (it writes fresh recovery copies, then calls exitNow)
+  if (!recycleAsked && needsRecycle()) { recycleAsked = true; for (const p of ports) { try { p.postMessage({ id: 0, notice: 'recycle' }); } catch { /* a window that has gone */ } } }
+  // (broken now: the calls queued behind this one are not run on it - a save run in those 50 ms
+  // could write what a broken engine made over the person's file; they wait for the new engine,
+  // which the window asks again)
+  if (fatal) { exiting = true; parentPort.postMessage({ type: 'fatal' }); setTimeout(() => process.exit(70), 50); }
+  else if (recycle && (await recycle())) { exiting = true; setTimeout(() => process.exit(75), 20); }
 }
 
 /** start serving: role = 'render' | 'edit' */

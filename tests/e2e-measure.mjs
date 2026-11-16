@@ -98,7 +98,14 @@ await until(async () => (await lengths()).find((a) => a.id === second.id && a.la
 ok(true, 'number size of one markup: 24 pt');
 await win.keyboard.press('Escape');
 const before = await lengths();
-await win.locator('.ribbon select[title^="Size of the measurement numbers"]').selectOption('2');
+// (0.9.9: a slider, Measure > Labels - nothing selected: the whole file; moved to 2x and let go)
+await E(() => {
+  const el = document.querySelector('.ribbon .lsz input[type=range]');
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '2');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await new Promise((r) => setTimeout(r, 100));
+await E(() => document.querySelector('.ribbon .lsz input[type=range]').dispatchEvent(new PointerEvent('pointerup', { bubbles: true })));
 await until(async () => (await lengths()).every((a) => Math.abs(a.labelSize - Math.min(72, before.find((b) => b.id === a.id).labelSize * 2)) < 0.11), 10000, 'file x2');
 ok(true, 'whole file: every number twice as big');
 ok(await E(() => window.__gcc.active().data.labelK) === 2, 'file setting kept (labelK 2)');

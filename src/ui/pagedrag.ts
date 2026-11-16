@@ -8,6 +8,12 @@ export interface DraggedPages { doc: string; pages: number[]; name: string }
 /** temp file path -> where its pages came from */
 export const dragged = new Map<string, DraggedPages>();
 
+/** the document closed: the temp files of its dragged pages are forgotten (a drop of one of them
+ *  from now on is an outside file, not a move or copy from an open document) */
+export function forgetDragged(docId: string) {
+  for (const [path, info] of dragged) if (info.doc === docId) dragged.delete(path);
+}
+
 export function pagesLabel(pages: number[]): string {
   const s = [...pages].sort((a, b) => a - b);
   if (s.length === 1) return 'page ' + (s[0] + 1);

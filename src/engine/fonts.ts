@@ -5,6 +5,7 @@ import * as mupdf from 'mupdf';
 import * as hb from 'harfbuzzjs';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, basename } from 'node:path';
+import { createHash } from 'node:crypto';
 
 /** files for regular, bold, italic, bold italic (Windows names; then stand-ins on test machines) */
 const FAMILIES: [string, string[], string[]?][] = [
@@ -141,7 +142,9 @@ export function fontStack(family: string, bold: boolean, italic: boolean): FontR
 
 /** a font from given bytes (text edits: the font closest to the line being edited) */
 export function fontFromBytes(name: string, bytes: Uint8Array): FontRef | null {
-  const key = 'bytes:' + name + ':' + bytes.length;
+  // (by the bytes themselves: two different fonts with one name and one size - a subset and its
+  // edited copy - must not share an entry)
+  const key = 'bytes:' + name + ':' + createHash('sha1').update(bytes).digest('hex');
   if (loaded.has(key)) return loaded.get(key)!;
   let ref: FontRef | null = null;
   try {

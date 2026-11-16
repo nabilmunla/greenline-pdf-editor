@@ -2,7 +2,7 @@
 // and the markup layer (MuPDF) above that. Tiles are positioned in % of the page, so
 // while zooming the old ones simply stretch until the new sharp ones arrive - no flashing.
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { tiles, TILE, levelFor, previewScale, previewReqs, drawPreview, type TileReq } from './tiles';
+import { tiles, TILE, levelFor, previewScale, previewReqs, drawPreview, canvasBytes, dropCanvas, oldLevelsToKeep, type TileReq } from './tiles';
 import type { PdfDoc } from './doc';
 
 export interface PageTilesProps {
@@ -27,6 +27,22 @@ export interface PageTilesProps {
 
 /** sharp tiles are asked for once the zoom level has not changed for this long */
 const SETTLE_MS = 120;
+
+/**
+ * Re-render only when something drawn changes. The priority changes on every scroll frame: the
+ * viewer hands it to the tile store itself (tiles.reprio) - re-rendering every visible page for
+ * it (and building and asking for its tiles again) cost every frame. vis / hide come as new
+ * arrays each render: compared by value.
+ */
+export function samePageTiles(a: PageTilesProps, b: PageTilesProps): boolean {
+  for (const k of Object.keys(a) as (keyof PageTilesProps)[]) {
+    if (k === 'prio') continue;
+    if (k === 'vis') { if (a.vis.some((v, i) => v !== b.vis[i])) return false; continue; }
+    if (k === 'hide') { if (a.hide.length !== b.hide.length || a.hide.some((v, i) => v !== b.hide[i])) return false; continue; }
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
 
 export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
   const prevRef = useRef<HTMLCanvasElement>(null);
@@ -114,23 +130,32 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
         const cb = clear ? box(c) : null;
         for (const o of Array.from(el.children) as HTMLCanvasElement[]) {
           if (o === c) continue;
-          if (o.dataset.l === c.dataset.l && o.dataset.p === c.dataset.p) { o.remove(); continue; }
-          if (cb && !want.has(o.dataset.k!)) { const ob = box(o); if (ob[0] < cb[2] - 1e-6 && ob[2] > cb[0] + 1e-6 && ob[1] < cb[3] - 1e-6 && ob[3] > cb[1] + 1e-6) o.remove(); }
+          if (o.dataset.l === c.dataset.l && o.dataset.p === c.dataset.p) { dropCanvas(o); continue; }
+          if (cb && !want.has(o.dataset.k!)) { const ob = box(o); if (ob[0] < cb[2] - 1e-6 && ob[2] > cb[0] + 1e-6 && ob[1] < cb[3] - 1e-6 && ob[3] > cb[1] + 1e-6) dropCanvas(o); }
         }
         have.add(k);
       }
-      for (const c of Array.from(el.children) as HTMLCanvasElement[]) {
+      // (canvases of an old level stay while the new set is incomplete - no blank flashes - but only
+      // those of the one old level nearest the new: a canvas per tile of every level passed on the way held
+      // hundreds of MB; a removed canvas is emptied first, which frees its pixels at once)
+      const mine = Array.from(el.children) as HTMLCanvasElement[];
+      const keepOld = complete ? new Set<string>() : oldLevelsToKeep(mine.map((c) => c.dataset.l!), L.toFixed(4));
+      for (const c of mine) {
         const k = c.dataset.k!;
         if (want.has(k)) continue;
         // old level / old version: keep while the new set is incomplete (no blank flashes)
-        if (!complete && c.dataset.l !== L.toFixed(4)) continue;
+        if (!complete && keepOld.has(c.dataset.l!)) continue;
         if (!complete && want.size && [...want.values()].some((t) => c.dataset.p === t.tx + ',' + t.ty) && c.dataset.l === L.toFixed(4)) continue;
-        c.remove();
+        dropCanvas(c);
       }
     };
     layer(baseRef.current, bKey, useTiles);
     layer(hlRef.current, hKey, s.hasHighlights, true);
     layer(annRef.current, aKey, s.hasAnnots, true);
+    // what this page holds in canvases (the preview and the tile canvases) counts against the tile memory budget
+    const all: HTMLCanvasElement[] = pv ? [pv] : [];
+    for (const el of [baseRef.current, hlRef.current, annRef.current]) if (el) all.push(...(Array.from(el.children) as HTMLCanvasElement[]));
+    tiles.noteCanvasBytes(s.tag, canvasBytes(all));
   };
 
   // ask for what's needed. While the zoom level is changing (wheel, pinch, zoom buttons held)
@@ -141,32 +166,50 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
   const settle = useRef(0);
   const ask = () => {
     const s = state.current;
-    const reqs: TileReq[] = previewReqs(s.doc.id, s.crev, s.page, s.w, s.h, s.prio - 1e6).filter((r) => !tiles.has(r.key));
+    // (the page's priority as the viewer last gave it to the tile store: props.prio is only the first)
+    const prio = tiles.baseOf(s.tag) ?? s.prio;
+    const reqs: TileReq[] = previewReqs(s.doc.id, s.crev, s.page, s.w, s.h, prio - 1e6).filter((r) => !tiles.has(r.key));
     const { L, list } = grid();
     const useTiles = L > previewScale(s.w, s.h) * 1.05;
     const wait = SETTLE_MS - (performance.now() - level.current.t);
     window.clearTimeout(settle.current);
     if (wait > 0 && useTiles && list.some((t) => !tiles.has(bKey(L, t.tx, t.ty)))) {
-      tiles.need(s.tag, reqs);
+      tiles.need(s.tag, reqs, prio);
       settle.current = window.setTimeout(ask, wait + 5);
       return;
     }
     const cx = (s.vis[0] + s.vis[2]) / 2 * L, cy = (s.vis[1] + s.vis[3]) / 2 * L;
     for (const t of list) {
       const d = Math.hypot(t.tx * TILE + t.w / 2 - cx, t.ty * TILE + t.h / 2 - cy);
-      if (useTiles) reqs.push({ key: bKey(L, t.tx, t.ty), layer: 'b', doc: s.doc.id, page: s.page, scale: L, x: t.tx * TILE, y: t.ty * TILE, w: t.w, h: t.h, prio: s.prio + d });
-      if (s.hasAnnots) reqs.push({ key: aKey(L, t.tx, t.ty), layer: 'a', doc: s.doc.id, page: s.page, scale: L, x: t.tx * TILE, y: t.ty * TILE, w: t.w, h: t.h, hide: s.hide, prio: s.prio + d + 1 });
-      if (s.hasHighlights) reqs.push({ key: hKey(L, t.tx, t.ty), layer: 'h', doc: s.doc.id, page: s.page, scale: L, x: t.tx * TILE, y: t.ty * TILE, w: t.w, h: t.h, hide: s.hide, prio: s.prio + d + 1 });
+      if (useTiles) reqs.push({ key: bKey(L, t.tx, t.ty), layer: 'b', doc: s.doc.id, page: s.page, scale: L, x: t.tx * TILE, y: t.ty * TILE, w: t.w, h: t.h, prio: prio + d });
+      if (s.hasAnnots) reqs.push({ key: aKey(L, t.tx, t.ty), layer: 'a', doc: s.doc.id, page: s.page, scale: L, x: t.tx * TILE, y: t.ty * TILE, w: t.w, h: t.h, hide: s.hide, prio: prio + d + 1 });
+      if (s.hasHighlights) reqs.push({ key: hKey(L, t.tx, t.ty), layer: 'h', doc: s.doc.id, page: s.page, scale: L, x: t.tx * TILE, y: t.ty * TILE, w: t.w, h: t.h, hide: s.hide, prio: prio + d + 1 });
     }
-    tiles.need(s.tag, reqs);
+    tiles.need(s.tag, reqs, prio);
   };
+  // (asked and painted again only when the set of tiles in view changes: a page scrolled within
+  // the same tile rows needs nothing new - that ran for every visible page on every scroll frame)
+  const lastSig = useRef('');
   useEffect(() => {
     if (S !== level.current.S) level.current = { S, t: performance.now() };
+    const g = grid();
+    const t0 = g.list[0], t1 = g.list[g.list.length - 1];
+    const sig = [g.L, g.list.length, t0?.tx, t0?.ty, t1?.tx, t1?.ty, p.crev, p.page, p.annRev, p.hasAnnots, p.hasHighlights, hideSig, p.doc.id].join('|');
+    if (sig === lastSig.current) return;
+    lastSig.current = sig;
     ask();
     paint();
-  }, [S, p.vis[0], p.vis[1], p.vis[2], p.vis[3], p.crev, p.page, p.annRev, p.hasAnnots, p.hasHighlights, hideSig, p.prio, p.doc.id]);
+  }, [S, p.vis[0], p.vis[1], p.vis[2], p.vis[3], p.crev, p.page, p.annRev, p.hasAnnots, p.hasHighlights, hideSig, p.doc.id]);
 
   useEffect(() => () => { window.clearTimeout(settle.current); tiles.forget(p.tag); }, [p.tag]);
+  // the page goes away: its canvases are emptied (their pixels are freed now, not when the garbage collector comes by)
+  useEffect(() => {
+    const layers = [baseRef.current, hlRef.current, annRef.current], pv = prevRef.current;
+    return () => {
+      for (const el of layers) if (el) for (const c of Array.from(el.children) as HTMLCanvasElement[]) dropCanvas(c);
+      if (pv) { pv.width = 0; pv.height = 0; }
+    };
+  }, []);
 
   // everything drawn thrown away (tiles.reset: the graphics memory was reset): the canvases on
   // the page are drawn again - kept until their new picture is there (marked old: no white flash
@@ -174,6 +217,7 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
   useEffect(() => tiles.onReset(() => {
     for (const el of [baseRef.current, hlRef.current, annRef.current]) if (el) for (const c of Array.from(el.children) as HTMLCanvasElement[]) c.dataset.k = 'old|' + c.dataset.k;
     prevDrawn.current = { key: '', done: new Set(), complete: false };
+    lastSig.current = '';
     ask();
     paint();
   }), []);
@@ -192,7 +236,7 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
     const d = `${p.w}x${p.h}`;
     if (d !== dims.current) {
       dims.current = d;
-      for (const el of [baseRef.current, hlRef.current, annRef.current]) if (el) el.replaceChildren();
+      for (const el of [baseRef.current, hlRef.current, annRef.current]) if (el) { for (const c of Array.from(el.children) as HTMLCanvasElement[]) dropCanvas(c); el.replaceChildren(); }
       const pv = prevRef.current;
       if (pv) { pv.width = 1; pv.height = 1; pv.style.opacity = '0'; }
       prevDrawn.current = { key: '', done: new Set(), complete: false };
@@ -204,6 +248,9 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
   const pageKey = `${p.doc.id}|r${p.crev}`;
   const [heavy, setHeavy] = useState(() => tiles.isHeavy(pageKey));
   useEffect(() => { setHeavy(tiles.isHeavy(pageKey)); return tiles.onHeavy(() => setHeavy(tiles.isHeavy(pageKey))); }, [pageKey]);
+  // (3.2) a heavy page whose line work is being merged before it is drawn
+  const [preparing, setPreparing] = useState(() => tiles.gateBusy(p.doc.id, p.page));
+  useEffect(() => { setPreparing(tiles.gateBusy(p.doc.id, p.page)); return tiles.onGate(() => setPreparing(tiles.gateBusy(p.doc.id, p.page))); }, [p.doc.id, p.page]);
   const [simplifying, setSimplifying] = useState<'' | 'busy' | string>('');
   const simplify = async () => {
     setSimplifying('busy');
@@ -213,6 +260,13 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
 
   return (
     <>
+      {preparing && !heavy && (
+        <div className="pg-heavy" onPointerDown={(e) => e.stopPropagation()}
+          style={{ left: ((p.vis[0] + p.vis[2]) / 2 / p.w) * 100 + '%', top: ((p.vis[1] + p.vis[3]) / 2 / p.h) * 100 + '%' }}>
+          <b>Preparing this drawing…</b>
+          <span>It is made of millions of separate line pieces: they are joined for drawing (your file is not changed). This takes a few seconds.</span>
+        </div>
+      )}
       {heavy && (
         <div className="pg-heavy" onPointerDown={(e) => e.stopPropagation()}
           style={{ left: ((p.vis[0] + p.vis[2]) / 2 / p.w) * 100 + '%', top: ((p.vis[1] + p.vis[3]) / 2 / p.h) * 100 + '%' }}>
@@ -223,7 +277,7 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
             : <>
               {simplifying && <span className="err">{simplifying}</span>}
               <span className="hrow">
-                <button className="btn sm primary" title="Join its millions of separate line pieces into fewer lines - the same drawing, light enough to draw (Ctrl+Z undoes it)" onClick={() => void simplify()}>Simplify and draw</button>
+                <button className="btn sm primary" title="Join its millions of separate line pieces into fewer lines - the same drawing, light enough to draw (only how it is shown: your file is not changed)" onClick={() => void simplify()}>Simplify and draw</button>
                 <button className="btn sm" onClick={() => tiles.tryHeavyAgain(pageKey)}>Try again</button>
               </span>
             </>}
@@ -235,4 +289,4 @@ export const PageTiles = memo(function PageTiles(p: PageTilesProps) {
       <div ref={annRef} className="tl an" />
     </>
   );
-});
+}, samePageTiles);

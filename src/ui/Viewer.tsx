@@ -10,6 +10,7 @@ import type { PdfDoc } from './doc';
 import type { AnnotData, AnnotSpec, Pt, Rect } from '../engine/mu';
 import { PageTiles } from './PageTiles';
 import { tiles } from './tiles';
+import { eachPage } from './eachpage';
 import { renderers, rendererFor } from './engines';
 import { TOOLS, css, type ToolId, type Style, type Gesture, type MeasureHow } from './tools';
 import { wrapText, TEXT_PAD, TYPE_PAD, AUTO_MIN } from '../engine/textwrap';
@@ -493,6 +494,13 @@ export function Viewer(props: Props) {
     return out;
   }, [vp, tops, pages, z]);
 
+  // each visible page's priority (distance from the middle of the view) goes to the tile store after
+  // the render: the pages themselves don't re-render for it (PageTiles' samePageTiles)
+  const prios = useRef<[string, number][]>([]);
+  prios.current = [];
+  const tagOf = (i: number, prio: number) => { const t = doc.id + ':' + i; prios.current.push([t, prio]); return t; };
+  useEffect(() => { for (const [t, p] of prios.current) tiles.reprio(t, p); });
+
   const pageNow = useMemo(() => curPage(), [vp, tops]);
   // what part of each page is on screen (the Pages panel shows it as a box)
   useEffect(() => {
@@ -522,11 +530,12 @@ export function Viewer(props: Props) {
   // markups + links of visible pages
   useEffect(() => {
     let live = true;
-    (async () => {
-      const add: Record<number, AnnotData[]> = {};
-      for (const i of visible) add[i] = await doc.annots(i);
-      if (live) setAnnots(add);
-    })().catch(() => {});
+    // (pages that scrolled out go at once; the others keep their markups until the new ones arrive,
+    // and each page is shown as soon as it is read - not after the last of them: scrolling on would
+    // restart the list before that and nothing would be shown)
+    const want = new Set(visible);
+    setAnnots((cur) => (Object.keys(cur).every((p) => want.has(+p)) ? cur : Object.fromEntries(Object.entries(cur).filter(([p]) => want.has(+p)))));
+    eachPage(visible, (i) => doc.annots(i), (i, l) => setAnnots((cur) => ({ ...cur, [i]: l })), () => live).catch(() => {});
     return () => { live = false; };
   }, [visible.join(','), props.rev]);
   useEffect(() => {
@@ -555,7 +564,7 @@ export function Viewer(props: Props) {
 
   // build the snap index ahead of time when a tool that snaps is picked
   useEffect(() => {
-    if (TOOLS[props.tool].snaps && props.snapOn) renderers[0].call('prepareSnap', [doc.id, pageNow]).catch(() => {});
+    if (TOOLS[props.tool].snaps && props.snapOn) void doc.ensurePage(pageNow).then(() => renderers[0].call('prepareSnap', [doc.id, pageNow])).catch(() => {});
   }, [props.tool, pageNow, doc.baseRev, props.snapOn]);
 
   // ---------------------------------------------------------------- coordinates
@@ -912,7 +921,7 @@ export function Viewer(props: Props) {
       const page = at!.page, p0 = at!.p;
       loupeTimer.current = window.setTimeout(() => {
         const x = Math.round(p0[0] * s - W / 2), y = Math.round(p0[1] * s - W / 2);
-        rendererFor(doc.id, page).call<ImageBitmap>('tile', [doc.id, page, s, x, y, W, W]).then((bmp) => {
+        doc.ensurePage(page).then(() => rendererFor(doc.id, page).call<ImageBitmap>('tile', [doc.id, page, s, x, y, W, W])).then((bmp) => {
           if (aidAt.current && aidAt.current.p === p0) { loupeSharp.current?.bmp.close(); loupeSharp.current = { key, bmp }; paintAids(); } else bmp.close();
         }).catch(() => {});
       }, 140);
@@ -2925,7 +2934,7 @@ export function Viewer(props: Props) {
                 crev={doc.crev[i] ?? 0} annRev={doc.annRev[i] ?? 0}
                 hasAnnots={!!list && list.some((a) => a.irt == null && a.type !== 'Popup' && a.type !== 'Highlight')}
                 hasHighlights={!!list && list.some((a) => a.type === 'Highlight')}
-                hide={hideFor(i)} prio={prio} tag={doc.id + ':' + i}
+                hide={hideFor(i)} prio={prio} tag={tagOf(i, prio)}
               />
               {ghostEls(i)}
               <svg className="ov" viewBox={`0 0 ${pg.w} ${pg.h}`} preserveAspectRatio="none">{overlay(i)}</svg>

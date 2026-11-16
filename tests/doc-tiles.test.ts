@@ -68,7 +68,7 @@ const stub = (c: InstanceType<typeof EngineClient>, name: string, impl: () => Re
 stub(editor, 'edit', () => mu);
 stub(batcher, 'batch', () => mu);
 renderers.forEach((r, i) => stub(r, 'draw' + i, () => draw));
-const baseDraw = (): Record<string, Fn> => ({ open: () => true, close: () => true, tile: () => fakeBmp(), memory: () => 1 });
+const baseDraw = (): Record<string, Fn> => ({ open: () => true, close: () => true, tile: () => fakeBmp(), viewTile: () => fakeBmp(), memory: () => 1 });
 
 async function opened() {
   mu = baseMu();
