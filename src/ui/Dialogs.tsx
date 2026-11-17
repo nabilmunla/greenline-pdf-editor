@@ -18,6 +18,7 @@ import { writeXlsx } from './xlsxwrite';
 import { excelCell } from './table';
 import { ocrPages, ocrLangOf, type OcrLang } from './ocr';
 import { parseRanges, toRanges, planOutputs, uniqueNames, typedNumber, pdfDate, type OutMode, type OutPlan } from './dlgutil';
+import { CountDlg, PrivacyRow } from './Count';
 import { UpdatesSection, ReportsRow, WhatsNew, notesOf, noteVersions } from './Updates';
 import { PrintDlg } from './PrintDlg';
 import { CountTagDlg } from './CountTag';
@@ -25,6 +26,7 @@ import { ExportDlg, exportArea } from './ExportDlg';
 import { AiKeysDialog } from './AiPanel';
 import type { PageMark, StampDesign, RGB, Rect } from '../engine/mu';
 import { APP_NAME } from './brand';
+import { scanPages, planSheets, doneText, noTextLine, NOTHING_FOUND } from './sheetscan';
 
 interface Props {
   dialog: Dialog;
@@ -50,7 +52,7 @@ export function Dialogs(p: Props) {
   const close = () => p.setDialog(null);
   const d = p.dialog;
   switch (d.k) {
-    case 'password': return <PasswordDlg name={baseName(d.path)} err={d.err} onOk={(pw) => void p.passwordEntered(pw)} onClose={close} />;
+    case 'password': return <PasswordDlg name={baseName(d.path)} err={d.err} onOk={(pw) => void p.passwordEntered(pw).catch(p.fail)} onClose={close} />;
     case 'calibrate': return <CalibrateDlg {...p} page={d.page} a={d.a} b={d.b} />;
     case 'scale': return <ScaleDlg {...p} page={d.page} />;
     case 'viewport': return <ViewportDlg {...p} page={d.page} rect={d.rect} />;
@@ -75,6 +77,7 @@ export function Dialogs(p: Props) {
     case 'counttag': return p.doc ? <CountTagDlg doc={p.doc} page={d.page} style={p.settings.styles?.['m-count']} close={close} toast={p.toast} fail={p.fail} setCountGroup={(g) => p.A.setCounting(g)} showTotals={() => p.A.totals()} /> : null;
     case 'print': return p.doc ? <PrintDlg doc={p.doc} page={d.page} area={d.area} pageSel={p.pageSel} settings={p.settings.print || {}} save={(s) => p.saveSettings({ print: s })} close={close} toast={p.toast} fail={p.fail} /> : null;
     case 'settings': return <SettingsDlg {...p} />;
+    case 'count': return <CountDlg close={close} fail={p.fail} />;
     case 'whatsnew': return <WhatsNewDlg {...p} back={!!d.back} />;
     case 'licences': return <LicencesDlg onClose={() => p.setDialog({ k: 'settings' })} />;
     case 'report': return <ReportDlg {...p} shot={d.shot} />;
@@ -82,6 +85,7 @@ export function Dialogs(p: Props) {
     case 'crop': return <CropDlg {...p} page={d.page} rect={d.rect} />;
     case 'table': return <TableDlg {...p} rows={d.rows} page={d.page} rect={d.rect} docId={d.docId} />;
     case 'export': return p.doc ? <ExportDlg doc={p.doc} format={d.format} settings={p.settings} saveSettings={p.saveSettings} close={close} toast={p.toast} fail={p.fail} pickArea={() => p.A.tableArea()} /> : null;
+    case 'sheets': return p.doc ? <SheetsDlg {...p} /> : null;
     case 'about': return <Modal title={APP_NAME} onClose={close} sub={`Version ${p.info?.version}`} actions={<button className="btn primary" onClick={close}>Close</button>}><p className="hint">PDF engines: PDFium (Apache-2.0) for drawing, MuPDF (AGPL-3.0) for editing, Tesseract (Apache-2.0) for OCR. Everything runs on this PC.</p></Modal>;
   }
   return null;
@@ -370,7 +374,7 @@ function ScaleDlg(p: Props & { page: number }) {
   const [found, setFound] = useState<string[]>([]);
   const [custom, setCustom] = useState('');
   const [dir, setDir] = useState<Dir>(cur?.ky ? 'x' : 'both');
-  useEffect(() => { void doc.chars(p.page).then((c) => setFound(scalesInText(c.text))); }, []);
+  useEffect(() => { void doc.chars(p.page).then((c) => setFound(scalesInText(c.text))).catch(() => {}); }, []);
   // X first, then Y: after picking across, the dialog stays for up-down
   const pick = (s: { label: string; k: number; imperial?: boolean }) => {
     applyScale(p, p.page, (c) => scaleFor(c, { k: s.k, label: s.label, imperial: s.imperial }, dir), where, dir === 'both');
@@ -503,7 +507,7 @@ function StampsDlg(p: Props & { scan0?: ScanSource }) {
           <div className="row"><label>Your stamps</label>
             <div className="sgrid">{mine.map((s) => card(s, true))}
               <div className="scard add" onClick={() => setTab('new')} {...keyClick(() => setTab('new'))}><Ico n="plus" /> Design one</div>
-              <div className="scard add" onClick={() => void fromFile()} {...keyClick(() => void fromFile())} title="A scan or a phone photo of a stamp (picture or scanned PDF): the paper is taken away, the stamp straightened and cropped"><Ico n="image" /> From a scan or photo</div>
+              <div className="scard add" onClick={() => void fromFile().catch(p.fail)} {...keyClick(() => void fromFile().catch(p.fail))} title="A scan or a phone photo of a stamp (picture or scanned PDF): the paper is taken away, the stamp straightened and cropped"><Ico n="image" /> From a scan or photo</div>
               <div className="scard add" onClick={() => void fromClipboard()} {...keyClick(() => void fromClipboard())} title="A picture you copied (a screenshot, a picture in an email)"><Ico n="copy" /> Paste a picture</div>
               {p.doc && <div className="scard add" onClick={fromPage} {...keyClick(fromPage)} title="Drag a box round a stamp on the open page (a scanned letter, a drawing)"><Ico n="stamp" /> From a page</div>}
             </div>
@@ -604,10 +608,10 @@ function CopyPagesDlg(p: Props & { items: { page: number; id: number }[] }) {
   const many = p.items.length === 1 ? 'it' : `the ${p.items.length} markups`;
   return (
     <Modal title="Copy to pages" onClose={() => p.setDialog(null)} sub={`Puts a copy of ${many} on other pages of this file.`}
-      actions={<><button className="btn" onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!count || running} onClick={() => void go()}>Copy to {count} page{count === 1 ? '' : 's'}</button></>}>
+      actions={<><button className="btn" onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!count || running} onClick={() => void go().catch(p.fail)}>Copy to {count} page{count === 1 ? '' : 's'}</button></>}>
       <div className="row"><label>Pages</label>
         <label className="check"><input type="radio" checked={which === 'all'} onChange={() => setWhich('all')} /> {from.length === 1 ? `All other pages (${n - 1})` : `All pages (${n})`}</label>
-        <label className="check"><input type="radio" checked={which === 'list'} onChange={() => setWhich('list')} /> These pages: <input className="input sm" style={{ width: 160 }} value={list} placeholder="e.g. 2-5, 9" onFocus={() => setWhich('list')} onChange={(e) => { setList(e.target.value); setWhich('list'); }} onKeyDown={(e) => { if (e.key === 'Enter' && count && !running) void go(); }} /></label>
+        <label className="check"><input type="radio" checked={which === 'list'} onChange={() => setWhich('list')} /> These pages: <input className="input sm" style={{ width: 160 }} value={list} placeholder="e.g. 2-5, 9" onFocus={() => setWhich('list')} onChange={(e) => { setList(e.target.value); setWhich('list'); }} onKeyDown={(e) => { if (e.key === 'Enter' && count && !running) void go().catch(p.fail); }} /></label>
         {which === 'list' && list.trim() && !count && <div className="hint err">{listOnly ? 'That is the page it is on - list other pages.' : `No pages of this file in that list (it has ${n}) - e.g. 2-5, 9.`}</div>}
       </div>
       <div className="row"><label>Where on the page</label>
@@ -713,7 +717,7 @@ function SignatureDlg(p: Props) {
       )}
       <div className="hrow">
         <div className="seg"><button className={mode === 'draw' ? 'on' : ''} onClick={() => setMode('draw')}>Draw</button><button className={mode === 'type' ? 'on' : ''} onClick={() => setMode('type')}>Type</button></div>
-        <button className="btn sm" onClick={() => void importImg()}><Ico n="image" size={14} /> From a picture / scan</button>
+        <button className="btn sm" onClick={() => void importImg().catch(p.fail)}><Ico n="image" size={14} /> From a picture / scan</button>
         <span className="grow" />
         {['#0b2a7a', '#000000', '#09302f'].map((c) => <button key={c} className={'sw' + (color === c ? ' on' : '')} style={{ background: c }} onClick={() => setColor(c)} />)}
         <button className="btn sm ghost" onClick={clear}>Clear</button>
@@ -754,7 +758,7 @@ function MergeDlg(p: Props & { files?: string[] }) {
     return () => window.removeEventListener('gcc-merge-add', add);
   }, []);
   useEffect(() => {
-    for (const f of files) if (counts[f] == null) void muBatch<number>('pageCountOf', fileArg(f)).then((n) => setCounts((c) => ({ ...c, [f]: n }))).catch((e) => setCounts((c) => ({ ...c, [f]: /2 GB or more/.test(String((e as Error)?.message)) ? -3 : -2 })));
+    for (const f of files) if (counts[f] == null) void muBatch<number>('pageCountOf', fileArg(f)).then((n) => setCounts((c) => ({ ...c, [f]: n }))).catch((e) => setCounts((c) => ({ ...c, [f]: /\d GB or more/.test(String((e as Error)?.message)) ? -3 : -2 })));
   }, [files]);
   // the merge runs a file at a time (the engine writes the result to disk as it goes - a big set
   // of volumes no longer runs it out of memory), with its progress here and a Stop
@@ -791,15 +795,17 @@ function MergeDlg(p: Props & { files?: string[] }) {
       setRun({ k: list.length, name: '', pages: done, phase: 'open' });
       // opened here too: a result that can't be opened is said, with the dialog (and its list)
       // still there - not dropped after the dialog closed
-      // 2 GB or more can't be opened here (the editing engine reads files through 32-bit positions):
+      // past what the editing engine opens (4 GB; 2 GB on a MuPDF it could not patch - mu.openLimit):
       // kept where the person chooses - it used to be opened, fail ("TRYLATER") and be deleted
-      if ((b.$file.size ?? 0) >= 2 ** 31) {
+      const limit = await mu<number>('openLimit').catch(() => 2 ** 31);
+      const limitGb = Math.round(limit / 2 ** 30);
+      if ((b.$file.size ?? 0) >= limit) {
         const gb = ((b.$file.size ?? 0) / 2 ** 30).toFixed(1);
         const to = await gcc.saveDialog({ title: `The merged file is ${gb} GB – too big to open here. Save it as…`, name: 'Merged.pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] });
-        if (!to) { void gcc.dropTemp([b.$file.path]); p.toast(`The merged file (${gb} GB) was not kept. ${APP_NAME} can't open files of 2 GB or more – merge fewer files at a time.`, 'info', undefined, 12000); return; }
+        if (!to) { void gcc.dropTemp([b.$file.path]); p.toast(`The merged file (${gb} GB) was not kept. ${APP_NAME} can't open files of ${limitGb} GB or more – merge fewer files at a time.`, 'info', undefined, 12000); return; }
         try { await gcc.commit(b.$file.path, to); } catch (e) { void gcc.dropTemp([b.$file.path]); throw e; }
         p.setDialog(null);
-        p.toast(`Merged ${list.length} files – ${done} pages, ${gb} GB, saved as ${baseName(to)}. It is too big to open in ${APP_NAME} (2 GB or more); other PDF programs can open it.`, 'ok', undefined, 15000);
+        p.toast(`Merged ${list.length} files – ${done} pages, ${gb} GB, saved as ${baseName(to)}. It is too big to open in ${APP_NAME} (${limitGb} GB or more); other PDF programs can open it.`, 'ok', undefined, 15000);
         return;
       }
       let d: PdfDoc;
@@ -828,7 +834,7 @@ function MergeDlg(p: Props & { files?: string[] }) {
           ? <button className="btn" onClick={() => { stop.current = true; }} disabled={run.phase !== 'file'}>Stop</button>
           : <button className="btn" onClick={close}>Cancel</button>}
         <button className="btn primary" disabled={!!run || files.length < 2 || bad.length > 0} onClick={() => void go()}>{run ? 'Merging…' : `Merge ${files.length} ${files.length === 1 ? 'file' : 'files'} (${total} pages)`}</button></>}>
-      {bad.length > 0 && <p className="err">{bad.map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is 2 GB or more – too big for ' + APP_NAME : "can't be read as a PDF"}`).join('; ')}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}
+      {bad.length > 0 && <p className="err">{bad.map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is too big for ' + APP_NAME + ' (4 GB or more)' : "can't be read as a PDF"}`).join('; ')}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}
       {run && (
         <div className="mprog">
           <div className="bar"><i style={{ width: `${Math.round(((run.phase === 'file' ? run.k : files.length) + (run.phase === 'open' ? 1 : run.phase === 'write' ? 0.5 : 0)) / (files.length + 1) * 100)}%` }} /></div>
@@ -897,9 +903,9 @@ function ExtractDlg(p: Props) {
   };
   return (
     <Modal title="Extract pages" sub="The pages chosen go into a new PDF, in the order typed." onClose={() => { if (!running) p.setDialog(null); }}
-      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || running} onClick={() => void go()}>Extract {ps.length} {ps.length === 1 ? 'page' : 'pages'}</button></>}>
+      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || running} onClick={() => void go().catch(p.fail)}>Extract {ps.length} {ps.length === 1 ? 'page' : 'pages'}</button></>}>
       <div className="row"><label>Pages (of {n})</label>
-        <input className="input" autoFocus value={range} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go(); }} placeholder="e.g. 1-3, 5, 8-10" />
+        <input className="input" autoFocus value={range} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go().catch(p.fail); }} placeholder="e.g. 1-3, 5, 8-10" />
       </div>
       <p className={'hint' + (problem ? ' err' : '')}>{problem || (ps.length === 1 ? 'Page ' + (ps[0] + 1) : `${ps.length} pages: ${toRanges(ps)}`)}</p>
       <div className="row"><label>Then</label>
@@ -918,7 +924,7 @@ function SplitDlg(p: Props) {
   const [every, setEvery] = useState('1');
   const [ranges, setRanges] = useState('1-' + Math.ceil(n / 2) + ', ' + (Math.ceil(n / 2) + 1) + '-' + n);
   const [marks, setMarks] = useState<{ title: string; page: number }[]>([]);
-  useEffect(() => { void mu<{ title: string; page: number }[]>('outline', doc.id).then((m) => setMarks(m.filter((x) => x.page >= 0))); }, []);
+  useEffect(() => { void mu<{ title: string; page: number }[]>('outline', doc.id).then((m) => setMarks(m.filter((x) => x.page >= 0))).catch(() => {}); }, []);
   const parts = useMemo((): { name: string; pages: number[] }[] => {
     const base = doc.name.replace(/\.pdf$/i, '');
     if (mode === 'every') {
@@ -948,11 +954,11 @@ function SplitDlg(p: Props) {
       }
       return k;
     });
-    if (done) { p.setDialog(null); p.toast(`Saved ${done} ${done === 1 ? 'file' : 'files'}.`, 'ok', { label: 'Show folder', run: () => void gcc.showInFolder(targets[0]) }); }
+    if (done) { p.setDialog(null); p.toast(`Saved ${done} ${done === 1 ? 'file' : 'files'}.`, 'ok', { label: 'Show folder', run: () => void gcc.showInFolder(targets[0]).catch(p.fail) }); }
   };
   return (
     <Modal title="Split" wide onClose={() => p.setDialog(null)} sub={`${doc.name} – ${n} ${n === 1 ? 'page' : 'pages'}`}
-      actions={<><button className="btn" onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!parts.length} onClick={() => void go()}>Split into {parts.length} files…</button></>}>
+      actions={<><button className="btn" onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!parts.length} onClick={() => void go().catch(p.fail)}>Split into {parts.length} files…</button></>}>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={mode === 'every' ? 'on' : ''} onClick={() => setMode('every')}>Every N pages</button>
         <button className={mode === 'ranges' ? 'on' : ''} onClick={() => setMode('ranges')}>Page ranges</button>
@@ -1009,7 +1015,7 @@ function InsertDlg(p: Props & { at: number; mode?: 'insert' | 'replace' }) {
     else setFileCount(k);
   };
   // nothing else open: straight to choosing a file, as before
-  useEffect(() => { if (!others.length) void pick(); }, []);
+  useEffect(() => { if (!others.length) void pick().catch(p.fail); }, []);
   // an empty field is all pages; otherwise exactly the pages listed, in that order
   const tps = mode === 'replace' ? parseRanges(targets, n) : [];
   // nothing typed: Insert takes every page; Replace takes as many as are replaced - the same page
@@ -1061,14 +1067,14 @@ function InsertDlg(p: Props & { at: number; mode?: 'insert' | 'replace' }) {
   const label = mode === 'insert' ? `Insert ${pages.length && !problem ? pages.length + ' ' : ''}${pages.length === 1 ? 'page' : 'pages'}` : `Replace ${tps.length && !problem ? tps.length + ' ' : ''}${tps.length === 1 ? 'page' : 'pages'}`;
   return (
     <Modal title={mode === 'insert' ? 'Insert pages' : 'Replace pages'} sub={mode === 'insert' ? 'Pages of another file – open here or on disk – go into this one.' : 'Revised sheets: pages of this file are swapped for pages of another, the rest stays as it is.'} onClose={() => !running && p.setDialog(null)}
-      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || running} onClick={() => void go()}>{label}</button></>}>
+      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || running} onClick={() => void go().catch(p.fail)}>{label}</button></>}>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={mode === 'insert' ? 'on' : ''} onClick={() => setMode('insert')}>Insert</button>
         <button className={mode === 'replace' ? 'on' : ''} onClick={() => setMode('replace')}>Replace</button>
       </div>
       {mode === 'replace' && (
         <div className="row"><label>Replace pages (of {n})</label>
-          <input className="input" autoFocus value={targets} onChange={(e) => setTargets(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go(); }} placeholder="e.g. 5 or 5-8" />
+          <input className="input" autoFocus value={targets} onChange={(e) => setTargets(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go().catch(p.fail); }} placeholder="e.g. 5 or 5-8" />
         </div>
       )}
       <div className="row"><label>{mode === 'replace' ? 'With pages from' : 'From'}</label>
@@ -1077,20 +1083,20 @@ function InsertDlg(p: Props & { at: number; mode?: 'insert' | 'replace' }) {
             <label key={d.id} className="check"><input type="radio" name="src" checked={srcId === d.id} onChange={() => { setSrcId(d.id); setFileErr(''); setRange(''); }} /> <span className="fn">{d.name}</span> <span className="faint">– open, {d.pages.length} {d.pages.length === 1 ? 'page' : 'pages'}{d.dirty ? ', with its unsaved changes' : ''}</span></label>
           ))}
           <div className="hrow">
-            {others.length > 0 && <input type="radio" name="src" checked={!srcId} onChange={() => { setSrcId(''); if (!file) void pick(); }} />}
+            {others.length > 0 && <input type="radio" name="src" checked={!srcId} onChange={() => { setSrcId(''); if (!file) void pick().catch(p.fail); }} />}
             <span className="grow fn">{file ? baseName(file) + (fileCount ? ` – ${fileCount} ${fileCount === 1 ? 'page' : 'pages'}` : '') : others.length ? 'A file on disk' : '—'}</span>
-            <button className="btn sm" onClick={() => void pick()}>Choose…</button>
+            <button className="btn sm" onClick={() => void pick().catch(p.fail)}>Choose…</button>
           </div>
         </div>
       </div>
-      {count > 0 && <div className="row"><label>Pages to take (of {count})</label><input className="input" value={range} placeholder={mode === 'replace' ? (auto.length ? `${toRanges(auto)} – or e.g. 1-3, 5` : 'e.g. 1-3, 5') : `All ${count} – or e.g. 1-3, 5`} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go(); }} /></div>}
+      {count > 0 && <div className="row"><label>Pages to take (of {count})</label><input className="input" value={range} placeholder={mode === 'replace' ? (auto.length ? `${toRanges(auto)} – or e.g. 1-3, 5` : 'e.g. 1-3, 5') : `All ${count} – or e.g. 1-3, 5`} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go().catch(p.fail); }} /></div>}
       {mode === 'insert' && (
         <div className="row"><label>Where</label>
           <div className="hrow">
             <select className="input" value={where} onChange={(e) => setWhere(e.target.value as never)}>
               <option value="after">After page</option><option value="before">Before page</option><option value="start">At the start</option><option value="end">At the end</option>
             </select>
-            {(where === 'after' || where === 'before') && <input className="input" style={{ width: 80 }} value={atText} onChange={(e) => setAtText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go(); }} />}
+            {(where === 'after' || where === 'before') && <input className="input" style={{ width: 80 }} value={atText} onChange={(e) => setAtText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go().catch(p.fail); }} />}
           </div>
         </div>
       )}
@@ -1137,14 +1143,14 @@ function LinkDlg(p: Props & { page: number; rect: Rect; edit?: { k: number; uri:
   };
   return (
     <Modal title={e ? 'Change link' : 'New link'} sub={e ? `A link on page ${p.page + 1}.` : `Clicking the box you drew on page ${p.page + 1} will go here.`} onClose={() => !busy && p.setDialog(null)}
-      actions={<>{e && <button className="btn danger" disabled={busy} onClick={() => void save(true)}>Delete link</button>}<span className="grow" /><button className="btn" disabled={busy} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || busy} onClick={() => void save()}>{e ? 'Save' : 'Make link'}</button></>}>
+      actions={<>{e && <button className="btn danger" disabled={busy} onClick={() => void save(true).catch(p.fail)}>Delete link</button>}<span className="grow" /><button className="btn" disabled={busy} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || busy} onClick={() => void save().catch(p.fail)}>{e ? 'Save' : 'Make link'}</button></>}>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={to === 'web' ? 'on' : ''} onClick={() => setTo('web')}>Web page or e-mail</button>
         <button className={to === 'page' ? 'on' : ''} onClick={() => setTo('page')}>Page in this file</button>
       </div>
       {to === 'web'
-        ? <div className="row"><label>Address</label><input className="input" autoFocus value={url} onChange={(ev) => setUrl(ev.target.value)} onKeyDown={(ev) => { if (ev.key === 'Enter') void save(); }} placeholder="https://www.example.com or name@company.com" /></div>
-        : <div className="row"><label>Page (1 to {n})</label><input className="input" autoFocus style={{ width: 120 }} value={pg} onChange={(ev) => setPg(ev.target.value)} onKeyDown={(ev) => { if (ev.key === 'Enter') void save(); }} placeholder={String(Math.min(n, p.page + 2))} /></div>}
+        ? <div className="row"><label>Address</label><input className="input" autoFocus value={url} onChange={(ev) => setUrl(ev.target.value)} onKeyDown={(ev) => { if (ev.key === 'Enter') void save().catch(p.fail); }} placeholder="https://www.example.com or name@company.com" /></div>
+        : <div className="row"><label>Page (1 to {n})</label><input className="input" autoFocus style={{ width: 120 }} value={pg} onChange={(ev) => setPg(ev.target.value)} onKeyDown={(ev) => { if (ev.key === 'Enter') void save().catch(p.fail); }} placeholder={String(Math.min(n, p.page + 2))} /></div>}
       <p className={'hint' + (problem && (url || pg) ? ' err' : '')}>{problem && (url || pg) ? problem : 'page' in target ? `Goes to page ${target.page + 1}${doc.pages[target.page]?.label && doc.pages[target.page].label !== String(target.page + 1) ? ' (' + doc.pages[target.page].label + ')' : ''}.` : 'uri' in target ? `Goes to ${target.uri}${/^https?:/.test(target.uri) ? ' – people clicking it are asked first' : ''}.` : 'People clicking a web link are always asked before it opens.'}</p>
     </Modal>
   );
@@ -1219,7 +1225,8 @@ function ToPicturesDlg(p: Props) {
     try {
       const src = await mu<FileSpecLite>('drawSnapshot', doc.id, false);
       snap = src.delta || src.path;
-      id = await muBatch<string>('batchOpen', fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), doc.password);
+      // (the layers the window shows other than the file says: this copy knows nothing of them - PLAN 7.8)
+      id = await muBatch<string>('batchOpen', fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), doc.password, await doc.layerOverlay());
       for (const [k, i] of ps.entries()) {
         if (stop.current) break;
         setProg({ text: `Page ${i + 1} (${k + 1} of ${ps.length})…`, pct: k / ps.length });
@@ -1231,8 +1238,8 @@ function ToPicturesDlg(p: Props) {
       setProg(null);
       p.setDialog(null);
       const note = smaller.length ? ` – page${smaller.length === 1 ? '' : 's'} ${smaller.slice(0, 4).join(', ')}${smaller.length > 4 ? '…' : ''} made smaller (too big at ${dpi} dpi)` : '';
-      if (done === 1) p.toast(`Saved ${baseName(targets[0])}${note}`, 'ok', { label: 'Open', run: () => void gcc.openExternal(targets[0]) }, 9000);
-      else p.toast(`Saved ${done} picture${done === 1 ? '' : 's'}${stop.current ? ` (stopped – ${ps.length - done} not made)` : ''} in ${baseName(folder) || folder}${note}`, 'ok', { label: 'Show', run: () => void gcc.showInFolder(targets[0]) }, 9000);
+      if (done === 1) p.toast(`Saved ${baseName(targets[0])}${note}`, 'ok', { label: 'Open', run: () => void gcc.openExternal(targets[0]).catch(p.fail) }, 9000);
+      else p.toast(`Saved ${done} picture${done === 1 ? '' : 's'}${stop.current ? ` (stopped – ${ps.length - done} not made)` : ''} in ${baseName(folder) || folder}${note}`, 'ok', { label: 'Show', run: () => void gcc.showInFolder(targets[0]).catch(p.fail) }, 9000);
     } catch (e) {
       setProg(null);
       p.fail(e);
@@ -1243,13 +1250,13 @@ function ToPicturesDlg(p: Props) {
   };
   return (
     <Modal title="Save pages as pictures" sub="Each page as a PNG or JPG file, markups as shown." onClose={() => { if (!prog) p.setDialog(null); }}
-      actions={<><button className="btn" onClick={() => { if (prog) stop.current = true; else p.setDialog(null); }}>{prog ? 'Stop' : 'Cancel'}</button><button className="btn primary" disabled={!!problem || !!prog} onClick={() => void go()}>Save {ps.length} {ps.length === 1 ? 'picture' : 'pictures'}…</button></>}>
+      actions={<><button className="btn" onClick={() => { if (prog) stop.current = true; else p.setDialog(null); }}>{prog ? 'Stop' : 'Cancel'}</button><button className="btn primary" disabled={!!problem || !!prog} onClick={() => void go().catch(p.fail)}>Save {ps.length} {ps.length === 1 ? 'picture' : 'pictures'}…</button></>}>
       {prog ? (
         <div className="xprog"><div className="prog"><span className="dot busy" /> {prog.text}</div><div className="bar"><i style={{ width: Math.round(prog.pct * 100) + '%' }} /></div></div>
       ) : (
         <>
           <div className="row"><label>Pages (of {n})</label>
-            <div className="hrow"><input className="input" autoFocus value={range} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go(); }} placeholder="e.g. 1-3, 5" /><button className="btn sm ghost" onClick={() => setRange('1-' + n)}>All {n}</button></div>
+            <div className="hrow"><input className="input" autoFocus value={range} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go().catch(p.fail); }} placeholder="e.g. 1-3, 5" /><button className="btn sm ghost" onClick={() => setRange('1-' + n)}>All {n}</button></div>
           </div>
           <div className="row"><label>Format</label>
             <div className="seg"><button className={format === 'png' ? 'on' : ''} onClick={() => setFormat('png')} title="Sharp lines and text – drawings, tables">PNG – sharp</button><button className={format === 'jpg' ? 'on' : ''} onClick={() => setFormat('jpg')} title="Smaller files – photos, scans">JPG – smaller</button></div>
@@ -1276,7 +1283,7 @@ function FromPicturesDlg(p: Props & { files: string[] }) {
   const [margin, setMargin] = useState(kept.margin ?? false);
   const [running, setRunning] = useState(false);
   useDropFiles((f) => { if (running) { p.toast('Not added – wait until the PDF is made.', 'info'); return; } setFiles((x) => [...x, ...f.filter((y) => !x.includes(y))]); }, PICTURE_RE, (t) => p.toast(t, 'info', undefined, 7000));
-  useEffect(() => { if (!p.files.length) void pickPictures().then((f) => setFiles((x) => [...x, ...f.filter((y) => !x.includes(y))])); }, []);
+  useEffect(() => { if (!p.files.length) void pickPictures().then((f) => setFiles((x) => [...x, ...f.filter((y) => !x.includes(y))])).catch(p.fail); }, []);
   const go = async () => {
     if (!files.length || running) return;
     try { localStorage.setItem('from-pictures', JSON.stringify({ size, margin })); } catch { /* fine */ }
@@ -1365,7 +1372,7 @@ function CompressDlg(p: Props & { files?: string[] }) {
   };
   return (
     <Modal title="Reduce file size" wide onClose={() => !running && p.setDialog(null)} sub="Pictures and scans are made lighter; line work and text stay exactly as they are. Unused data is cleaned out."
-      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={running || !files.length || !!plan.problem} onClick={() => void go()}>{running ? 'Working…' : `Reduce ${files.length} file${files.length === 1 ? '' : 's'}`}</button></>}>
+      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={running || !files.length || !!plan.problem} onClick={() => void go().catch(p.fail)}>{running ? 'Working…' : `Reduce ${files.length} file${files.length === 1 ? '' : 's'}`}</button></>}>
       <div className="row"><label>How much</label><div className="seg full">{(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((k) => <button key={k} className={preset === k ? 'on' : ''} disabled={running} onClick={() => setPreset(k)}>{PRESETS[k].label}</button>)}</div></div>
       <FileList files={files} setFiles={setFiles} locked={running} extra={(f) => <span className="faint res">{res[f] || ''}</span>} />
       <OutputChoice mode={mode} setMode={setMode} suffix={suffix} setSuffix={setSuffix} folder={folder} setFolder={setFolder} allowReplace locked={running} problem={files.length ? plan.problem : null} />
@@ -1485,7 +1492,7 @@ function MarksDlg(p: Props & { batch: boolean }) {
   return (
     <Modal title={onDoc ? 'Page numbers, headers & watermark' : 'Stamp & number files'} wide="xl" onClose={() => !running && p.setDialog(null)}
       sub="Fields: {page} {pages} {date} {file} {bates}. Marks become part of the page."
-      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={running || (!onDoc && (!files.length || !!plan.problem))} onClick={() => void go()}>{onDoc ? 'Apply to this file' : running ? 'Working…' : `Apply to ${files.length} ${files.length === 1 ? 'file' : 'files'}`}</button></>}>
+      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={running || (!onDoc && (!files.length || !!plan.problem))} onClick={() => void go().catch(p.fail)}>{onDoc ? 'Apply to this file' : running ? 'Working…' : `Apply to ${files.length} ${files.length === 1 ? 'file' : 'files'}`}</button></>}>
       <div className="marks">
         <div className="mcol">
           <div className="mbox"><b>Header</b><div className="hrow">{[0, 1, 2].map((i) => <input key={i} className="input sm" placeholder={['Left', 'Centre', 'Right'][i]} value={f.header[i]} onChange={(e) => { const h = f.header.slice() as MarkForm['header']; h[i] = e.target.value; up({ header: h }); }} />)}</div></div>
@@ -1552,7 +1559,7 @@ function ProtectDlg(p: Props) {
   };
   return (
     <Modal title="Protect with a password" onClose={() => p.setDialog(null)} sub="AES-256. Saved as a new file; this one stays as it is."
-      actions={<><button className="btn" onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={(!user && !owner) || comma} onClick={() => void go()}>Save protected copy…</button></>}>
+      actions={<><button className="btn" onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={(!user && !owner) || comma} onClick={() => void go().catch(p.fail)}>Save protected copy…</button></>}>
       <div className="row"><label>Password to open (leave empty: anyone can open, only the limits below apply)</label><input className="input" type="password" value={user} onChange={(e) => setUser(e.target.value)} /></div>
       <div className="row"><label>Password to change the limits</label><input className="input" type="password" value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="(same as above)" /></div>
       {comma && <p className="hint err">A password can't contain a comma (,).</p>}
@@ -1708,7 +1715,7 @@ function BatchOcrDlg(p: Props) {
   };
   return (
     <Modal title="Make files searchable (OCR)" wide onClose={() => { stop.current = true; if (!running) p.setDialog(null); }} sub="Scanned pages get invisible text; pages that already have text are left alone."
-      actions={<><button className="btn" onClick={() => { stop.current = true; if (!running) p.setDialog(null); }}>{running ? 'Stop' : 'Close'}</button><button className="btn primary" disabled={running || !files.length || !!plan.problem} onClick={() => void go()}>{running ? 'Working…' : 'Start'}</button></>}>
+      actions={<><button className="btn" onClick={() => { stop.current = true; if (!running) p.setDialog(null); }}>{running ? 'Stop' : 'Close'}</button><button className="btn primary" disabled={running || !files.length || !!plan.problem} onClick={() => void go().catch(p.fail)}>{running ? 'Working…' : 'Start'}</button></>}>
       <div className="row"><label>Language</label><select className="input" disabled={running} value={lang} onChange={(e) => setLang(e.target.value as OcrLang)}><option value="eng+ara">English + Arabic</option><option value="eng">English</option><option value="ara">Arabic</option></select></div>
       <FileList files={files} setFiles={setFiles} locked={running} extra={(x) => <span className="faint res">{res[x] || ''}</span>} />
       <OutputChoice mode={mode} setMode={setMode} suffix={suffix} setSuffix={setSuffix} folder={folder} setFolder={setFolder} allowReplace locked={running} problem={files.length ? plan.problem : null} />
@@ -1744,7 +1751,7 @@ function BatchFlattenDlg(p: Props) {
   };
   return (
     <Modal title="Flatten files" wide onClose={() => !running && p.setDialog(null)} sub="All markups and form fields are burnt into the pages."
-      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={running || !files.length || !!plan.problem} onClick={() => void go()}>Flatten {files.length} files</button></>}>
+      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={running || !files.length || !!plan.problem} onClick={() => void go().catch(p.fail)}>Flatten {files.length} files</button></>}>
       <FileList files={files} setFiles={setFiles} locked={running} extra={(x) => <span className="faint res">{res[x] || ''}</span>} />
       <OutputChoice mode={mode} setMode={setMode} suffix={suffix} setSuffix={setSuffix} folder={folder} setFolder={setFolder} allowReplace locked={running} problem={files.length ? plan.problem : null} />
     </Modal>
@@ -1895,10 +1902,11 @@ function SettingsDlg(p: Props) {
         </>}
       </div>
       <div className="row"><label>Safety</label><p className="hint">Every save writes a new file first and swaps it in, and keeps the previous version in the backups folder (last 40). Unsaved work is copied every 45 s and offered back after a crash.</p>
-        <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => void gcc.openExternal(joinPath(p.info?.localDir || p.info?.dataDir || '', 'backups'))}>Open backups folder</button>
+        <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => void gcc.openExternal(joinPath(p.info?.localDir || p.info?.dataDir || '', 'backups')).catch(p.fail)}>Open backups folder</button>
       </div>
       <UpdatesSection toast={p.toast} />
       <ReportsRow onReport={() => void p.A.report()} onWhatsNew={() => away({ k: 'whatsnew', back: true })} />
+      <PrivacyRow fail={p.fail} />
       <div className="row"><label>About</label>
         <p className="hint">{APP_NAME} {p.info?.version}. Built on open-source parts: Electron, PDFium, MuPDF, Tesseract, Mozilla's translation engine and others.</p>
         <button className="btn sm" style={{ alignSelf: 'flex-start' }} onClick={() => away({ k: 'licences' })}>Licences</button>
@@ -1926,9 +1934,9 @@ function ReportDlg(p: Props & { shot: string | null }) {
       if (st.state === 'sent' && st.anon) p.toast('Sent anonymously - thank you.', 'ok', undefined, 6000);
       else if (st.anon) p.toast('Saved on this PC - it is sent anonymously once the internet can be reached.', 'info', undefined, 9000);
       else if (st.state === 'sent') p.toast('Thanks - your report is in the reports folder.', 'ok', undefined, 6000);
-      else if (st.state === 'nofolder') p.toast('Saved on this PC. Set an updates folder (Settings) to send reports.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue() }, 9000);
-      else if (st.state === 'web' && st.issue) { void gcc.openLink(st.issue); p.toast('Saved on this PC. Your browser opens a new issue on GitHub with your text - press Submit there (needs a free GitHub account). Attach the screenshot from the saved report if it helps.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue() }, 12000); }
-      else if (st.state === 'web') p.toast('Saved on this PC.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue() }, 9000);
+      else if (st.state === 'nofolder') p.toast('Saved on this PC. Set an updates folder (Settings) to send reports.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue().catch(p.fail) }, 9000);
+      else if (st.state === 'web' && st.issue) { void gcc.openLink(st.issue).catch(p.fail); p.toast('Saved on this PC. Your browser opens a new issue on GitHub with your text - press Submit there (needs a free GitHub account). Attach the screenshot from the saved report if it helps.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue().catch(p.fail) }, 12000); }
+      else if (st.state === 'web') p.toast('Saved on this PC.', 'info', { label: 'Show', run: () => void gcc.reportOpenQueue().catch(p.fail) }, 9000);
       else p.toast('Saved on this PC. It goes to the reports folder next time the server can be reached.', 'info', undefined, 9000);
     } catch (e) { p.fail(e); setSending(false); }
   };
@@ -2003,22 +2011,94 @@ function TableDlg(p: Props & { rows: string[][]; page: number; rect: Rect; docId
     try {
       const r = await exportArea(doc, p.page, p.rect, t, p.settings.ocrLang || 'eng+ara', setSaving);
       p.setDialog(null);
-      p.toast(`Saved ${baseName(t)}${r.scan ? ' – read with OCR: check the figures' : ''}`, 'ok', { label: 'Open', run: () => void gcc.openExternal(t!) }, 10000);
+      p.toast(`Saved ${baseName(t)}${r.scan ? ' – read with OCR: check the figures' : ''}`, 'ok', { label: 'Open', run: () => void gcc.openExternal(t!).catch(p.fail) }, 10000);
     } catch (e) {
       // (the engine could not: the table as shown here, as plain cells)
       try {
         await gcc.write(t, writeXlsx([{ name: 'Table', rows: p.rows.map((r) => r.map(excelCell)) }]), { noBackup: true });
         p.setDialog(null);
-        p.toast(`Saved ${baseName(t)} as shown (the full reading failed: ${String((e as Error)?.message || e)})`, 'info', { label: 'Open', run: () => void gcc.openExternal(t!) }, 10000);
+        p.toast(`Saved ${baseName(t)} as shown (the full reading failed: ${String((e as Error)?.message || e)})`, 'info', { label: 'Open', run: () => void gcc.openExternal(t!).catch(p.fail) }, 10000);
       } catch (e2) { setSaving(''); p.fail(e2); }
     }
   };
   return (
     <Modal title={`Table from page ${p.page + 1}`} wide="xl" sub={`Copied: ${p.rows.length} rows × ${p.rows[0]?.length || 0} columns – paste into Excel. Save as Excel reads just this area like Export to Excel does: ruled columns, numbers as numbers, merged headings. Drag another box for the next table.`} onClose={() => !saving && p.setDialog(null)}
-      actions={<>{saving && <span className="hint grow">{saving}</span>}<button className="btn" disabled={!!saving} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={!!saving || !doc} onClick={() => void save()}><Ico n="excel" size={15} /> {saving ? 'Saving…' : 'Save as Excel…'}</button></>}>
+      actions={<>{saving && <span className="hint grow">{saving}</span>}<button className="btn" disabled={!!saving} onClick={() => p.setDialog(null)}>Close</button><button className="btn primary" disabled={!!saving || !doc} onClick={() => void save().catch(p.fail)}><Ico n="excel" size={15} /> {saving ? 'Saving…' : 'Save as Excel…'}</button></>}>
       <div className="tprev"><table><tbody>{p.rows.slice(0, 200).map((r, i) => <tr key={i}>{r.map((c, k) => <td key={k}>{c}</td>)}</tr>)}</tbody></table></div>
     </Modal>
   );
 }
 
 export { fmtLen, PT_M };
+
+// ---------------------------------------------------------------- link the sheets
+
+/** Link the sheets (PLAN 7.6): the text of every page is read (the drawing engines, page after page,
+ *  nothing kept but the few words that can be sheet numbers), then the links and the Sheets group
+ *  are written in one step. Stopped, or a page that can't be read: nothing is written. */
+function SheetsDlg(p: Props) {
+  const doc = p.doc!;
+  const [links, setLinks] = useState(true);
+  const [marks, setMarks] = useState(true);
+  const [run, setRun] = useState<{ done: number; total: number; writing?: boolean } | null>(null);
+  const stop = useRef(false);
+  const going = useRef(false);
+  // (the dialog gone - another tab, the file closed - ends the reading)
+  useEffect(() => () => { stop.current = true; }, []);
+  const go = async () => {
+    if (going.current) return;
+    going.current = true;
+    stop.current = false;
+    const total = doc.pages.length;
+    let last = 0;
+    setRun({ done: 0, total });
+    try {
+      const scan = await scanPages(doc, (done, t) => { const now = performance.now(); if (done === t || now - last > 80) { last = now; setRun({ done, total: t }); } }, () => stop.current);
+      if (scan.failed) { p.setDialog(null); p.toast(`Page ${scan.failed.page + 1} could not be read, so nothing was changed.`, 'err', undefined, 9000); return; }
+      if (scan.stopped || stop.current) { p.setDialog(null); p.toast('Stopped. Nothing was changed.', 'info'); return; }
+      const plan = planSheets(scan.pages);
+      // (for the tests: what was read and found)
+      (window as unknown as { __gccSheets?: unknown }).__gccSheets = { read: scan.pages.filter(Boolean).length, withText: scan.pages.filter((x) => x && x.text).length, sizes: [...new Set(scan.pages.filter(Boolean).map((x) => `${Math.round(x.w)}x${Math.round(x.h)}`))], marks: plan.marks.map((m) => m.page) };
+      const nt = noTextLine(plan.noText);
+      if (!plan.sheets) { p.setDialog(null); p.toast([NOTHING_FOUND, nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
+      const want = links ? plan.links : [];
+      if (!want.length && !marks) { p.setDialog(null); p.toast(['No references between sheets found. Nothing was changed.', nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
+      setRun({ done: total, total, writing: true });
+      const r = await doc.linkSheets(links ? want : null, marks ? plan.marks : null);
+      p.setDialog(null);
+      if (!r.pages) { p.toast(['Nothing to link.', nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
+      const onPages = new Set(want.map((l) => l.page));
+      const sheetsWithLinks = r.touched.filter((x) => onPages.has(x)).length;
+      p.toast(doneText({ links: r.links, sheetsWithLinks, bookmarks: r.bookmarks, wantLinks: links, wantMarks: marks }, plan.noText), 'ok', {
+        label: 'Undo',
+        run: () => { if (doc.canUndo && doc.undoName === 'Link the sheets') void doc.undo().catch(p.fail); else p.toast('Other changes were made since. Ctrl+Z steps back through them.', 'info'); },
+      }, 15000);
+    } catch (e) {
+      p.setDialog(null);
+      p.fail(e);
+    } finally {
+      going.current = false;
+      setRun(null);
+    }
+  };
+  // (Escape or a click beside it while reading stops the reading; the dialog goes when it has)
+  const close = () => { if (run) { stop.current = true; return; } p.setDialog(null); };
+  return (
+    <Modal title="Link the sheets" onClose={close} sub="For a drawing set. Finds each sheet's number, then links every place that names another sheet. Ctrl+Z takes it all out again."
+      actions={<>
+        {run ? <button className="btn" disabled={!!run.writing} onClick={() => { stop.current = true; }}>Cancel</button> : <button className="btn" onClick={close}>Cancel</button>}
+        <button className="btn primary" autoFocus disabled={!!run || (!links && !marks)} onClick={() => void go()}>{run ? 'Working…' : 'Start'}</button>
+      </>}>
+      <div className="row">
+        <label className="check"><input type="checkbox" checked={links} disabled={!!run} onChange={(e) => setLinks(e.target.checked)} /> Links between sheets</label>
+        <label className="check"><input type="checkbox" checked={marks} disabled={!!run} onChange={(e) => setMarks(e.target.checked)} /> Sheets bookmark group</label>
+      </div>
+      {run && (
+        <div className="mprog">
+          <div className="bar"><i style={{ width: `${Math.round((run.done / Math.max(1, run.total)) * 100)}%` }} /></div>
+          <div className="faint" role="status" data-sheets-progress>{run.writing ? 'Writing the links…' : `Reading page ${Math.min(run.total, run.done + 1).toLocaleString('en-GB')} of ${run.total.toLocaleString('en-GB')}…`}</div>
+        </div>
+      )}
+    </Modal>
+  );
+}

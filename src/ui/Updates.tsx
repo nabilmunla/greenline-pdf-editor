@@ -76,7 +76,7 @@ export function useUpdates() {
   const [u, setU] = useState<UpdateState | null>(null);
   useEffect(() => {
     let live = true;
-    void gcc.updateGet().then((s) => { if (live) setU(s); });
+    void gcc.updateGet().then((s) => { if (live) setU(s); }).catch(() => {});
     const off = gcc.onUpdate((s) => setU(s));
     return () => { live = false; off(); };
   }, []);
@@ -116,7 +116,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
           <NotesToggle groups={u.groups || (u.notes?.length ? { '': u.notes } : null)} />
           <div className="up-btns">
             <button className="btn sm" onClick={() => void gcc.updateLater()}>Later</button>
-            <button className="btn sm primary" onClick={() => void gcc.updateDownload()}>Update ({mb(u.size)})</button>
+            <button className="btn sm primary" onClick={() => void gcc.updateDownload().catch(() => {})}>Update ({mb(u.size)})</button>
           </div>
         </>
       )}
@@ -126,7 +126,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
           {/* (a progress bar a screen reader knows; the number is not read out each time it moves -
               the card is a live region, and it changed several times a second) */}
           <div className="up-bar" role="progressbar" aria-label={`Getting ${u.available}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round((u.pct || 0) * 100)}><i style={{ width: Math.round((u.pct || 0) * 100) + '%' }} /></div>
-          <div className="up-btns"><span className="up-sub grow" aria-hidden="true">{Math.round((u.pct || 0) * 100)}% of {mb(u.size)}</span><button className="btn sm" onClick={() => void gcc.updateCancel()}>Cancel</button></div>
+          <div className="up-btns"><span className="up-sub grow" aria-hidden="true">{Math.round((u.pct || 0) * 100)}% of {mb(u.size)}</span><button className="btn sm" onClick={() => void gcc.updateCancel().catch(() => {})}>Cancel</button></div>
         </>
       )}
       {u.state === 'ready' && (
@@ -181,7 +181,7 @@ export function UpdateCard({ u, updated, onDone }: { u: UpdateState | null; upda
           <p className="up-sub">{u.err} Your current version is unchanged.</p>
           <div className="up-btns">
             <button className="btn sm" onClick={() => void gcc.updateLater()}>Later</button>
-            <button className="btn sm primary" onClick={() => void gcc.updateDownload()}>Try again</button>
+            <button className="btn sm primary" onClick={() => void gcc.updateDownload().catch(() => {})}>Try again</button>
           </div>
         </>
       )}
@@ -195,8 +195,8 @@ const fromWhere = (u: UpdateState) => (!u.setupPath ? '' : u.web ? ' from its do
 function SetupBtn({ u }: { u: UpdateState }) {
   if (!u.setupPath) return null;
   return u.web
-    ? <button className="btn sm primary" onClick={() => void gcc.openLink(u.setupPath!)}>Open the download page</button>
-    : <button className="btn sm primary" onClick={() => void gcc.showInFolder(u.setupPath!)}>Show the setup</button>;
+    ? <button className="btn sm primary" onClick={() => void gcc.openLink(u.setupPath!).catch(() => {})}>Open the download page</button>
+    : <button className="btn sm primary" onClick={() => void gcc.showInFolder(u.setupPath!).catch(() => {})}>Show the setup</button>;
 }
 const setupName = (u: UpdateState) => (u.linux && u.pkgFile ? u.pkgFile : u.setupPath && /\.exe$/i.test(u.setupPath) ? u.setupPath.split(/[\\/]/).pop() : `${APP_NAME} Setup ${u.available}.exe`);
 
@@ -235,6 +235,17 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
     const d = await gcc.dirDialog({ title: 'Folder where new versions are published', dir: src || undefined });
     if (d) { setSrc(d); await commit(d); }
   };
+  // "Restore default": shown while the field (as typed) differs from the build's default. The setting is
+  // dropped first (a company setup's own folder is then simply what applies); anything else is written.
+  const restore = async () => {
+    let s = await gcc.updateSource(null);
+    if (s.source !== (u.defaultFor || '')) s = await gcc.updateSource(u.defaultFor || '');
+    setSrc(s.source);
+    await gcc.updateCheck();
+  };
+  const hasDefault = u.defaultSet ?? !!u.defaultFor;
+  const showRestore = hasDefault && (src ?? '').trim() !== (u.defaultFor || '');
+  const noDefault = !hasDefault && !(src ?? '').trim();
   const where = u.scope === 'machine' ? 'for everyone on this PC' : 'for you';
   return (
     <div className="row"><label>Updates</label>
@@ -243,17 +254,17 @@ export function UpdatesSection({ toast }: { toast(t: string, k?: 'ok' | 'err' | 
           <p className="hint">Version {u.version}, installed {where} in {u.dir}</p>
           <div className="hrow">
             <input className="input" value={src ?? ''} placeholder="No automatic updates" spellCheck={false}
-              onChange={(e) => setSrc(e.target.value)} onBlur={(e) => void commit(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') void commit((e.target as HTMLInputElement).value); }} />
-            <button className="btn sm" onClick={() => void browse()}>Browse…</button>
+              onChange={(e) => setSrc(e.target.value)} onBlur={(e) => void commit(e.target.value).catch((er) => toast(String((er as Error)?.message || er), 'err'))}
+              onKeyDown={(e) => { if (e.key === 'Enter') void commit((e.target as HTMLInputElement).value).catch((er) => toast(String((er as Error)?.message || er), 'err')); }} />
+            <button className="btn sm" onClick={() => void browse().catch((er) => toast(String((er as Error)?.message || er), 'err'))}>Browse…</button>
+            {showRestore && <button className="btn sm" title={u.defaultFor ? 'Put back ' + u.defaultFor : 'Back to no automatic updates, as chosen at setup'} onClick={() => void restore().catch((er) => toast(String((er as Error)?.message || er), 'err'))}>Restore default</button>}
           </div>
+          {noDefault && <p className="hint">Ask whoever installed the app for the updates folder, or choose it with Browse.</p>}
           <p className="hint">{u.web ? 'The web address new versions are published at.' : 'The shared folder where new versions are published.'} {APP_NAME} asks before downloading anything.
-            {u.ownSource && u.setupSource && u.setupSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(null); setSrc(s.source); }}>Use the installer's folder</button></>}
-            {u.defaultSource && u.defaultSource !== u.source && <> <button className="link" onClick={async () => { const s = await gcc.updateSource(u.defaultSource!); setSrc(s.source); }}>Use the download page (default)</button></>}
           </p>
           <div className="hrow">
             <button className="btn sm" disabled={!u.source || u.state === 'checking' || u.state === 'downloading'} onClick={async () => { await commit(src ?? ''); await gcc.updateCheck(); }}>Check now</button>
-            {u.state === 'available' && <button className="btn sm primary" onClick={() => void gcc.updateDownload()}>Update ({mb(u.size)})</button>}
+            {u.state === 'available' && <button className="btn sm primary" onClick={() => void gcc.updateDownload().catch(() => {})}>Update ({mb(u.size)})</button>}
             {(u.state === 'ready' || u.state === 'blocked') && !u.pendingAtExit && <RestartBtn now primary label={u.state === 'blocked' ? 'Try again' : u.linux === 'deb' ? 'Close and install' : 'Restart now'} />}
             {u.state === 'setup' && <SetupBtn u={u} />}
             <span className="hint up-status">{statusLine(u)}</span>
@@ -303,7 +314,7 @@ export function ReportsRow({ onReport, onWhatsNew }: { onReport(): void; onWhats
             ? `${st.waiting} report${st.waiting === 1 ? '' : 's'} waiting on this PC${st.state === 'failed' ? (st.anon ? ' - sent once the internet can be reached' : " - the reports folder can't be reached right now") : st.state === 'nofolder' ? ' - no updates folder set' : ''}.`
             : st.anon ? 'Report a problem sends your words to the developer, anonymously.' : st.folder ? 'Reports go to ' + st.folder + '.' : st.state === 'web' ? 'Reports stay on this PC; Report a problem opens an issue on GitHub.' : 'No updates folder: reports stay on this PC.'}
         </span>
-        {st && st.waiting > 0 && <button className="btn sm" onClick={() => void gcc.reportOpenQueue()}>Show them</button>}
+        {st && st.waiting > 0 && <button className="btn sm" onClick={() => void gcc.reportOpenQueue().catch(() => {})}>Show them</button>}
       </div>
       {st?.anon ? <AnonReports st={st} set={setSt} /> : <p className="hint">{st?.state === 'web' ? 'Crash reports are kept on this PC only (nothing is sent by itself).' : 'Crashes are reported by themselves (once per kind a day), the same way.'}</p>}
     </div>

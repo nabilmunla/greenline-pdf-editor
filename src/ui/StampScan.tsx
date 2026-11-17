@@ -172,7 +172,7 @@ export function StampScanDlg({ src, onBack, onSave, toast }: { src: ScanSource; 
         } while (again.current && cl.current);
       } finally { running.current = false; }
     };
-    const t = setTimeout(() => void run(), 40);
+    const t = setTimeout(() => void run().catch((e) => setErr(String((e as Error).message || e))), 40);
     return () => clearTimeout(t);
   }, [info, crop, colour, ink, strength, removeOther, straighten, turn]);
 
@@ -243,7 +243,7 @@ export function StampScanDlg({ src, onBack, onSave, toast }: { src: ScanSource; 
         <div className="sscan-col">
           <div className="plab">Picture{picking ? ' – click the stamp’s ink' : ''}</div>
           <SourceView src={src} info={info} crop={crop} setCrop={setCrop} picking={picking} boxH={boxH}
-            onPick={(x, y) => { setPicking(false); void cl.current?.pick(x, y).then((c) => { setInk(c); setColour('ink'); }); }} />
+            onPick={(x, y) => { setPicking(false); void cl.current?.pick(x, y).then((c) => { setInk(c); setColour('ink'); }).catch((e) => setErr(String((e as Error).message || e))); }} />
           {info && <div className="hrow">
             <button className="btn sm" onClick={() => setCrop(info.crop)} title="The stamp as found">Crop: found</button>
             <button className="btn sm" onClick={() => setCrop([0, 0, info.W, info.H])}>Whole picture</button>

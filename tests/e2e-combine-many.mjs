@@ -15,7 +15,7 @@ const MODE = process.env.MODE || 'exe';
 const TMP = resolve('tests/tmp-combine-many');
 rmSync(TMP, { recursive: true, force: true });
 mkdirSync(TMP, { recursive: true });
-const names = Array.from({ length: N }, (_, i) => `P04-24-ARC-DWG-${String(1001 + i)} Rev C.pdf`);
+const names = Array.from({ length: N }, (_, i) => `PRJ-12-ARC-DWG-${String(1001 + i)} Rev C.pdf`);
 for (const n of names) copyFileSync('tests/data/heavy-a0.pdf', join(TMP, n));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ELECTRON = resolve('node_modules/electron/dist/electron');

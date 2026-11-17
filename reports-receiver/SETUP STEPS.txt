@@ -37,3 +37,45 @@ In your normal browser, signed in at https://dash.cloudflare.com
 7. Check it (optional)
    Open that address in your browser: it asks for a user name and password -
    any user name, your ADMIN_KEY password - and shows "Reports - None yet".
+
+
+Adding the user counter (the update that came with version 0.12)
+=================================================================
+
+The counter is a new part of the same worker. It needs NO new setup: no new store, no new password,
+no new setting. The only step is to paste the new worker.js:
+
+   On the greenline-reports worker: Edit code
+   Open worker.js (next to this file) in Notepad, Ctrl+A, Ctrl+C
+   In Cloudflare's editor: click into the code, Ctrl+A, Ctrl+V (replaces the old code)
+   Deploy
+
+That is all. Reports keep working as before.
+
+To see the numbers: open the worker's address, sign in as usual, and click "User counts" at the top
+(or add /counts to the address). It shows today so far and one row per day: how many installs were
+seen that day, in the last 7 days, and in the last 30 days, split by version and by system.
+It counts installs, not people: two PCs are two. Nothing else is kept - no names, no addresses.
+
+
+One receiver for two apps (the update that came with Rev Radar)
+================================================================
+
+The same worker now takes reports and counts from two apps: the PDF Editor and Rev Radar. Each app
+says who it is in every message, and the worker keeps their data apart. Again NO new setup: no new
+store, no new password, no new setting. The only step is to paste the new worker.js, exactly as above:
+
+   On the greenline-reports worker: Edit code
+   Open worker.js (next to this file) in Notepad, Ctrl+A, Ctrl+C
+   In Cloudflare's editor: click into the code, Ctrl+A, Ctrl+V (replaces the old code)
+   Deploy
+
+What changes on the pages:
+ - The reports list has an "App" column, and "Show: All / PDF Editor / Rev Radar" at the top
+   (or add ?app=rev-radar or ?app=pdf-editor to the address). Reports and counts from before this
+   update count as the PDF Editor's.
+ - "User counts" shows one table per app (today so far and one row per day) and a last table with
+   both apps added together. Adding ?format=json to /counts gives the same numbers.
+ - Anything that is not one of these two apps is turned away.
+The free plan's limits are unchanged: still one stored write per install per day, and one daily
+total row for both apps together.

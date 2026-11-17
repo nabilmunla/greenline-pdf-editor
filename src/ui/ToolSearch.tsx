@@ -40,6 +40,8 @@ const ALSO: Record<string, string> = {
   'save as pictures': 'save pages as png jpg jpeg images export picture',
   'new from pictures': 'images to pdf jpg png tiff photos scans create pdf from pictures',
   'link': 'hyperlink url web address link to page website email',
+  'layers': 'cad layers optional content ocg show hide turn off on levels drawing layer panel',
+  'link the sheets': 'drawing set sheet numbers hyperlinks cross references bookmarks sheet index links between drawings',
   'protect': 'password encrypt lock security permissions',
   'remove': 'unlock decrypt remove password',
   'remove hidden info': 'metadata sanitize sanitise clean author privacy',

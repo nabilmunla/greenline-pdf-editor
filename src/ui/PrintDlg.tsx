@@ -89,7 +89,7 @@ export function PrintDlg(p: Props) {
     void Promise.all([gcc.printers(), gcc.sessionPrinter().catch(() => '')]).then(([l, last]) => {
       setPrinters(l);
       setPrinter((cur) => (cur && l.some((x) => x.name === cur) ? cur : l.some((x) => x.name === last) ? last : (l.find((x) => x.isDefault) || l[0])?.name || ''));
-    });
+    }).catch(() => {});
   }, []);
 
   // the pages, in print order
@@ -267,7 +267,7 @@ export function PrintDlg(p: Props) {
       if (!m) { setBusy(null); return; }
       await gcc.commit(m.path, to);
       p.close();
-      p.toast('Saved.', 'ok', { label: 'Show', run: () => void gcc.showInFolder(to) });
+      p.toast('Saved.', 'ok', { label: 'Show', run: () => void gcc.showInFolder(to).catch(p.fail) });
     } catch (e) { setBusy(null); p.fail(e); }
   };
 
@@ -279,7 +279,7 @@ export function PrintDlg(p: Props) {
   return (
     <Modal title="Print" wide="xl" className="printdlg" onClose={() => { if (!busy) p.close(); }}
       actions={<>
-        <button className="btn" disabled={!!busy} onClick={() => void savePdf()} title="Save these sheets as a PDF file instead of printing"><Ico n="save" size={14} /> Save as PDF…</button>
+        <button className="btn" disabled={!!busy} onClick={() => void savePdf().catch(p.fail)} title="Save these sheets as a PDF file instead of printing"><Ico n="save" size={14} /> Save as PDF…</button>
         {/* (Windows only: the driver's own window - on Linux CUPS has none to open from here) */}
         {WINDOWS && <button className="btn" disabled={!!busy || !printers?.length || !printer} onClick={() => void prefs()} title={`The preferences of ${pr?.displayName || 'the printer picked'}: tray, quality, stapling… (kept for that printer). Paper, copies, sides and colour are set here.`}>Printer preferences…</button>}
         <span className="grow" />

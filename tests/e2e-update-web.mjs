@@ -187,17 +187,14 @@ try {
   s = await state(win);
   ok(s.source === '' && (await check(win)).state === 'off', '"no updates" chosen in the setup stays so (' + JSON.stringify(s.source) + ')');
   await app.close().catch(() => {});
-  // the setup named a folder (0.9.2's setup took a copy of a release it was run next to): one click
-  // in Settings goes back to the build's own address
+  // the setup named a folder (0.9.2's setup took a copy of a release it was run next to): that folder is the company build's default (Greenline's restore: e2e-update-restore)
   writeFileSync(join(INST, 'update.json'), JSON.stringify({ source: '/some/release-copy' }));
   ({ app, win } = await launch({ PDFED_UPDATE_FEED: 'https://github.com/someone/greenline-pdf-editor' }));
   s = await state(win);
   ok(s.source === '/some/release-copy' && !s.ownSource, 'a folder from the setup is used (' + s.source + ')');
+  ok(s.defaultFor === '/some/release-copy', 'the company build\'s default is the setup\'s folder (' + s.defaultFor + ')');
   await win.locator('.tb-btn[title="Settings"]').click();
-  await win.locator('.modal .link', { hasText: 'Use the download page (default)' }).click();
-  await sleep(300);
-  s = await state(win);
-  ok(s.source === 'https://github.com/someone/greenline-pdf-editor' && s.web && await win.locator('.modal .link', { hasText: 'Use the download page (default)' }).count() === 0, 'Settings: "Use the download page (default)" goes to the build\'s own address (' + s.source + ')');
+  ok(await win.locator('.modal button', { hasText: 'Restore default' }).count() === 0 && await win.locator('.modal .link', { hasText: 'Use the download page' }).count() === 0, 'Settings: already the default - no "Restore default" (the Greenline restore is in e2e-update-restore)');
   await win.keyboard.press('Escape');
   rmSync(join(INST, 'update.json'), { force: true });
   await app.close().catch(() => {});

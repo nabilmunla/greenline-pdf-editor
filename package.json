@@ -1,7 +1,7 @@
 {
   "name": "pdf-editor",
   "productName": "PDF Editor",
-  "version": "0.11.0",
+  "version": "0.12.1",
   "description": "Greenline PDF Editor - opens huge construction PDFs without freezing; markups, scale and measuring.",
   "main": "electron/main.cjs",
   "private": true,
@@ -9,6 +9,7 @@
   "scripts": {
     "build": "vite build && node scripts/build-engines.mjs",
     "test": "tsx --test tests/*.test.ts",
+    "lint:promises": "eslint src/ui",
     "bench:synthetic": "bash tests/bench/make-synthetic.sh",
     "bench:engine": "tsx tests/bench/bench-engine.ts"
   },
@@ -19,6 +20,7 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.7.0",
     "electron": "44.10.2",
+    "eslint": "^9.39.5",
     "pe-library": "^2.0.1",
     "playwright": "^1.56.1",
     "react": "^18.3.1",
@@ -26,6 +28,7 @@
     "resedit": "^3.1.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.73.0",
     "vite": "^6.4.5"
   },
   "dependencies": {
@@ -47,5 +50,6 @@
   "homepage": "https://github.com/nabilmunla/greenline-pdf-editor",
   "updateFeed": "https://github.com/nabilmunla/greenline-pdf-editor",
   "displayName": "Greenline PDF Editor",
-  "brand": "greenline"
+  "brand": "greenline",
+  "reportEndpoint": "https://greenline-reports.n-munla.workers.dev"
 }

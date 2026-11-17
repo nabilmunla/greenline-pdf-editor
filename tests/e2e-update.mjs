@@ -334,7 +334,7 @@ await win.locator('.modal .row', { hasText: 'Updates' }).locator('input').fill(e
 await win.locator('.modal button', { hasText: 'Check now' }).click();
 s = await waitState(win, ['empty'], 5000);
 ok(s.state === 'empty' && s.ownSource, 'a folder of my own choice, nothing published: "' + s.state + '"');
-await win.locator('.modal .link', { hasText: "Use the installer's folder" }).click();
+await win.locator('.modal button', { hasText: 'Restore default' }).click();
 await sleep(300);
 s = await state(win);
 ok(!s.ownSource && s.source === join(TMP, 'no-such-server', 'share'), 'back to the installer\'s folder');

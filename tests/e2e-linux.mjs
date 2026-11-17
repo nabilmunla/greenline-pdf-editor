@@ -73,6 +73,12 @@ async function run(label, exe, env, profile, kind) {
   const pid = app.process().pid;
   await win.waitForFunction(() => window.__gcc?.active()?.pages.length > 0, null, { timeout: 60000 });
   ok(!!(await until(async () => (await ink(win)) > 800, 30000)), `${label}: the PDF is drawn`);
+  // the user counter's first-start question (0.12: the package names the receiver) - answered
+  // "Turn it off": a test copy must not be counted
+  const askCount = win.locator('.modal', { hasText: 'Keep it on' }).first();
+  const asked = await askCount.waitFor({ timeout: 8000 }).then(() => true, () => false);
+  ok(asked, `${label}: asks about the user counter at first start`);
+  if (asked) { await askCount.locator('button', { hasText: 'Turn it off' }).click(); await askCount.waitFor({ state: 'hidden', timeout: 8000 }).catch(() => {}); await sleep(500); }
   const info = await win.evaluate(() => window.gcc.info());
   ok(info.platform === 'linux', `${label}: runs as a Linux app`);
   let u = await win.evaluate(() => window.gcc.updateGet());

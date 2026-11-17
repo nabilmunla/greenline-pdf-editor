@@ -74,7 +74,7 @@ try {
   await win.locator('.cm-foot button', { hasText: 'Excel' }).click();
   await until(() => existsSync(x), 20000, 'xlsx');
   const rows = JSON.parse(execFileSync('python3', ['-c', `import openpyxl,json,sys; ws=openpyxl.load_workbook(sys.argv[1]).worksheets[0]; print(json.dumps([[c.value for c in r] for r in ws.iter_rows()]))`, x]).toString());
-  ok(rows.length === 2 && rows[1][2] === 'Door schedule missing', 'Excel: the filtered list');
+  ok(rows.length === 2 && rows[1][3] === 'Door schedule missing', 'Excel: the filtered list');
 } catch (e) { ok(false, e.message); await win.screenshot({ path: join(TMP, 'fail.png') }).catch(() => {}); }
 await app.evaluate(({ app: a }) => a.exit(0)).catch(() => {});
 console.log(fails ? `${fails} failed, ${passes} passed` : 'all passed');

@@ -146,7 +146,7 @@ type Keys = { anthropic: boolean; openai: boolean; secure: boolean };
 function useKeys(): Keys | null {
   const [keys, setKeys] = useState<Keys | null>(null);
   useEffect(() => {
-    const load = () => void gcc.aiKeys().then(setKeys);
+    const load = () => void gcc.aiKeys().then(setKeys).catch(() => {});
     load();
     window.addEventListener('gcc-ai-keys', load);
     return () => window.removeEventListener('gcc-ai-keys', load);
@@ -266,7 +266,7 @@ function KeyRow({ provider, keys }: { provider: AiProvider; keys: Keys | null })
         <button className="btn" disabled={!key.trim() || busy} onClick={() => void save()}>{busy ? 'Checking…' : 'Save key'}</button>
       </div>
       {err && <p className="hint err">{err}</p>}
-      <p className="hint">Get one at <a href="#" onClick={(e) => { e.preventDefault(); void gcc.openLink(P.keyUrl); }}>{P.keyUrl.replace(/^https:\/\//, '')}</a> (billed by {provider === 'anthropic' ? 'Anthropic' : 'OpenAI'}).</p>
+      <p className="hint">Get one at <a href="#" onClick={(e) => { e.preventDefault(); void gcc.openLink(P.keyUrl).catch(() => {}); }}>{P.keyUrl.replace(/^https:\/\//, '')}</a> (billed by {provider === 'anthropic' ? 'Anthropic' : 'OpenAI'}).</p>
     </div>
   );
 }
@@ -415,7 +415,7 @@ function AskView(p: Props & { provider: AiProvider; model: string }) {
                 {!m.busy && !m.error && !m.text && <div className="faint">{m.stop === 'stopped' ? '(stopped before any answer)' : '(no answer' + (m.stop && m.stop !== 'end_turn' && m.stop !== 'completed' ? ' – ' + m.stop.replace(/_/g, ' ') : '') + ')'}</div>}
                 {!m.busy && !m.error && m.text && (
                   <div className="ans-tools">
-                    <button className="btn xs" onClick={() => void gcc.copyText(m.text).then(() => p.toast('Answer copied.', 'ok'))}><Ico n="copy" size={12} /> Copy</button>
+                    <button className="btn xs" onClick={() => void gcc.copyText(m.text).then(() => p.toast('Answer copied.', 'ok')).catch((er) => p.toast(errText(er), 'err'))}><Ico n="copy" size={12} /> Copy</button>
                     {m.stop === 'max_tokens' && <span className="faint">(answer cut short – ask "continue")</span>}
                     {m.stop === 'stopped' && <span className="faint">(stopped)</span>}
                     {m.usage && <span className="faint">{PROVIDERS[m.provider || p.provider].name} · {fmtK((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0))} in / {fmtK(m.usage.output_tokens || 0)} out</span>}
@@ -621,7 +621,7 @@ function TranslateView(p: Props & { engine: 'offline' | AiProvider; setEngine(e:
       const target = await gcc.saveDialog({ title: 'Save the translation', name: title + '.pdf', path: doc.path ? doc.path.replace(/[^\\/]*$/, '') + title + '.pdf' : undefined });
       if (!target) { void gcc.dropTemp([f]); return; }
       await gcc.commit(f, target, { noBackup: true });
-      p.toast('Saved ' + baseName(target), 'ok', { label: 'Open', run: () => void p.openFile(target, baseName(target)) });
+      p.toast('Saved ' + baseName(target), 'ok', { label: 'Open', run: () => void p.openFile(target, baseName(target)).catch((er) => p.toast(errText(er), 'err')) });
     } catch (e) { p.toast('Could not save the translation: ' + errText(e), 'err', undefined, 9000); }
   };
   const openTab = async () => {
@@ -682,9 +682,9 @@ function TranslateView(p: Props & { engine: 'offline' | AiProvider; setEngine(e:
         <div className="hrow">
           {tr?.busy
             ? <button className="btn" onClick={stopTr}><Ico n="stop" size={14} /> Stop</button>
-            : <button className="btn primary" disabled={!canGo} onClick={() => void go()}><Ico n="translate" size={15} /> Translate {pages.length > 1 ? pages.length + ' pages' : 'page ' + (pages[0] + 1)}</button>}
+            : <button className="btn primary" disabled={!canGo} onClick={() => void go().catch((er) => p.toast(errText(er), 'err'))}><Ico n="translate" size={15} /> Translate {pages.length > 1 ? pages.length + ' pages' : 'page ' + (pages[0] + 1)}</button>}
           {left.length > 0 && left.length < tr!.pages.length && !installing
-            && <button className="btn" onClick={() => void go(true)} title="Carry on with the pages not translated yet (the finished ones are kept, not sent again)">Continue ({left.length} page{left.length > 1 ? 's' : ''} left)</button>}
+            && <button className="btn" onClick={() => void go(true).catch((er) => p.toast(errText(er), 'err'))} title="Carry on with the pages not translated yet (the finished ones are kept, not sent again)">Continue ({left.length} page{left.length > 1 ? 's' : ''} left)</button>}
           <span className="faint">{offline ? 'on this PC' : 'with ' + PROVIDERS[provider].name}</span>
         </div>
         {tr && (
@@ -693,7 +693,7 @@ function TranslateView(p: Props & { engine: 'offline' | AiProvider; setEngine(e:
             {tr.error && <div className="hint err">{tr.error}</div>}
             {!tr.busy && tr.text && (
               <div className="hrow">
-                <button className="btn xs" onClick={() => void gcc.copyText(tr.text.replace(/^=+\s*Page\s+(\d+)\s*=+$/gim, '— Page $1 —')).then(() => p.toast('Translation copied.', 'ok'))}><Ico n="copy" size={12} /> Copy</button>
+                <button className="btn xs" onClick={() => void gcc.copyText(tr.text.replace(/^=+\s*Page\s+(\d+)\s*=+$/gim, '— Page $1 —')).then(() => p.toast('Translation copied.', 'ok')).catch((er) => p.toast(errText(er), 'err'))}><Ico n="copy" size={12} /> Copy</button>
                 <button className="btn xs" onClick={() => void savePdf()}>Save as PDF…</button>
                 <button className="btn xs" onClick={() => void openTab()}>Open as new tab</button>
               </div>

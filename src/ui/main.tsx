@@ -2,6 +2,7 @@ import { Component, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { App } from './App';
+import { fileReadNotice } from '../engine/rpc';
 
 // errors are logged, and reported (once per kind a day) to the reports folder for fixing
 window.addEventListener('error', (e) => {
@@ -25,6 +26,8 @@ window.addEventListener('unhandledrejection', (e) => {
     g?.log('rejection: ' + (e.reason?.stack || e.reason));
     // a drawing / editing engine going down is reported once, as that engine's crash
     if (e.reason?.engineDown) return;
+    // Windows could not read the open file any more: said once a minute, not reported
+    if (e.reason?.fileRead) { fileReadNotice(); return; }
     g?.reportCrash('window (promise)', msg, String(e.reason?.stack || ''));
   } catch { /* ignore */ }
 });

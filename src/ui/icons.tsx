@@ -82,6 +82,7 @@ const P: Record<string, string> = {
   search: 'M9 4a5 5 0 100 10A5 5 0 009 4zM13 13l4 4',
   thumbs: 'M3.5 3.5h5v5h-5zM11.5 3.5h5v5h-5zM3.5 11.5h5v5h-5zM11.5 11.5h5v5h-5z',
   bookmark: 'M6 3.5h8v13l-4-3-4 3z',
+  linksheets: 'M3.5 3.5h7v6h-7zM9.5 10.5h7v6h-7zM7 9.5v4h2.5M8.3 12.2l1.2 1.3-1.2 1.3',
   comments: 'M3.5 4.5h13v8h-7l-3.5 3v-3h-2.5z M7 7.5h6M7 10h4',
   chest: 'M3.5 7.5h13v8h-13zM3.5 7.5l2-3.5h9l2 3.5M8.5 10.5h3',
   batch: 'M5 4.5h10M4 8h12M3 11.5h14v5H3z',

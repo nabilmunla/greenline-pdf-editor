@@ -121,9 +121,9 @@ test('B1-04 a bookmark to another file is not read as page 1 of this one, nor re
   mu.close('bm');
 });
 
-test('B1-01 a file of 2 GB or more is refused with words, not "TRYLATER"', () => {
-  const fake = { size: 2 ** 31 + 5, read: () => 0 } as never;
-  assert.throws(() => mu.openIn(fake), /2 GB or more/);
+test('B1-01 a file too big to open is refused with words, not "TRYLATER" (4 GB since 0.12: engine4gb.test)', () => {
+  const fake = { size: 2 ** 32 + 5, read: () => 0 } as never;
+  assert.throws(() => mu.openIn(fake), /4 GB or more/);
 });
 
 test('B3-04 Extract carries the page scale', () => {

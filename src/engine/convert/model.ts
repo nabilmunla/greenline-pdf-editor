@@ -107,6 +107,9 @@ export interface ExportOpts {
   /** only this area of one page (a table among the details of a drawing): page index and box in
    *  page points (as shown, top-left origin) */
   region?: { page: number; box: [number, number, number, number] };
+  /** layers the window shows other than the file says (OCG object number -> shown): the export reads
+   *  and draws the pages as the screen does (PLAN 7.8) */
+  layers?: Record<number, boolean> | null;
 }
 
 export const median = (a: number[]): number => {

@@ -79,7 +79,7 @@ export function PropsPanel(p: Props) {
         walk(it[0].id);
       }
       setReplies(thread.sort((a, b) => (a.created || 0) - (b.created || 0)));
-    });
+    }).catch(() => { /* (the file closed meanwhile: "Document is not open" - nothing to show) */ });
     return () => { live = false; };
   }, [p.sel, p.rev]);
 
@@ -170,7 +170,7 @@ export function PropsPanel(p: Props) {
                 <button className="btn sm icon" title="Rotate 90° right" onClick={() => void upd({ angle: ((a.angle || 0) + 90) % 360 }, 'Rotate')}><Ico n="rotr" size={14} /></button>
               </div>
             )}
-            {fmtKinds.length > 0 && <FmtEditor {...commonFmt(items)} kinds={fmtKinds} imperial={imperialIn(doc)} onChange={(f) => void setFmt(f)} />}
+            {fmtKinds.length > 0 && <FmtEditor {...commonFmt(items)} kinds={fmtKinds} imperial={imperialIn(doc)} onChange={(f) => void setFmt(f).catch((er) => p.toast(String((er as Error)?.message || er), 'err'))} />}
             {isMeasure && a.kind !== 'measure-count' && (
               <div className="prow"><span className="plab">Number size</span>
                 <select className="input xs" value={String(labelNow)} onChange={(e) => void upd({ labelSize: Number(e.target.value) }, 'Label size')}>

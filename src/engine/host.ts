@@ -46,7 +46,7 @@ export async function renderHandlers(): Promise<Record<string, Handler>> {
     // (drawn in slices: short calls go in between, and it stops when no longer wanted - PLAN 7.5)
     async viewTile(id: string, page: number, scale: number, x: number, y: number, w: number, h: number) { return img(await pf.renderGivingWay(id, page, scale, x, y, w, h, giveWay), w, h); },
     thumb(id: string, page: number, scale: number, w: number, h: number, annots: boolean) { return img(pf.render(id, page, scale, 0, 0, w, h, annots), w, h); },
-    chars(id: string, page: number) { const c = pf.chars(id, page); return { text: c.text, box: c.box }; },
+    chars(id: string, page: number, keep?: boolean) { const c = pf.chars(id, page, keep !== false); return { text: c.text, box: c.box }; },
     rangeRects(id: string, page: number, start: number, count: number) { return pf.rangeRects(id, page, start, count); },
     find(id: string, needle: string, from: number, to: number, matchCase: boolean, whole: boolean) { return pf.find(id, needle, from, to, matchCase, whole); },
     links(id: string, page: number) { return pf.links(id, page); },
@@ -124,6 +124,9 @@ let dropMerge: (job: string) => void = () => {};
 
 export async function editHandlers(): Promise<Record<string, Handler>> {
   const mu = await import('./mu');
+  // (tests only - e2e-saveas-temp: PDFED_TEST_WHOLE_AT=1 gives the drawing engines a whole copy
+  // after any change, as for a combined set over 600 MB)
+  mu.setWholeAt(Number(process.env.PDFED_TEST_WHOLE_AT) || 0);
   const cv = await import('./convert/index');
   dropMerge = (job: string) => {
     const m = merges.get(job);
@@ -146,7 +149,8 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
   guard.guardMupdf(await import('mupdf'));
   // each one costs a little of MuPDF's stack: logged (app.log) so they can be found and avoided
   guard.traceMupdfErrors((m, e) => { const n = guard.mupdfErrors(); if (n <= 50 || n % 100 === 0) console.error(`mupdf error #${n} in ${m}: ${String((e as Error)?.message || e).slice(0, 120)}`); });
-  needsRecycle = () => guard.mupdfErrors() >= guard.MUPDF_ERROR_LIMIT;
+  // (errors whose stack was put back don't count: with the patched .wasm, none leak - mupdf-guard.ts)
+  needsRecycle = () => guard.mupdfLeaks() >= guard.MUPDF_ERROR_LIMIT;
   mu.setGlyphlessFont(new Uint8Array(fs.readFileSync(path.join(resDir, 'glyphless.ttf'))));
   // pages of millions of separate little strokes: drawn from merged line work (see heavy.ts,
   // strokes.ts and mu.displayOverlay) - kept in a temp file the drawing engines read
@@ -201,7 +205,8 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       const delta = canDelta && r.base > 0;
       const src: FileSrc = delta ? { path: s!.src.path, size: r.base, delta: out, mtime: s!.stat.mtime } : { path: out };
       // heavy pages drawn from merged line work: one more update on top of the copy (display only)
-      if (mu.displayFiles(id).length) {
+      // (and the layers shown other than the file says: the same kind of update - PLAN 7.7)
+      if (mu.displayFiles(id).length || mu.layerStateSet(id)) {
         const outSize = statOf(out)?.size ?? 0;
         const len = delta ? r.base + outSize : outSize;
         const prev = delta && !outSize ? lastXref(tailOf(s!.src.path, r.base)) : lastXref(tailOf(out, outSize));
@@ -243,6 +248,7 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
     exportBegin(id: string, src: VFile | Uint8Array, password: string | undefined, opts: import('./convert/model').ExportOpts) {
       const d = mu.openIn(src);
       if (d.needsPassword() && !(password && d.authenticatePassword(password))) { d.destroy?.(); throw new Error('This PDF needs its password.'); }
+      if (opts.layers) { const pd = d.asPDF(); if (pd) mu.applyLayers(pd, new Map(Object.entries(opts.layers).map(([k, v]) => [Number(k), !!v]))); }
       return cv.exportBegin(id, d, opts, () => { if (!(src instanceof Uint8Array)) src.close(); });
     },
     exportRead: cv.exportRead,
@@ -257,15 +263,24 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       merges.set(job, { st: mu.mergeStart(), spill, fd: fs.openSync(spill, 'w'), size: 0, pages: 0 });
       return true;
     },
-    mergeAdd(job: string, name: string, src: VFile | Uint8Array, pages?: number[]) {
+    async mergeAdd(job: string, name: string, src: VFile | Uint8Array, pages?: number[]) {
       const m = merges.get(job);
       if (!m) throw new Error('The merge was stopped.');
-      const n = mu.mergeAddFile(m.st, name, src, (raw) => {
+      // (in steps, with a moment between them: what a step let go of is freed then - see
+      // mu.mergeFileSteps)
+      const it = mu.mergeFileSteps(m.st, name, src, (raw) => {
         const off = m.size;
         for (let w = 0; w < raw.length;) w += fs.writeSync(m.fd, raw, w, Math.min(16 << 20, raw.length - w));
         m.size += raw.length;
         return off;
       }, pages);
+      let r = it.next();
+      while (!r.done) {
+        await new Promise((res) => setImmediate(res));
+        if (merges.get(job) !== m) { it.return?.(0); throw new Error('The merge was stopped.'); }
+        r = it.next();
+      }
+      const n = r.value;
       m.pages += n;
       return { pages: n, total: m.pages };
     },

@@ -1038,6 +1038,43 @@ function describe(b: Uint8Array) {
   return { pages, pageObjs, fields: fields.isArray() ? fields.length : 0, off: off.isArray() ? off.length : 0, outline: conv(d.loadOutline() as any), title: d.getMetaData('info:Title') };
 }
 
+test('a big set merged in steps (markups written out as it goes) comes out as the merge in memory does', async () => {
+  // (40 pages: markups, replies, a filled-in field, a hidden layer, links between pages - copied
+  // 8 pages at a time and written out between the steps; the merge in memory is the reference)
+  const big = mu.merge(Array.from({ length: 20 }, (_, i) => ({ name: `r${i}.pdf`, bytes: richPdf() })));
+  const ref = describe(mu.merge([{ name: 'a.pdf', bytes: big }, { name: 'b.pdf', bytes: big }]));
+  const st = mu.mergeStart();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  const spill = (raw: Uint8Array) => { parts.push(raw.slice()); const at = size; size += raw.length; return at; };
+  let steps = 0;
+  for (const name of ['a.pdf', 'b.pdf']) {
+    const it = mu.mergeFileSteps(st, name, big, spill);
+    for (let r = it.next(); !r.done; r = it.next()) { steps++; await new Promise((res) => setImmediate(res)); }
+  }
+  assert.ok(steps >= 10, 'it went in steps: ' + steps);
+  assert.ok(st.flushed.size > 100, 'markups were written out as it went: ' + st.flushed.size);
+  const all = Buffer.concat(parts);
+  const out: Uint8Array[] = [];
+  mu.mergeWrite(st, true, (b) => out.push(typeof b === 'string' ? Buffer.from(b, 'latin1') : b), (off, len) => out.push(all.subarray(off, off + len)));
+  mu.mergeDrop(st);
+  const file = new Uint8Array(Buffer.concat(out));
+  const got = describe(file);
+  assert.deepEqual(got.pages, ref.pages, 'every page: markups, replies, fields, links, labels');
+  // (qpdf, where it is installed: the file's structure as a strict reader sees it)
+  const { execFileSync } = await import('node:child_process');
+  const { writeFileSync: wf, rmSync: rm } = await import('node:fs');
+  const qp = '/tmp/merged-in-steps.pdf';
+  wf(qp, file);
+  try { assert.match(execFileSync('qpdf', ['--check', qp], { encoding: 'utf8' }), /No syntax or stream encoding errors/); }
+  catch (e) { if ((e as { code?: string }).code !== 'ENOENT') throw e; }
+  finally { rm(qp, { force: true }); }
+  assert.equal(got.fields, ref.fields);
+  assert.equal(got.off, ref.off);
+  assert.deepEqual(got.outline, ref.outline);
+  assert.equal(got.pageObjs, ref.pageObjs);
+});
+
 test('extract, merge and insert pages keep markups, replies, form fields, layers, links, bookmarks, labels', () => {
   const src = richPdf();
   mu.open('rich', src);

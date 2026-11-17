@@ -16,6 +16,19 @@ let trace: ((method: string, e: unknown) => void) | null = null;
 export function traceMupdfErrors(f: ((method: string, e: unknown) => void) | null) { trace = f; }
 /** errors thrown by MuPDF since this engine started */
 export const mupdfErrors = () => count;
+/**
+ * MuPDF's C stack pointer (exported by the .wasm patched in mupdf-pre.mjs): after an error the
+ * guard sets it back to where it was before the call - nothing leaks, the restart below stays a
+ * backstop. Without it every error leaks (counted in `leaks`).
+ */
+// (read when needed: MuPDF.js may finish starting after this module is loaded)
+let SP: WebAssembly.Global | null = null;
+const sp = () => SP ?? (SP = ((globalThis as { $mupdfExports?: { sp?: WebAssembly.Global } }).$mupdfExports?.sp) ?? null);
+let leaks = 0;
+/** errors whose leaked stack could not be put back (without the patch: every one) */
+export const mupdfLeaks = () => leaks;
+/** the stack pointer now (tests; -1 without the patch) */
+export const mupdfStack = () => (sp() ? (SP!.value as number) : -1);
 /** restart well before the ~1,200 where corruption starts */
 export const MUPDF_ERROR_LIMIT = 400;
 
@@ -39,8 +52,17 @@ export function guardMupdf(mupdf: typeof M) {
         if ((f as { __guarded?: boolean }).__guarded) continue;
         const g = function (this: unknown, ...a: unknown[]) {
           depth++;
+          // (the stack pointer as it was before the outermost call: put back after an error)
+          const sp0 = depth === 1 && sp() ? (SP!.value as number) : -1;
           // counted once, where it leaves MuPDF (not again by every wrapper it passes through)
-          try { return f.apply(this, a); } catch (e) { if (depth === 1) { count++; if (trace) trace(key, e); } throw e; } finally { depth--; }
+          try { return f.apply(this, a); } catch (e) {
+            if (depth === 1) {
+              count++;
+              if (sp0 >= 0 && SP) { if (SP.value !== sp0) SP.value = sp0; } else leaks++;
+              if (trace) trace(key, e);
+            }
+            throw e;
+          } finally { depth--; }
         };
         (g as { __guarded?: boolean }).__guarded = true;
         try { Object.defineProperty(proto, key, { ...d, value: g }); } catch { /* frozen: leave it */ }

@@ -129,7 +129,18 @@ function emitStream(fill: (put: (b: string | Uint8Array) => void) => void): Uint
  * they are (from the file, or from `spilled` - a merge's temp file). Not for encrypted files
  * (their strings would come out decrypted).
  */
-function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => void, spilled?: Map<number, { off: number; len: number }>, copy?: (off: number, len: number) => void) {
+/** a stream's dictionary with its real length (written as text: the open document is not changed) */
+function streamDict(doc: mupdf.PDFDocument, obj: mupdf.PDFObject, len: number) {
+  let d = '<<';
+  obj.forEach((v: mupdf.PDFObject, k: string | number) => { if (String(k) !== 'Length') d += doc.newName(String(k)).toString() + ' ' + v.toString(true, true); });
+  return d + '/Length ' + len + '>>';
+}
+/**
+ * flushed: objects already written whole into the spill file during a merge (copied back as they
+ * are; in the document they are null now). pinned: the objects those point at (kept, as if the
+ * trailer led to them).
+ */
+function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => void, spilled?: Map<number, { off: number; len: number }>, copy?: (off: number, len: number) => void, flushed?: Map<number, { off: number; len: number }>, pinned?: Set<number>) {
   const n = doc.countObjects();
   const tr = doc.getTrailer();
   // (an object's generation, as a reference to it gives it - "12 1 R")
@@ -142,25 +153,23 @@ function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => v
   const gen = new Map<number, string>();
   const walk = (v: mupdf.PDFObject, depth: number) => {
     if (depth > 64) return;
-    if (v.isIndirect()) { const k = v.asIndirect(); if (k > 0 && k < n && !keep.has(k)) { keep.add(k); queue.push(k); gen.set(k, genOf(v)); } return; }
+    if (v.isIndirect()) { const k = v.asIndirect(); if (k > 0 && k < n && !keep.has(k)) { keep.add(k); if (!flushed?.has(k)) queue.push(k); gen.set(k, genOf(v)); } return; }
     if (v.isArray()) { for (let i = 0; i < v.length; i++) walk(v.get(i), depth + 1); return; }
     if (v.isDictionary()) v.forEach((x: mupdf.PDFObject) => walk(x, depth + 1));
   };
   for (const k of ['Root', 'Info']) walk(tr.get(k), 0);
+  for (const k of pinned ?? []) walk(doc.newIndirect(k), 0);
   while (queue.length) walk(doc.newIndirect(queue.pop()!).resolve(), 0);
   let pos = 0;
   const w = (b: string | Uint8Array) => { put(b); pos += typeof b === 'string' ? b.length : b.length; };
   w('%PDF-1.7\n%\u00e2\u00e3\u00cf\u00d3\n');
   const offs: number[] = [0];
   const gens: string[] = ['65535'];
-  /** a stream's dictionary with its real length (written as text: the open document is not changed) */
-  const dictWith = (obj: mupdf.PDFObject, len: number) => {
-    let d = '<<';
-    obj.forEach((v: mupdf.PDFObject, k: string | number) => { if (String(k) !== 'Length') d += doc.newName(String(k)).toString() + ' ' + v.toString(true, true); });
-    return d + '/Length ' + len + '>>';
-  };
+  const dictWith = (obj: mupdf.PDFObject, len: number) => streamDict(doc, obj, len);
   for (let num = 1; num < n; num++) {
     offs[num] = pos;
+    const fl = flushed?.get(num);
+    if (fl && copy) { gens[num] = '0'; copy(fl.off, fl.len); pos += fl.len; continue; }
     const ref = doc.newIndirect(num);
     if (!keep.has(num)) { gens[num] = '0'; w(`${num} 0 obj\nnull\nendobj\n`); continue; }
     const g = (gens[num] = gen.get(num) ?? '0');
@@ -239,15 +248,29 @@ function isSigned(doc: mupdf.PDFDocument): boolean {
     return fields.isArray() && walk(fields, 0);
   } catch { return false; }
 }
-/** files this big can't be read by the editing engine (see openIn) */
-export const TOO_BIG = 2 ** 31;
-export const tooBigText = (size: number) => `This file is ${(size / 2 ** 30).toFixed(1)} GB: files of 2 GB or more can't be opened here. Other PDF programs can; to work on it here, split it into smaller files there first.`;
+/** the .wasm MuPDF.js runs was patched at start (mupdf-pre.mjs): positions unsigned (4 GB), the
+ *  stack pointer exported (errors no longer leak it) */
+const PATCH = ((globalThis as { $mupdfPatch?: { unsigned: boolean; sp: boolean } }).$mupdfPatch) ?? { unsigned: false, sp: false };
+/** files this big can't be read by the editing engine (see openIn): 4 GB with the patch (the drawing
+ *  engine's limit too), 2 GB without it (MuPDF.js reads through signed 32-bit positions) */
+export const TOO_BIG = PATCH.unsigned ? 2 ** 32 - 1 : 2 ** 31;
+const LIMIT_GB = PATCH.unsigned ? 4 : 2;
+export const tooBigText = (size: number) => `This file is ${(size / 2 ** 30).toFixed(1)} GB: files of ${LIMIT_GB} GB or more can't be opened here. Other PDF programs can; to work on it here, split it into smaller files there first.`;
+/** the largest file this engine opens (the window says so before a merge it couldn't open) */
+export function openLimit(): number { return TOO_BIG; }
+if (PATCH.unsigned) {
+  // the positions the patched .wasm hands over are unsigned 32-bit numbers (from 2 GB on they
+  // arrived negative); an offset relative to the end or the position stays signed
+  const g = globalThis as unknown as { $libmupdf_stm_seek: (id: number, pos: number, offset: number, whence: number) => number };
+  const seek = g.$libmupdf_stm_seek;
+  if (typeof seek === 'function') g.$libmupdf_stm_seek = (id, pos, offset, whence) => seek(id, pos >>> 0, whence === 0 ? offset >>> 0 : offset, whence);
+}
 /** MuPDF document from bytes or a reader (the reader stays open while the document lives) */
 export function openIn(b: In): mupdf.Document {
   if (b instanceof Uint8Array) return mupdf.Document.openDocument(b, 'application/pdf');
-  // MuPDF.js reads a file through 32-bit positions: from 2 GB on it can't, and said only "TRYLATER"
+  // MuPDF.js reads a file through 32-bit positions: past the limit it can't, and says only "TRYLATER"
   if (b.size >= TOO_BIG) throw new Error(tooBigText(b.size));
-  const stm = new mupdf.Stream({ fileSize: () => b.size, read: (memory: Uint8Array, offset: number, length: number, position: number) => b.read(memory, offset, length, position), close() { /* closed by its owner */ } } as never);
+  const stm = new mupdf.Stream({ fileSize: () => b.size, read: (memory: Uint8Array, offset: number, length: number, position: number) => b.read(memory, offset, length, PATCH.unsigned ? position >>> 0 : position), close() { /* closed by its owner */ } } as never);
   return mupdf.Document.openDocument(stm, 'application/pdf');
 }
 
@@ -327,6 +350,9 @@ interface Entry { name: string; kind: 'a' | 'c' | 'm'; before?: PageInfo[]; afte
 
 interface Open {
   doc: mupdf.PDFDocument;
+  /** layers shown other than the file says (OCG object number -> shown), display only - see
+   *  setLayersShown; null / empty: as the file says (PLAN 7.7) */
+  layerShow?: Map<number, boolean> | null;
   pages: Map<number, mupdf.PDFPage>;
   /** journal kinds aligned with MuPDF's undo stack: 'a' = markups only, 'c' = page content/structure */
   undo: Entry[];
@@ -658,18 +684,24 @@ function pdfName(k: string): string {
 /**
  * What the drawing engines read on top of their copy of the document (`len` bytes long, its last
  * cross-reference section at `prevXref`): the heavy pages again, with their merged line work as
- * content. Null when there is nothing to add (or the file is encrypted: the new content would
- * have to be encrypted too - such pages are drawn as they are).
+ * content. Null when there is nothing to add. An encrypted copy (not `plain`) takes only the layer
+ * settings: the merged content would have to be encrypted too (such pages are drawn as they are);
+ * the settings hold no string that would need it (they are left out), and the update's trailer
+ * names the file's protection (without it every string and stream of the file read as garbage).
  */
 export function displayOverlay(id: string, len: number, prevXref: number, plain = false): ExtraPart[] | null {
   const o = O(id);
   // (an encrypted copy can't take it: the new content would have to be encrypted too - a copy
   // written decrypted can: `plain`)
-  if (!o.display?.size || prevXref < 0 || (encrypted(o) && (!plain || !!o.password))) return null;
+  // (a protected file's layers switched off did nothing on screen - sweep S2)
+  const locked = encrypted(o) && (!plain || !!o.password);
+  const lay = o.layerShow?.size ? layerObj(o, locked) : null;
+  if ((!o.display?.size && !lay) || prevXref < 0 || (locked && !lay)) return null;
   let num = o.doc.countObjects();
   const streams: { num: number; file: { path: string; size: number } }[] = [];
   const objs: { num: number; gen: number; body: string }[] = [];
-  for (const d of o.display.values()) {
+  if (lay) objs.push(lay);
+  for (const d of locked ? [] : o.display?.values() ?? []) {
     const sn = num;
     let used = false;
     for (const pn of d.pageObjs) {
@@ -698,8 +730,225 @@ export function displayOverlay(id: string, len: number, prevXref: number, plain 
   if (!objs.length) return null;
   const t = o.doc.getTrailer();
   const info = t.get('Info');
-  return overlay(streams, objs, len, prevXref, num, `/Root ${t.get('Root').toString()}${info.isIndirect() ? '/Info ' + info.toString() : ''}`);
+  const tid = t.get('ID');
+  const prot = locked ? `/Encrypt ${t.get('Encrypt').toString()}${tid.isArray() ? '/ID ' + tid.toString() : ''}` : '';
+  return overlay(streams, objs, len, prevXref, num, `/Root ${t.get('Root').toString()}${info.isIndirect() ? '/Info ' + info.toString() : ''}${prot}`);
 }
+// ---------------------------------------------------------------- layers (optional content, PLAN 7.7)
+
+export interface LayerInfo {
+  /** the layer's object number (its id here) */
+  num: number;
+  name: string;
+  /** on as the file says */
+  on: boolean;
+  /** shown now (display only until the state is saved) */
+  shown: boolean;
+  /** the file locks it: listed, not switched */
+  locked: boolean;
+  /** nesting in the file's layer list */
+  depth: number;
+}
+
+const refNum = (x: mupdf.PDFObject) => (x.isIndirect() ? x.asIndirect() : -1);
+const genOf = (x: mupdf.PDFObject) => { const m = /^\d+ (\d+) R$/.exec(x.toString()); return m ? +m[1] : 0; };
+function ocProps(o: Open): mupdf.PDFObject | null {
+  const r = o.doc.getTrailer().get('Root').get('OCProperties');
+  return r.isDictionary() ? r : null;
+}
+/** the file's own state: which layers it has on */
+function layerDefaults(o: Open): { order: { num: number; depth: number }[]; on: Map<number, boolean>; locked: Set<number>; names: Map<number, string> } | null {
+  const ocp = ocProps(o);
+  if (!ocp) return null;
+  const ocgs = ocp.get('OCGs');
+  if (!ocgs.isArray() || !ocgs.length) return null;
+  const all: number[] = [];
+  const names = new Map<number, string>();
+  for (let i = 0; i < ocgs.length && i < 5000; i++) {
+    const g = ocgs.get(i);
+    const n = refNum(g);
+    if (n < 0 || names.has(n)) continue;
+    const gd = g.resolve();
+    let name = '';
+    try { const nm = gd.get('Name'); name = nm.isString() ? nm.asString() : ''; } catch { /* nameless */ }
+    names.set(n, name || 'Layer ' + (all.length + 1));
+    all.push(n);
+  }
+  const d = ocp.get('D');
+  const nums = (k: string) => { const a = d.isDictionary() ? d.get(k) : null; const out = new Set<number>(); if (a && a.isArray()) for (let i = 0; i < a.length; i++) out.add(refNum(a.get(i))); return out; };
+  const base = d.isDictionary() && d.get('BaseState').isName() ? d.get('BaseState').asName() : 'ON';
+  const ons = nums('ON'), offs = nums('OFF');
+  const on = new Map<number, boolean>();
+  for (const n of all) on.set(n, base === 'OFF' ? ons.has(n) : !offs.has(n));
+  // the file's list (nested arrays: a layer's own list follows it; a label in front is a heading)
+  const order: { num: number; depth: number }[] = [];
+  const seen = new Set<number>();
+  const walk = (a: mupdf.PDFObject, depth: number, guard: Set<string>) => {
+    if (!a.isArray() || depth > 16) return;
+    const key = a.isIndirect() ? 'r' + a.asIndirect() : '';
+    if (key) { if (guard.has(key)) return; guard.add(key); }
+    for (let i = 0; i < a.length && order.length < 5000; i++) {
+      const x = a.get(i);
+      if (x.isArray() || (x.isIndirect() && x.resolve().isArray())) walk(x.isIndirect() ? x.resolve() : x, depth + 1, guard);
+      else { const n = refNum(x); if (names.has(n) && !seen.has(n)) { seen.add(n); order.push({ num: n, depth }); } }
+    }
+  };
+  if (d.isDictionary()) walk(d.get('Order'), 0, new Set());
+  for (const n of all) if (!seen.has(n)) order.push({ num: n, depth: 0 });
+  return { order, on, locked: nums('Locked'), names };
+}
+
+/** the file's layers in its own order, with what is shown now ([] when it has none) */
+export function layers(id: string): LayerInfo[] {
+  const o = O(id);
+  let d: ReturnType<typeof layerDefaults> = null;
+  try { d = layerDefaults(o); } catch { return []; }
+  if (!d) return [];
+  return d.order.map(({ num, depth }) => {
+    const on = d!.on.get(num) ?? true;
+    return { num, name: d!.names.get(num) || '', on, shown: o.layerShow?.get(num) ?? on, locked: d!.locked.has(num), depth };
+  });
+}
+
+/**
+ * Show / hide layers (OCG object number -> shown). Display only: the drawing engines get it as an
+ * appended update of the layer settings on their copy (displayOverlay), MuPDF in memory (markups,
+ * its pictures); the file changes only with saveLayerState. Locked layers stay as they are.
+ * Returns whether anything is shown other than the file says.
+ */
+export function setLayersShown(id: string, shown: Record<number, boolean> | null): boolean {
+  const o = O(id);
+  const d = layerDefaults(o);
+  const m = new Map<number, boolean>();
+  if (d && shown) for (const [k, v] of Object.entries(shown)) {
+    const n = Number(k);
+    if (!d.on.has(n) || d.locked.has(n)) continue;
+    if (!!v !== d.on.get(n)) m.set(n, !!v);
+  }
+  o.layerShow = m.size ? m : null;
+  muLayers(o);
+  return m.size > 0;
+}
+/** MuPDF's own layer switches as shown now (its list is the file's /OCGs, in order) - also after
+ *  an undo / redo of a saved layer state, which changes what the file says */
+function muLayers(o: Open) { applyLayers(o.doc, o.layerShow); }
+/** the layers of a document of ours switched in MuPDF's memory: `show` (OCG object number ->
+ *  shown) over what the file says. Display only - nothing is written. The batch engine's copies
+ *  (pictures of the pages, Word / Excel) get the window's state this way (PLAN 7.8). */
+export function applyLayers(doc: mupdf.PDFDocument, show: Map<number, boolean> | null | undefined) {
+  try {
+    const d = layerDefaults({ doc } as unknown as Open);
+    const idx = layerIndexes(doc);
+    if (!idx) return;
+    for (let i = 0; i < idx.length; i++) {
+      const want = show?.get(idx[i]) ?? d?.on.get(idx[i]) ?? true;
+      if (doc.isLayerVisible(i) !== want) doc.setLayerVisible(i, want);
+    }
+  } catch { /* MuPDF draws the file's state */ }
+}
+/**
+ * The OCG object number behind each of MuPDF's layer indexes. MuPDF's list is NOT the file's
+ * /OCGs order (it came out by object number, highest first, whatever the order in /OCGs - found
+ * with 7.8: the print preview hid the wrong layers): the guess is checked against the names, then
+ * /OCGs order is tried, else nothing is switched in MuPDF (null).
+ */
+function layerIndexes(doc: mupdf.PDFDocument): number[] | null {
+  const ocgs = doc.getTrailer().get('Root').get('OCProperties').get('OCGs');
+  if (!ocgs || !ocgs.isArray()) return null;
+  const nums: number[] = [];
+  for (let i = 0; i < ocgs.length && i < 5000; i++) { const n = refNum(ocgs.get(i)); if (n >= 0 && !nums.includes(n)) nums.push(n); }
+  const cnt = doc.countLayers();
+  if (cnt !== nums.length) return null;
+  const nameOf = (n: number) => { try { const nm = doc.newIndirect(n).resolve().get('Name'); return nm.isString() ? nm.asString() : ''; } catch { return ''; } };
+  const fits = (c: number[]) => c.every((n, i) => { const w = nameOf(n); return !w || w === doc.getLayerName(i); });
+  for (const c of [nums.slice().sort((a, b) => b - a), nums]) if (fits(c)) return c;
+  return null;
+}
+/** the layers shown other than the file says, as a plain object (OCG number -> shown): what the
+ *  batch jobs (pictures, export) are given - null when it is as the file says */
+export function layerOverlay(id: string): Record<number, boolean> | null {
+  const m = docs.get(id)?.layerShow;
+  return m && m.size ? Object.fromEntries(m) : null;
+}
+/** layers shown other than the file says (the drawing copy needs the overlay) */
+export function layerStateSet(id: string): boolean { return !!docs.get(id)?.layerShow?.size; }
+
+/** the layer settings (/D) as they would be with the state shown now: the new version of the
+ *  innermost object holding them (the /D dictionary, /OCProperties or the catalog) */
+/** a value that holds a string (as MuPDF writes it: (text) or <hex>) */
+const holdsString = (v: mupdf.PDFObject) => v.isString() || /\((?:[^\\)]|\\.)*\)|<[0-9A-Fa-f\s]*>/.test(v.toString());
+/** (`locked`: for an encrypted copy - the entries that hold a string are left out: written as they
+ *  are they would be read as garbage, and nothing the drawing engines draw needs them) */
+function layerObj(o: Open, locked = false): { num: number; gen: number; body: string } | null {
+  const d = layerDefaults(o);
+  if (!d || !o.layerShow?.size) return null;
+  const root = o.doc.getTrailer().get('Root');
+  const rd = root.resolve();
+  const ocpRaw = rd.get('OCProperties');
+  const ocp = ocpRaw.resolve();
+  const dRaw = ocp.get('D');
+  const dd = dRaw.isNull() ? null : dRaw.resolve();
+  const shownOf = (n: number) => o.layerShow!.get(n) ?? d.on.get(n) ?? true;
+  const offs = [...d.on.keys()].filter((n) => !shownOf(n));
+  const refs = (list: number[]) => list.map((n) => `${n} ${genOf(o.doc.newIndirect(n))} R`).join(' ');
+  let dBody = '<<';
+  if (dd && dd.isDictionary()) dd.forEach((v: mupdf.PDFObject, k: string | number) => { const key = String(k); if (!['ON', 'OFF', 'BaseState', 'AS'].includes(key) && !(locked && holdsString(v))) dBody += `${pdfName(key)} ${v.toString()}`; });
+  dBody += `/BaseState/ON/OFF[${refs(offs)}]>>`;
+  if (dRaw.isIndirect()) return { num: dRaw.asIndirect(), gen: genOf(dRaw), body: dBody };
+  let ocpBody = '<<';
+  ocp.forEach((v: mupdf.PDFObject, k: string | number) => { if (String(k) !== 'D' && !(locked && holdsString(v))) ocpBody += `${pdfName(String(k))} ${v.toString()}`; });
+  ocpBody += `/D ${dBody}>>`;
+  if (ocpRaw.isIndirect()) return { num: ocpRaw.asIndirect(), gen: genOf(ocpRaw), body: ocpBody };
+  if (!root.isIndirect()) return null;
+  let rootBody = '<<';
+  rd.forEach((v: mupdf.PDFObject, k: string | number) => { if (String(k) !== 'OCProperties' && !(locked && holdsString(v))) rootBody += `${pdfName(String(k))} ${v.toString()}`; });
+  rootBody += `/OCProperties ${ocpBody}>>`;
+  return { num: root.asIndirect(), gen: genOf(root), body: rootBody };
+}
+
+/**
+ * /D of the document's layer settings rewritten to say `show` (over `d`, the file's own state):
+ * /BaseState ON, /OFF the hidden ones, /AS (the automatic switching for printing / viewing) loses
+ * the layers changed, so a print shows what the screen shows. `ref` makes a reference to a layer
+ * in `doc` (a print copy has its own object numbers); `changed` is the set of changed layers.
+ */
+function writeLayerState(doc: mupdf.PDFDocument, show: Map<number, boolean>, d: NonNullable<ReturnType<typeof layerDefaults>>, ref: (n: number) => mupdf.PDFObject, changed: Map<number, boolean>) {
+  const ocp = doc.getTrailer().get('Root').get('OCProperties');
+  let dd = ocp.get('D');
+  if (!dd.isDictionary()) { ocp.put('D', doc.newDictionary()); dd = ocp.get('D'); }
+  const shownOf = (n: number) => show.get(n) ?? d.on.get(n) ?? true;
+  const arr = (list: number[]) => { const a = doc.newArray(); for (const n of list) a.push(ref(n)); return a; };
+  dd.put('BaseState', doc.newName('ON'));
+  dd.delete('ON');
+  dd.put('OFF', arr([...d.on.keys()].filter((n) => !shownOf(n))));
+  const mine = new Set([...changed.keys()].map((n) => refNum(ref(n))));
+  const as = dd.get('AS');
+  if (as.isArray()) for (let i = 0; i < as.length; i++) {
+    const g = as.get(i).resolve().get('OCGs');
+    if (!g.isArray()) continue;
+    for (let j = g.length - 1; j >= 0; j--) if (mine.has(refNum(g.get(j)))) g.delete(j);
+  }
+}
+
+/**
+ * The layers as shown now become the file's own state (one undo step): /D says them (/AS - the
+ * automatic switching for printing / viewing - loses the layers changed, so a print shows what
+ * the screen shows). Nothing shown differently: nothing to do.
+ */
+export function saveLayerState(id: string): PageInfo[] | null {
+  const o = O(id);
+  const d = layerDefaults(o);
+  if (!d || !o.layerShow?.size) return null;
+  const show = new Map(o.layerShow);
+  const r = op(o, 'Save the layer state', 'c', () => {
+    writeLayerState(o.doc, show, d, (n) => o.doc.newIndirect(n), show);
+    resetPages(o);
+    return pageInfos(o);
+  });
+  o.layerShow = null;
+  return r;
+}
+
 /** no transparency / blend modes / soft masks in the page's graphics states */
 function opaqueStates(po: mupdf.PDFObject): boolean {
   const gs = po.getInheritable('Resources').get('ExtGState');
@@ -1035,6 +1284,7 @@ export function undo(id: string): UndoResult {
   // fonts made by an operation that is undone no longer exist: never reuse a cached one
   o.fonts.clear();
   if (e.kind === 'c') o.infos = e.before ?? computeInfos(o);
+  if (e.name === 'Save the layer state') { o.layerShow = null; muLayers(o); }
   return { ok: true, kind: e.kind, name: e.name, pages: e.kind === 'c' ? pageInfos(o) : null, change: e.change, dir: 'undo' };
 }
 export function redo(id: string): UndoResult {
@@ -1056,6 +1306,7 @@ export function redo(id: string): UndoResult {
   // fonts made by an operation that is undone no longer exist: never reuse a cached one
   o.fonts.clear();
   if (e.kind === 'c') o.infos = e.after ?? computeInfos(o);
+  if (e.name === 'Save the layer state') { o.layerShow = null; muLayers(o); }
   return { ok: true, kind: e.kind, name: e.name, pages: e.kind === 'c' ? pageInfos(o) : null, change: e.change, dir: 'redo' };
 }
 export function history(id: string) {
@@ -4025,13 +4276,32 @@ export function merge(files: { name: string; bytes: In; pages?: number[] }[], bo
  * file) and emptied in memory; `mergeWrite` writes the PDF object by object at the end, the
  * streams copied back from the temp file. Memory stays about the size of the biggest file.
  */
-export interface MergeState { out: mupdf.PDFDocument; at: number; marks: OutItem[]; spilled: Map<number, { off: number; len: number }>; next: number }
+export interface MergeState {
+  out: mupdf.PDFDocument; at: number; marks: OutItem[]; spilled: Map<number, { off: number; len: number }>; next: number;
+  /** objects written whole into the spill file already (markups and what they hold - a set with
+   *  hundreds of thousands of links filled the engine's 2 GB) and the objects they point at */
+  flushed: Map<number, { off: number; len: number }>; pinned: Set<number>;
+}
 export function mergeStart(): MergeState {
   const out = new mupdf.PDFDocument();
-  return { out, at: 0, marks: [], spilled: new Map(), next: out.countObjects() };
+  return { out, at: 0, marks: [], spilled: new Map(), next: out.countObjects(), flushed: new Map(), pinned: new Set() };
 }
+/** pages grafted, then markups copied, this many at a time between the steps (mergeFileSteps) */
+const GRAFT_STEP = 16, ANNOT_STEP = 8;
 /** one file's pages (all, or `pages`) added at the end; spill(raw stream bytes) -> where it was written */
 export function mergeAddFile(st: MergeState, name: string, bytes: In, spill: (raw: Uint8Array) => number, pages?: number[]): number {
+  const it = mergeFileSteps(st, name, bytes, spill, pages);
+  for (;;) { const r = it.next(); if (r.done) return r.value; }
+}
+/**
+ * mergeAddFile in steps: the engine waits a moment between them (host.ts), so MuPDF's objects
+ * the steps let go of are freed then (they go when JavaScript's garbage collector has run - never
+ * inside one long call). Streams go to the spill file every GRAFT_STEP pages; markups and all
+ * they hold are written out whole every ANNOT_STEP pages and emptied here (flushNew). A real
+ * 345 MB drawing set held 1.4 million objects - 225,000 links with their actions, 166,000
+ * measuring viewports: copied at once they took the engine past its 2 GB (malloc failed).
+ */
+export function* mergeFileSteps(st: MergeState, name: string, bytes: In, spill: (raw: Uint8Array) => number, pages?: number[]): Generator<void, number> {
   const { out } = st;
   const src = openOther(bytes);
   let added = 0;
@@ -4041,8 +4311,13 @@ export function mergeAddFile(st: MergeState, name: string, bytes: In, spill: (ra
       const list = pages ?? [...Array(src.countPages()).keys()];
       const first = st.at;
       const map = new Map<number, number>();
-      for (const sp of list) { if (!map.has(sp)) map.set(sp, st.at); gm.graftPage(st.at++, src, sp); added++; }
-      carryAnnots(out, gm, src, list.map((sp, k) => [sp, first + k]));
+      for (const sp of list) {
+        if (!map.has(sp)) map.set(sp, st.at);
+        gm.graftPage(st.at++, src, sp);
+        if (++added % GRAFT_STEP === 0) { spillNew(st, spill); yield; }
+      }
+      spillNew(st, spill);
+      yield* carryAnnotsSteps(out, gm, src, list.map((sp, k) => [sp, first + k]), (from, keep) => flushNew(st, spill, from, keep));
       carryLayers(out, gm, src);
       carryScales(out, src, list.map((sp, k) => [sp, first + k]));
       if (list.length) st.marks.push({ title: name.replace(/\.pdf$/i, ''), page: first, children: keepMarks(readOutline(src), map) });
@@ -4052,6 +4327,38 @@ export function mergeAddFile(st: MergeState, name: string, bytes: In, spill: (ra
   } finally { src.destroy?.(); }
   spillNew(st, spill);
   return added;
+}
+/** the objects made since `from` (all but `keep`) written whole to the spill file and made null here;
+ *  what they point at is pinned (writeObjects keeps it) */
+function flushNew(st: MergeState, spill: (raw: Uint8Array) => number, from: number, keep: Set<number>) {
+  const { out } = st;
+  const n = out.countObjects();
+  const pin = (v: mupdf.PDFObject, depth: number) => {
+    if (depth > 64) return;
+    if (v.isIndirect()) { st.pinned.add(v.asIndirect()); return; }
+    if (v.isArray()) { for (let i = 0; i < v.length; i++) pin(v.get(i), depth + 1); return; }
+    if (v.isDictionary()) v.forEach((x: mupdf.PDFObject) => pin(x, depth + 1));
+  };
+  for (let num = from; num < n; num++) {
+    if (keep.has(num) || st.flushed.has(num) || st.spilled.has(num)) continue;
+    const ref = out.newIndirect(num);
+    const obj = ref.resolve();
+    try {
+      if (obj.isNull()) continue;
+      pin(obj, 0);
+      let blob: Uint8Array;
+      if (ref.isStream()) {
+        const raw = ref.readRawStream();
+        try {
+          const v = raw.asUint8Array();
+          blob = Buffer.concat([Buffer.from(`${num} 0 obj\n${streamDict(out, obj, v.length)}\nstream\n`, 'latin1'), v, Buffer.from('\nendstream\nendobj\n', 'latin1')]);
+        } finally { raw.destroy?.(); }
+        ref.writeRawStream(new Uint8Array(0));
+      } else blob = Buffer.from(`${num} 0 obj\n${obj.toString(true, true)}\nendobj\n`, 'latin1');
+      st.flushed.set(num, { off: spill(blob), len: blob.length });
+      ref.writeObject(out.newNull());
+    } finally { obj.destroy?.(); ref.destroy?.(); }
+  }
 }
 /** every stream made since the last time: its bytes out to disk, emptied here */
 function spillNew(st: MergeState, spill: (raw: Uint8Array) => number) {
@@ -4073,7 +4380,7 @@ function spillNew(st: MergeState, spill: (raw: Uint8Array) => number) {
  */
 export function mergeWrite(st: MergeState, bookmarks: boolean, write: (b: string | Uint8Array) => void, copy: (off: number, len: number) => void) {
   writeOutline(st.out, bookmarks && st.marks.length > 1 ? st.marks : st.marks.flatMap((m) => m.children));
-  writeObjects(st.out, write, st.spilled, copy);
+  writeObjects(st.out, write, st.spilled, copy, st.flushed, st.pinned);
 }
 export function mergeDrop(st: MergeState) { try { st.out.destroy?.(); } catch { /* gone */ } }
 
@@ -4216,6 +4523,11 @@ function reachesPage(pages: Set<number>, v: mupdf.PDFObject, seen = new Set<numb
  * be valid in another file - its drawing stays). Pop-ups are left out (made again by readers).
  */
 function carryAnnots(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument, pairs: [number, number][]) {
+  for (const _ of carryAnnotsSteps(dst, gm, src, pairs)) { /* (all at once) */ }
+}
+/** carryAnnots ANNOT_STEP pages at a time: after each, flush(first object made in the step, the
+ *  objects that must stay - the form and its fields, which later widgets join) */
+function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument, pairs: [number, number][], flush?: (from: number, keep: Set<number>) => void): Generator<void, void> {
   const pages = pageSet(src);
   const newPage = new Map<number, mupdf.PDFObject>();
   // (a page taken twice: links to it go to its first copy)
@@ -4327,7 +4639,10 @@ function carryAnnots(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: mupdf.P
     return nf;
   };
   const SKIP = new Set(['P', 'Popup', 'IRT', 'Parent', 'StructParent']);
+  const live = () => { const k = new Set<number>(); for (const f of fields.values()) if (f.isIndirect()) k.add(f.asIndirect()); if (form && form.isIndirect()) k.add(form.asIndirect()); return k; };
+  let from = dst.countObjects(), step = 0;
   for (const [sp, dp] of pairs) {
+    if (flush && step++ && step % ANNOT_STEP === 1) { flush(from, live()); from = dst.countObjects(); yield; }
     const sPage = src.findPage(sp);
     const list = sPage.get('Annots');
     if (!list.isArray()) continue;
@@ -4373,6 +4688,7 @@ function carryAnnots(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: mupdf.P
     // replies follow their copied markup (one whose markup isn't there is no reply any more)
     for (const [a, na] of replies) { const irt = a.get('IRT'); const to = irt.isIndirect() ? map.get(irt.asIndirect()) : undefined; if (to) na.put('IRT', to); }
   }
+  if (flush) flush(from, live());
 }
 /** a signature field (its value is a signature of the file it is in) */
 function isSigField(f: mupdf.PDFObject): boolean {
@@ -5197,6 +5513,10 @@ export function snapshot(id: string): Uint8Array {
  * appended part is written (`write(view, from)`): a page rotated in a 500 MB file costs
  * a few KB, not 500 MB. Otherwise (repaired / bytes / asked for) the whole file.
  */
+/** past this size a changed file goes to the drawing engines as a whole copy written in pieces
+ *  (tests only change it: host.ts, PDFED_TEST_WHOLE_AT) */
+let wholeAt = 600e6;
+export function setWholeAt(n: number) { if (n > 0) wholeAt = n; }
 export function snapshotTo(id: string, write: (view: Uint8Array, from: number) => void, full = false, stream?: (fill: (put: (b: string | Uint8Array) => void) => void) => void, decrypt = false): { base: number } {
   const o = O(id);
   // (a decrypted whole copy for the drawing engines - drawPlain; never for a password-protected
@@ -5223,7 +5543,7 @@ export function snapshotTo(id: string, write: (view: Uint8Array, from: number) =
   if (!full && base > 0 && o.reader && !o.doc.wasRepaired() && !o.doc.hasUnsavedChanges()) { write(new Uint8Array(0), base); return { base }; }
   // past ~600 MB "original + changes" is built whole in memory and fails: a whole copy written in
   // pieces instead
-  if (stream && base > 600e6 && !encrypted(o)) { stream((put) => writeObjects(o.doc, put)); return { base: 0 }; }
+  if (stream && base > wholeAt && !encrypted(o)) { stream((put) => writeObjects(o.doc, put)); return { base: 0 }; }
   if (!full && base > 0 && o.reader && o.doc.canBeSavedIncrementally()) {
     let buf: mupdf.Buffer | null = null;
     try {
@@ -5477,6 +5797,163 @@ export function setLink(id: string, page: number, k: number, t: LinkSpec | null)
   });
 }
 
+
+// ---------------------------------------------------------------- drawing sets: links between sheets
+
+/** a reference to link: where it is on its page (as shown) and the page it goes to */
+export interface SheetLink { page: number; box: Rect; target: number }
+/** a sheet for the "Sheets" bookmark group */
+export interface SheetMark { page: number; title: string }
+export interface LinkSheetsResult { links: number; skipped: number; removed: number; bookmarks: number; pages: PageInfo[] | null; /** pages whose links changed */ touched: number[] }
+
+/** the links this app made with Link the sheets carry this key (a rerun replaces them) */
+const AUTO_LINK = 'GCCAutoLink';
+/** and its bookmark group this one (a group of the person's own called "Sheets" is left alone) */
+const AUTO_SHEETS = 'GCCSheets';
+
+/**
+ * Link the sheets (PLAN 7.5): links over the references, each going to its sheet, and a "Sheets"
+ * bookmark group after the file's own bookmarks - one undo step (cut into parts every few hundred
+ * objects, undone together). The links and group a run before made are taken out first, so a rerun
+ * replaces them. A reference under a link the file already has is left alone. Nothing to write and
+ * nothing to take out: no step at all (the file is not changed).
+ */
+export function linkSheets(id: string, links: SheetLink[] | null, marks: SheetMark[] | null): LinkSheetsResult {
+  const o = O(id);
+  const doc = o.doc;
+  const n = doc.countPages();
+  const okPage = (p: unknown) => Number.isInteger(p) && (p as number) >= 0 && (p as number) < n;
+  const want = (Array.isArray(links) ? links : []).filter((l) => l && okPage(l.page) && okPage(l.target) && l.page !== l.target && Array.isArray(l.box) && l.box.length === 4 && l.box.every(Number.isFinite) && l.box[2] > l.box[0] && l.box[3] > l.box[1]);
+  const sheets = marks ? marks.filter((m) => m && okPage(m.page)) : null;
+  const isOurs = (a: mupdf.PDFObject) => { try { const r = a.resolve(); return r.isDictionary() && r.get(AUTO_LINK).isBoolean() && r.get(AUTO_LINK).asBoolean(); } catch { return false; } };
+  const ourGroup = (d: mupdf.PDFObject) => { try { return d.isDictionary() && d.get(AUTO_SHEETS).isBoolean() && d.get(AUTO_SHEETS).asBoolean(); } catch { return false; } };
+  // what a run before left: found before any step is begun (links null - not asked for: the links
+  // of a run before stay; they went without a word - sweep S8). Read from the page objects: every
+  // page was loaded for it (sweep S15)
+  let old = 0;
+  if (links) for (let p = 0; p < n; p++) {
+    const an = doc.findPage(p).get('Annots');
+    if (an.isArray()) for (let j = 0; j < an.length; j++) if (isOurs(an.get(j))) old++;
+  }
+  const root = doc.getTrailer().get('Root');
+  const topItems = (): mupdf.PDFObject[] => {
+    const ol = root.get('Outlines');
+    const out: mupdf.PDFObject[] = [];
+    if (!ol.isDictionary()) return out;
+    let cur = ol.get('First');
+    const seen = new Set<number>();
+    for (let k = 0; k < 100000 && cur.isIndirect() && !seen.has(cur.asIndirect()); k++) { seen.add(cur.asIndirect()); out.push(cur); cur = cur.resolve().get('Next'); }
+    return out;
+  };
+  const oldGroups = sheets ? topItems().filter((x) => ourGroup(x.resolve())).length : 0;
+  if (!want.length && !old && !(sheets && (sheets.length || oldGroups))) return { links: 0, skipped: 0, removed: 0, bookmarks: 0, pages: null, touched: [] };
+  let made = 0, skipped = 0, objs = 0;
+  const touched = new Set<number>();
+  const pages = op(o, 'Link the sheets', 'c', () => {
+    // 1. the links of the run before
+    if (old) for (let p = 0; p < n; p++) {
+      const an = doc.findPage(p).get('Annots');
+      if (!an.isArray()) continue;
+      for (let j = an.length - 1; j >= 0; j--) if (isOurs(an.get(j))) { an.delete(j); touched.add(p); if (++objs % 400 === 0) opMore(o); }
+    }
+    // 2. the new links, page by page
+    const byPage = new Map<number, SheetLink[]>();
+    for (const l of want) { let a = byPage.get(l.page); if (!a) byPage.set(l.page, (a = [])); a.push(l); }
+    const destOf = new Map<number, mupdf.PDFObject>();
+    const dest = (t: number) => { let d = destOf.get(t); if (!d) { d = doc.newArray(); d.push(doc.findPage(t)); d.push(doc.newName('Fit')); destOf.set(t, d); } return d; };
+    for (const [p, list] of byPage) {
+      const page = pg(o, p);
+      const po = page.getObject();
+      const ctm = page.getTransform();
+      const inv = mupdf.Matrix.invert(ctm);
+      let an = po.get('Annots');
+      // (the file's own links on the page, as shown: a reference under one is left alone)
+      const theirs: Rect[] = [];
+      if (an.isArray()) for (let j = 0; j < an.length; j++) {
+        const a = an.get(j).resolve();
+        if (!a.isDictionary() || !a.get('Subtype').isName() || a.get('Subtype').asName() !== 'Link' || isOurs(a)) continue;
+        const rr = a.get('Rect');
+        if (!rr.isArray() || rr.length !== 4) continue;
+        const r = mupdf.Rect.transform([0, 1, 2, 3].map((i) => rr.get(i).asNumber()) as Rect, ctm);
+        theirs.push([Math.min(r[0], r[2]), Math.min(r[1], r[3]), Math.max(r[0], r[2]), Math.max(r[1], r[3])]);
+      }
+      const covered = (b: Rect) => theirs.some((r) => { const w = Math.min(b[2], r[2]) - Math.max(b[0], r[0]), h = Math.min(b[3], r[3]) - Math.max(b[1], r[1]); return w > 0 && h > 0 && w * h >= 0.5 * (b[2] - b[0]) * (b[3] - b[1]); });
+      for (const l of list) {
+        if (covered(l.box)) { skipped++; continue; }
+        const r = mupdf.Rect.transform(l.box, inv);
+        const d = doc.newDictionary();
+        d.put('Type', doc.newName('Annot'));
+        d.put('Subtype', doc.newName('Link'));
+        d.put('Rect', [Math.min(r[0], r[2]), Math.min(r[1], r[3]), Math.max(r[0], r[2]), Math.max(r[1], r[3])]);
+        d.put('Border', [0, 0, 0]);
+        d.put('Dest', dest(l.target));
+        d.put('P', po);
+        d.put(AUTO_LINK, true);
+        if (!an.isArray()) { po.put('Annots', doc.newArray()); an = po.get('Annots'); }
+        an.push(doc.addObject(d));
+        touched.add(p);
+        made++;
+        if (++objs % 400 === 0) opMore(o);
+      }
+    }
+    // 3. the Sheets group: the one made before out, the new one after the file's own bookmarks
+    if (sheets) {
+      let ol = root.get('Outlines');
+      const items = topItems();
+      const keep = items.filter((x) => !ourGroup(x.resolve()));
+      if (keep.length !== items.length && ol.isDictionary()) {
+        keep.forEach((x, i) => { const d = x.resolve(); if (i) d.put('Prev', keep[i - 1]); else d.delete('Prev'); if (i < keep.length - 1) d.put('Next', keep[i + 1]); else d.delete('Next'); });
+        if (keep.length) { ol.put('First', keep[0]); ol.put('Last', keep[keep.length - 1]); } else { ol.delete('First'); ol.delete('Last'); }
+        const c = ol.get('Count');
+        if (c.isNumber()) ol.put('Count', Math.max(0, c.asNumber() - (items.length - keep.length)));
+      }
+      if (sheets.length) {
+        if (!ol.isDictionary()) { const nd = doc.newDictionary(); nd.put('Type', doc.newName('Outlines')); root.put('Outlines', doc.addObject(nd)); ol = root.get('Outlines'); }
+        const g = doc.newDictionary();
+        g.put('Title', doc.newString('Sheets'));
+        g.put('Parent', ol);
+        g.put(AUTO_SHEETS, true);
+        g.put('Dest', dest(sheets[0].page));
+        const gref = doc.addObject(g);
+        const kids = sheets.map((m) => {
+          const d = doc.newDictionary();
+          d.put('Title', doc.newString(String(m.title ?? '').slice(0, 300)));
+          d.put('Parent', gref);
+          d.put('Dest', dest(m.page));
+          if (++objs % 400 === 0) opMore(o);
+          return doc.addObject(d);
+        });
+        kids.forEach((k, i) => { const d = k.resolve(); if (i) d.put('Prev', kids[i - 1]); if (i < kids.length - 1) d.put('Next', kids[i + 1]); });
+        const gd = gref.resolve();
+        gd.put('First', kids[0]);
+        gd.put('Last', kids[kids.length - 1]);
+        // (closed: a few hundred sheets would push the file's own bookmarks out of sight)
+        gd.put('Count', -kids.length);
+        const c = ol.get('Count');
+        const shown = c.isNumber() ? Math.max(0, c.asNumber()) : keepCount(ol);
+        const last = ol.get('Last');
+        if (last.isIndirect()) { last.resolve().put('Next', gref); gd.put('Prev', last); } else ol.put('First', gref);
+        ol.put('Last', gref);
+        ol.put('Count', shown + 1);
+      }
+    }
+    // (links written as objects: MuPDF reads a page's links when the page is loaded, and gives
+    // the same page back while any wrapper of it lives - the cached pages are let go, so the
+    // next look reads the new links)
+    for (const pgObj of o.pages.values()) { try { pgObj.destroy?.(); } catch { /* gone */ } }
+    resetPages(o);
+    return pageInfos(o);
+  });
+  return { links: made, skipped, removed: old, bookmarks: sheets ? sheets.length : 0, pages, touched: [...touched].sort((a, b) => a - b) };
+}
+/** the visible top-level items of an outline with no usable Count (its items as they are, closed) */
+function keepCount(ol: mupdf.PDFObject): number {
+  let k = 0, cur = ol.get('First');
+  const seen = new Set<number>();
+  while (cur.isIndirect() && !seen.has(cur.asIndirect()) && k < 100000) { seen.add(cur.asIndirect()); k++; cur = cur.resolve().get('Next'); }
+  return k;
+}
+
 // ---------------------------------------------------------------- pages <-> pictures
 
 /** the most pixels a page picture may have (a picture of 60 million pixels is ~180 MB to draw) */
@@ -5584,9 +6061,11 @@ export function picturesToPdf(files: { bytes: In; name: string }[], o: { size: '
 }
 
 /** a file opened only for a batch job */
-export function batchOpen(bytes: In, password?: string): string {
+export function batchOpen(bytes: In, password?: string, layers?: Record<number, boolean> | null): string {
   const id = 'batch-' + Math.random().toString(36).slice(2);
   const doc = openOther(bytes, password);
+  // (layers shown other than the file says in the window: this copy knows nothing of them - PLAN 7.8)
+  if (layers) applyLayers(doc, new Map(Object.entries(layers).map(([k, v]) => [Number(k), !!v])));
   docs.set(id, { doc, pages: new Map(), undo: [], redo: [], fonts: new Map(), author: '', changedContent: true, reader: bytes instanceof Uint8Array ? undefined : bytes });
   return id;
 }
@@ -5715,6 +6194,12 @@ export function printFile(id: string, opts: PrintOpts): Uint8Array {
     // hidden layer of a drawing would print)
     const ocp = o.doc.getTrailer().get('Root', 'OCProperties');
     if (!ocp.isNull()) pd.getTrailer().get('Root').put('OCProperties', gmap.graftObject(ocp));
+    // (and the layers the window shows differently, not saved yet: a print shows what the screen
+    // shows - PLAN 7.8. The sheets that go as pictures are made from this file, so they follow)
+    if (!ocp.isNull() && o.layerShow?.size) {
+      const d = layerDefaults(o);
+      if (d) writeLayerState(pd, o.layerShow, d, (n) => gmap.graftObject(o.doc.newIndirect(n)), o.layerShow);
+    }
     // graftPage leaves the markups behind: copy the ones that print (without their page link,
     // pop-up and replies), then burn them into the page
     // (a markup's layer, /OC, comes along - through the same graft map, so it names the layer copied

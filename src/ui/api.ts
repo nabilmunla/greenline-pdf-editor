@@ -29,6 +29,10 @@ export interface UpdateState {
   version: string; installed: boolean; scope: string; dir: string; source: string; setupSource: string; ownSource: boolean;
   /** the source is a web address (GitHub releases) - not a folder; defaultSource: the build's own */
   web?: boolean; defaultSource?: string;
+  /** where "Restore default" goes: the build's own location (Greenline: its link; company: the setup's folder, else its own); empty = none */
+  defaultFor?: string;
+  /** there is a default to put back (it may be '' - no updates, as the setup chose) */
+  defaultSet?: boolean;
   checked: number; previous: string; pendingAtExit: boolean;
   /** Linux package this copy came in ('' elsewhere) and the new version's package file */
   linux?: '' | 'appimage' | 'deb'; pkgFile?: string;
@@ -38,6 +42,7 @@ export interface UpdateState {
 }
 export interface ReportStatus { waiting: number; folder: string; queue: string; state: 'idle' | 'sent' | 'failed' | 'nofolder' | 'web'; err: string; at: number; sent: number; /** 'web': a new GitHub issue with the report filled in */ issue?: string;
   /** public build with a report receiver: reports go there anonymously; crashes: crash reports turned on */ anon?: boolean; crashes?: boolean }
+export interface CountState { active: boolean; asked: boolean; on: boolean }
 /** what's new in a version, by group ("New features", "General polishing", "Fixes") */
 export type NoteGroups = Record<string, string[]>;
 export interface UpdatedInfo { from: string; to: string; notes: string[]; groups?: NoteGroups | null; back: boolean }
@@ -145,6 +150,11 @@ export interface GccApi {
   reportStatus(): Promise<ReportStatus>;
   /** public build: anonymous crash reports on / off; preview = what one looks like (JSON) */
   reportCrashSharing(on: boolean): Promise<ReportStatus>;
+  /** Greenline's anonymous user counter (active: false in the company build); claim: true once per start while unanswered */
+  countState(): Promise<CountState>;
+  countClaim(): Promise<boolean>;
+  countAnswer(keep: boolean): Promise<CountState>;
+  countSet(on: boolean): Promise<CountState>;
   reportPreview(): Promise<string>;
   reportOpenQueue(): Promise<string>;
   reportCrash(where: string, message: string, stack: string): void;

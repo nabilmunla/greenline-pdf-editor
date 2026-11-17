@@ -90,6 +90,7 @@ const first = (v) => (Object.entries(rn[v]).find(([k]) => !k.startsWith('Public:
 // (the newest version with notes of this build's own - 0.10.0 had only the public build's: Linux)
 const newest = Object.keys(rn).find((v) => first(v));
 ok(['0.9.5', '0.9.6', newest].every((v) => t.includes(first(v))), 'Updated from 0.9.4: 0.9.5, 0.9.6 and ' + newest + ' all listed (' + t.length + ' lines)');
+if (!['0.9.5', '0.9.6', newest].every((v) => t.includes(first(v)))) console.log('   missing:', JSON.stringify(['0.9.5', '0.9.6', newest].map(first).filter((x) => !t.includes(x)).map((x) => x.slice(0, 120))), 'shown:', JSON.stringify(t.filter((x) => /sheet/i.test(x)).map((x) => x.slice(0, 120))));
 ok(!t.includes(first('0.9.4')), 'not 0.9.4\'s own');
 await app.close().catch(() => {});
 

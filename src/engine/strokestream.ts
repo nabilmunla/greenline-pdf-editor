@@ -23,6 +23,12 @@ export class StrokeMergeStream {
    *  was searched for EI (the next piece goes on from there - a 30 MB picture was searched again
    *  from its start at every 256 KB piece; Phase 6 sweep) */
   private biAt = -1;
+  /** an unfinished token at the window end (a string, comment, hex string, name or word): where it
+   *  starts, how far it was read and its nesting - the next piece goes on from there (it was read
+   *  from its start again with every piece: time grew with the square of its size - sweep S1) */
+  private tokAt = -1;
+  private tokTo = 0;
+  private tokDepth = 0;
   private biTo = 0;
   private path: number[] = [];
   private pathOk = false;
@@ -103,6 +109,7 @@ export class StrokeMergeStream {
     this.src.copyWithin(0, keep, this.n);
     this.n -= keep; this.i -= keep; this.segStart -= keep;
     if (this.biAt >= 0) { this.biAt -= keep; this.biTo -= keep; }
+    if (this.tokAt >= 0) { this.tokAt -= keep; this.tokTo -= keep; }
     for (let k = 0; k < this.path.length; k++) this.path[k] -= keep;
     for (let k = 0; k < this.pending.length; k++) this.pending[k] -= keep;
   }
@@ -114,20 +121,27 @@ export class StrokeMergeStream {
   private scan(final: boolean) {
     const src = this.src, n = this.n;
     let i = this.i;
+    const ra = this.tokAt, rt = this.tokTo, rd = this.tokDepth;
+    this.tokAt = -1;
+    /** stopped inside the token at `a`, read up to `to` */
+    const hold = (a: number, to: number, depth = 0) => { this.tokAt = a; this.tokTo = to; this.tokDepth = depth; };
     while (i < n) {
       const c = src[i];
       if (WS[c]) { i++; continue; }
       if (c === 0x25) { // % comment
         const a = i;
+        if (a === ra) i = rt;
         while (i < n && src[i] !== 10 && src[i] !== 13) i++;
-        if (i >= n && !final) { i = a; break; }
+        if (i >= n && !final) { hold(a, i); i = a; break; }
         continue;
       }
       if (c === 0x28) { // (string) with nesting and escapes
         const a = i;
         let depth = 1; i++;
+        if (a === ra) { i = rt; depth = rd; }
         while (i < n && depth) { const d = src[i]; if (d === 0x5c) i += 2; else { if (d === 0x28) depth++; else if (d === 0x29) depth--; i++; } }
-        if ((depth || i > n) && !final) { i = a; break; }
+        // (an escape cut by the window: read again from its backslash)
+        if ((depth || i > n) && !final) { hold(a, i > n ? i - 2 : i, depth); i = a; break; }
         continue;
       }
       if (c === 0x3c) { // <hex> or <<
@@ -135,21 +149,24 @@ export class StrokeMergeStream {
         // (past the end there is nothing - the window may hold old bytes there)
         if (i + 1 < n && src[i + 1] === 0x3c) { i += 2; continue; }
         const a = i;
+        if (a === ra) i = rt;
         while (i < n && src[i] !== 0x3e) i++;
-        if (i >= n && !final) { i = a; break; }
+        if (i >= n && !final) { hold(a, i); i = a; break; }
         i++;
         continue;
       }
       if (c === 0x3e || c === 0x5b || c === 0x5d || c === 0x7b || c === 0x7d || c === 0x29) { i++; continue; }
       if (c === 0x2f) { // /Name
         const a = i;
-        i++; while (i < n && !WS[src[i]] && !DELIM[src[i]]) i++;
-        if (i >= n && !final) { i = a; break; }
+        i++; if (a === ra) i = rt;
+        while (i < n && !WS[src[i]] && !DELIM[src[i]]) i++;
+        if (i >= n && !final) { hold(a, i); i = a; break; }
         continue;
       }
       const a = i;
+      if (a === ra) i = rt;
       while (i < n && !WS[src[i]] && !DELIM[src[i]]) i++;
-      if (i >= n && !final) { i = a; break; }
+      if (i >= n && !final) { hold(a, i); i = a; break; }
       if (i === a) { i++; continue; }
       const ch = src[a];
       if ((ch >= 0x30 && ch <= 0x39) || ch === 0x2d || ch === 0x2b || ch === 0x2e) continue;

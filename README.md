@@ -30,6 +30,7 @@ How: pages are read from disk only as they're needed, never the whole file at on
 - **Take-off measuring:** set the scale or calibrate on a known dimension, then length, area *with* perimeter, count, and count by tag (e.g. every D-01 door mark on a plan). Corners snap to the drawing - ends, middles and perpendicular - with Ortho, a crosshair and a magnifier for exact points, and any outline can be continued from any corner; totals go straight to Excel.
 - **Markups:** clouds, callouts, arrows and text boxes formatted like a word processor; stamps, including your own company seal from a scan.
 - **Pages:** merge, extract, insert, reorder and rotate thousands of pages; combine files straight from Windows Explorer's right-click menu.
+- **Drawing sets:** "Link the sheets" links every "see A-301" to that sheet and adds a Sheets bookmark group; a Layers panel turns CAD layers on and off, on screen, in print and in exports.
 - **Scans:** OCR in English and Arabic, fully offline.
 - **Export:** BOQs and schedules to Excel, documents to Word.
 - **Print:** A0 sheets fitted onto A3 or A4, or at actual size for drawings to scale, with a preview of every sheet; or just a marked part of a sheet, enlarged to the paper.
@@ -45,7 +46,17 @@ How: pages are read from disk only as they're needed, never the whole file at on
 
 ## Private by design
 
-Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, the AI assistant only when you use it, and problem reports only when you send them (see below).
+Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, the AI assistant only when you use it, problem reports only when you send them (see below), and the anonymous user count (see below; you can turn it off).
+
+## Counting users
+
+The app counts how many installs there are, to see how popular it is. Nothing more. It asks you on first start; one click turns it off.
+
+- **Sent, once a day:** a random number made on your PC (not linked to you), the app version, and Windows or Linux. Nothing else.
+- **Not sent:** your name, PC name, files, folders, settings or what you do in the app.
+- **Kept:** the developer's [small open receiver](reports-receiver/worker.js) keeps the number only in scrambled form (a hash), for 30 days after you last use the app, and adds up counts per day, week and month. The totals are kept for about a year; nobody can look up a person. Your internet address, which any connection shows, is used in scrambled form for an hour to stop floods of pings, and is not kept with the count.
+- **What it cannot tell:** who you are, how often you start the app, or what you open. Two PCs, or two Windows users on one PC, count as two.
+- **Turn it off:** Settings › Privacy › "Count me as a user of this app" (or answer "Turn it off" in the first-start window). Nothing is sent after that, and the random number is deleted from your PC.
 
 ## Install
 

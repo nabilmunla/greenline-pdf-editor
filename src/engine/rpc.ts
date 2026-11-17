@@ -16,6 +16,19 @@ export const isFileRef = (v: unknown): v is FileRef => !!v && typeof v === 'obje
  *  the engine's own crash - not one report per call that was waiting) */
 export const engineDown = (e: Error) => Object.assign(e, { engineDown: true });
 export const isEngineDown = (e: unknown) => !!(e && typeof e === 'object' && (e as { engineDown?: boolean }).engineDown);
+/** an operating-system error reading or opening a file ("UNKNOWN: unknown error, read",
+ *  "EIO: i/o error, read", "ENOENT: no such file or directory, open '…'") */
+/** "the file could not be read from the disk any more": said once a minute, wherever the failed
+ *  read is caught (most background reads are caught quietly - the person is still told) */
+let fileReadAt = -1e9;
+export function fileReadNotice() {
+  const now = Date.now();
+  if (now - fileReadAt < 60000 || typeof window === 'undefined') return;
+  fileReadAt = now;
+  // (the toast App shows for engine notices - see 'gcc-engine-gaveup' in App.tsx)
+  window.dispatchEvent(new CustomEvent('gcc-engine-gaveup', { detail: 'A file could not be read from the disk any more - it was moved or deleted, or its drive or network went away. Save a copy if you have changes, then open it again.' }));
+}
+export const isFileReadError = (msg: string) => /^(?:UNKNOWN|EIO|EBUSY|ENOENT|EPERM|EACCES|ENXIO|ETIMEDOUT|ECONNRESET|ENETUNREACH|EHOSTUNREACH|EHOSTDOWN|ESTALE|ENODEV): [^,]*, (?:read|open|fstat|stat)\b/.test(msg);
 
 export class EngineClient {
   private port: MessagePort | null = null;
@@ -109,6 +122,13 @@ export class EngineClient {
     if (ms > 150) { slowCalls.push({ engine: this.name, method: p.method, ms: Math.round(ms), at: Math.round(p.t0) }); if (slowCalls.length > 200) slowCalls.shift(); }
     if (!d.ok) {
       const err = new Error(d.error);
+      // (crash reports show the call that failed: "at reply / onmessage" said nothing - 4 reports
+      // on the share could not be traced to their call)
+      Object.assign(err, { engine: this.name, method: p.method });
+      err.stack = `Error: ${d.error}\n    at engine ${this.name}: ${p.method}`;
+      // the file could not be read from the disk any more (moved, deleted, a network drive or
+      // USB stick gone, a cloud file not on the PC): Windows' answer, not the app's fault
+      if (isFileReadError(d.error)) { Object.assign(err, { fileRead: true }); fileReadNotice(); }
       // (a view tile the window no longer wanted: not drawn, nothing went wrong)
       if (d.stale) { p.rej(Object.assign(err, { stale: true })); return; }
       // the engine running out of memory (its last answers before it is restarted), or a page

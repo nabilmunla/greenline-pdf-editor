@@ -622,9 +622,14 @@ function slabFor(d: Doc, pg: number, p: PageCache, scale: number, x: number, y: 
 function dropSlabs(d: Doc, pg?: number) { for (let k = slabs.length - 1; k >= 0; k--) if (slabs[k].d === d && (pg === undefined || slabs[k].pg === pg)) slabs.splice(k, 1); }
 
 /** every character on the page with its box in page space (cached per page) */
-export function chars(id: string, pg: number): CharInfo {
+/** (`keep` false: a page not loaded is loaded for this only and let go after - a whole-file read,
+ *  Link the sheets, kept up to 24 parsed pages, dense ones held for 8 s more: sweep S5) */
+export function chars(id: string, pg: number, keep = true): CharInfo {
   const d = mustDoc(id);
-  const p = page(d, pg);
+  if (!keep && !d.pages.has(pg)) return withPage(d, pg, charsOf);
+  return charsOf(page(d, pg));
+}
+function charsOf(p: PageCache): CharInfo {
   if (p.chars) return p.chars;
   const q = Q();
   const tp = textPage(p);

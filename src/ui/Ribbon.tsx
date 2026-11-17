@@ -175,6 +175,7 @@ export function Ribbon(p: Props) {
             </div>
             <div className="rstack">
               {small('props', 'Settings panel', A.togglePanel, { title: 'Show or hide the panel on the right with the settings of the selected markup or tool (F4)', on: p.settings.propsPanel !== false })}
+              {small('layers', 'Layers', A.layers, { title: "The file's layers (CAD layers): switch them on and off on screen, in print and in exports" })}
             </div>
             <div className="rstack">
               {small('fitw', 'Fit width', () => A.fit('width'), { title: 'Ctrl+2' })}
@@ -254,7 +255,7 @@ export function Ribbon(p: Props) {
       body = (
         <>
           <Group label="Text">{T('edit-text', 'edittext', 'Edit text')}{T('typewriter', 'typewriter', 'Add text')}{B('image', 'Add image', A.image)}</Group>
-          <Group label="Links">{T('link', 'link', 'Link')}</Group>
+          <Group label="Links">{T('link', 'link', 'Link')}{B('linksheets', 'Link the sheets', A.linkSheets, { title: 'For a drawing set: links every "see A-301" to that sheet and adds a Sheets group of bookmarks. One Ctrl+Z takes it all out again' })}</Group>
           <Group label="Redact">{T('redact-area', 'redact', 'Mark area')}{T('redact-text', 'redacttext', 'Mark text')}{B('search', 'Find & mark', A.redactSearch, { title: 'Find words (names, amounts…) and mark them all for redaction' })}{B('apply', 'Apply', A.applyRedactions, { title: 'Remove everything under the redaction marks for good' })}</Group>
           <Group label="Page marks">{B('number', 'Numbers & headers', () => A.marks(false), { title: 'Page numbers, headers/footers, Bates numbers, watermark or stamp on every page' })}</Group>
           <Group label="Flatten"><FlattenButton A={A} disabled={dis} hasSel={p.sel.length > 0} /></Group>
@@ -572,7 +573,7 @@ function LabelSize({ A, doc, n }: { A: Record<string, any>; doc: PdfDoc | null; 
       if (n) { if (again.current && Math.abs(vr.current - k) > 1e-6) { again.current = false; const f = vr.current / k; setV(f); vr.current = f; commit(); return; } setV(1); }
       else if (again.current) { again.current = false; commit(); }
       again.current = false;
-    });
+    }).catch(A.fail);
   };
   return (
     <div className="rstack lsz">

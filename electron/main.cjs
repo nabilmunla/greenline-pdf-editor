@@ -1658,6 +1658,18 @@ reports = require('./reports.cjs').create({
   // (the public build's anonymous report receiver - none in the company build)
   endpoint: String(process.env.PDFED_REPORT_ENDPOINT || require('../package.json').reportEndpoint || ''),
 });
+// ---------------------------------------------------------------- anonymous user counter (Greenline build only)
+// count.cjs does nothing unless package.json "brand" is "greenline" and a receiver is named (the report
+// receiver's address, or PDFED_COUNT_URL when set - tests). Its settings live in settings.json.
+const counter = require('./count.cjs').create({
+  brand: String(require('../package.json').brand || ''), version: VERSION, readSettings, writeSettings, log,
+  url: String(process.env.PDFED_COUNT_URL || require('./count.cjs').countUrl(require('../package.json').reportEndpoint || '')),
+  first: Number(process.env.PDFED_COUNT_FIRST) || undefined,
+});
+ipcMain.handle('count:state', () => counter.state());
+ipcMain.handle('count:claim', () => counter.claim());
+ipcMain.handle('count:answer', (_e, keep) => counter.answer(!!keep));
+ipcMain.handle('count:set', (_e, on) => counter.set(!!on));
 let reportShot = null; // the window as it was when "Report a problem" was opened
 ipcMain.handle('report:capture', async (_e) => {
   const win = winOf(_e);
@@ -1891,6 +1903,7 @@ app.whenReady().then(() => {
   if (isCombine(process.argv)) log('combine: started for a selection');
   watchSpool(isCombine(process.argv) ? 10000 : 0);
   updater.start();
+  counter.start();
   reports.scheduleFlush(Number(process.env.PDFED_REPORT_FIRST) || 30000);
   setInterval(() => reports.scheduleFlush(1000), 30 * 60 * 1000);
   setTimeout(() => { void refreshRegistration().catch((e) => log('registration: ' + e)); }, 4000);

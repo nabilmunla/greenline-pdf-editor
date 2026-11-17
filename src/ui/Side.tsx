@@ -2,7 +2,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PdfDoc } from './doc';
 import type { SelItem, Hit } from './Viewer';
-import type { AnnotData, OutNode } from '../engine/mu';
+import type { AnnotData, OutNode, LayerInfo } from '../engine/mu';
 import { tiles, previewReqs, drawPreview } from './tiles';
 import { renderers, mu, muBatchFile } from './engines';
 import { fileArg, type FileRef } from '../engine/rpc';
@@ -10,11 +10,11 @@ import { Ico } from './icons';
 import { css } from './tools';
 import { gcc } from './api';
 import { writeXlsx } from './xlsxwrite';
-import { measureNumber, perimeterNumber, numStyle } from './measurexl';
+import { measureNumber, perimeterNumber, commentRow, headRow, COMMENT_HEAD, COMMENT_WIDTHS } from './measurexl';
 import { prepare, dragIcon, dropPages } from './pagedrag';
 import { pageRange } from './pagesel';
 
-export type SideKind = 'pages' | 'bookmarks' | 'comments' | 'totals' | 'search';
+export type SideKind = 'pages' | 'bookmarks' | 'comments' | 'totals' | 'search' | 'layers';
 
 interface Props {
   kind: SideKind;
@@ -67,7 +67,7 @@ export function SidePanel(p: Props) {
     return () => { ro.disconnect(); window.removeEventListener('resize', fit); };
   }, [p.doc.id]);
   const width = Math.min(want, room);
-  const title = { pages: 'Pages', bookmarks: 'Bookmarks', comments: 'Comments', totals: 'Counts & totals', search: 'Search' }[p.kind];
+  const title = { pages: 'Pages', bookmarks: 'Bookmarks', comments: 'Comments', totals: 'Counts & totals', search: 'Search', layers: 'Layers' }[p.kind];
   const startResize = (e: React.PointerEvent) => {
     const x0 = e.clientX, w0 = width, most = roomNow();
     const mv = (ev: PointerEvent) => setWidth(Math.max(180, Math.min(most, w0 + ev.clientX - x0)));
@@ -88,6 +88,7 @@ export function SidePanel(p: Props) {
       {p.kind === 'comments' && <Comments {...p} />}
       {p.kind === 'totals' && <Totals key={p.doc.id} {...p} />}
       {p.kind === 'search' && <Search {...p} />}
+      {p.kind === 'layers' && <Layers key={p.doc.id} {...p} />}
       <div className="side-grip" onPointerDown={startResize} />
     </div>
   );
@@ -338,7 +339,7 @@ function Thumbs(p: Props & { width: number }) {
   return (
     <div className="thumbs" ref={box} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropAt(null); }}
       onDragOver={over} onDrop={(e) => void drop(e)}
-      onPointerMove={pmove} onPointerUp={(e) => void pup(e)}>
+      onPointerMove={pmove} onPointerUp={(e) => void pup(e).catch((er) => p.toast(String((er as Error)?.message || er), 'err'))}>
       <div style={{ height: total, position: 'relative' }}>
         {vis.map((i) => {
           const ri = Math.floor(i / cols), ci = i % cols;
@@ -625,7 +626,7 @@ function Bookmarks(p: Props) {
     if (['Delete', 'F2', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) e.stopPropagation();
     let done = true;
     if (e.key === 'F2' && n) setEditing(k);
-    else if (e.key === 'Delete' && n) void A.remove(k);
+    else if (e.key === 'Delete' && n) void A.remove(k).catch((er) => p.toast(String((er as Error)?.message || er), 'err'));
     else if (e.key === 'Enter' && n) { if (n.page >= 0) p.goTo(n.page); }
     else if (e.altKey && e.key === 'ArrowUp' && n) A.up(k);
     else if (e.altKey && e.key === 'ArrowDown' && n) A.down(k);
@@ -701,7 +702,7 @@ function Bookmarks(p: Props) {
       <div className="bm-tools">
         <button className="btn sm" onClick={A.add} disabled={!marks} title={`A bookmark for page ${page + 1} (the page in view), ${selNode ? 'after the one chosen' : 'at the end'}`}><Ico n="plus" size={13} /> Add</button>
         <button className="btn sm ghost" disabled={!selNode} onClick={() => setEditing(sel)} title="Rename (F2)">Rename</button>
-        <button className="btn sm ghost" disabled={!selNode} onClick={() => void A.remove(sel)} title="Delete (Del)">Delete</button>
+        <button className="btn sm ghost" disabled={!selNode} onClick={() => void A.remove(sel).catch((er) => p.toast(String((er as Error)?.message || er), 'err'))} title="Delete (Del)">Delete</button>
         <button className="btn sm ghost" disabled={!selNode} onClick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setMenu({ x: r.left, y: r.bottom + 2, key: sel }); }} onPointerDown={(e) => e.stopPropagation()} title="More">⋯</button>
       </div>
       <div className="bm-list" ref={box} tabIndex={0} onKeyDown={keys}
@@ -726,7 +727,7 @@ function Bookmarks(p: Props) {
             ['Move in (under the one above)', () => A.indent(menu.key), pOf(menu.key).slice(-1)[0] === 0, 'Alt+→'],
             ['Move out', () => A.outdent(menu.key), pOf(menu.key).length < 2, 'Alt+←'],
             ['sep'],
-            [selNode.children.length ? `Delete (and the ${countAll(selNode.children)} under it)` : 'Delete', () => void A.remove(menu.key), false, 'Del'],
+            [selNode.children.length ? `Delete (and the ${countAll(selNode.children)} under it)` : 'Delete', () => void A.remove(menu.key).catch((er) => p.toast(String((er as Error)?.message || er), 'err')), false, 'Del'],
           ] as [string, (() => void)?, boolean?, string?][]).map(([label, run, dis, key], i) => label === 'sep'
             ? <div key={i} className="sep" />
             : <button key={i} disabled={!!dis} onClick={() => { setMenu(null); run!(); window.setTimeout(() => { if (!document.querySelector('.bm-list input.bmedit')) box.current?.focus({ preventScroll: true }); }, 0); }}>{label}{key && <span className="k">{key}</span>}</button>)}
@@ -809,6 +810,82 @@ function useAllMarkups(p: Props, keep: (a: AnnotData) => boolean): AnnotData[] |
     return () => { live = false; };
   }, [p.rev, doc]);
   return all;
+}
+
+// ---------------------------------------------------------------- layers (PLAN 7.8)
+
+/**
+ * Layers: the file's optional content groups (CAD layers), a tick each, nested ones indented. A
+ * click shows / hides the layer on screen, in Print and in the exports - for display only: the
+ * file is not changed (and not marked changed) until "Save the layer state" writes it into the
+ * file (one undo step). The state belongs to the tab and is forgotten when it closes. Locked
+ * layers are listed with a lock and cannot be switched. Clicks within 300 ms are applied together
+ * (one new drawing copy).
+ */
+function Layers(p: Props) {
+  const { doc } = p;
+  const [list, setList] = useState<LayerInfo[] | null>(null);
+  /** the state asked for and not yet applied (or being applied): shown meanwhile */
+  const [pend, setPend] = useState<Record<number, boolean> | null>(null);
+  const pendRef = useRef<Record<number, boolean> | null>(null);
+  const timer = useRef<number | null>(null);
+  const alive = useRef(true);
+  const reload = async () => { try { const m = await doc.layers(); if (alive.current) setList(m); } catch { if (alive.current) setList([]); } };
+  useEffect(() => {
+    alive.current = true;
+    void reload();
+    return () => { alive.current = false; };
+  }, [doc.id, doc.baseRev, doc.marksRev]);
+  const flush = async () => {
+    if (timer.current) { window.clearTimeout(timer.current); timer.current = null; }
+    const m = pendRef.current;
+    if (!m) return;
+    try { await doc.setLayers(m); } catch (e) { p.toast(String((e as Error)?.message || e), 'err'); }
+    if (pendRef.current === m) { pendRef.current = null; if (alive.current) setPend(null); }
+    if (alive.current) await reload();
+  };
+  // (the tab changed / the panel closed with a click not yet applied: applied now, it was asked for)
+  useEffect(() => () => { if (timer.current) void flush(); }, []);
+  const eff = (l: LayerInfo) => pend?.[l.num] ?? l.shown;
+  const ask = (next: Record<number, boolean>) => {
+    pendRef.current = next;
+    setPend(next);
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => void flush(), 300);
+  };
+  const current = () => pendRef.current ?? Object.fromEntries((list || []).map((l) => [l.num, l.shown]));
+  const click = (l: LayerInfo) => { if (l.locked) return; const c = current(); ask({ ...c, [l.num]: !c[l.num] }); };
+  const all = (on: boolean) => { const c = current(); ask(Object.fromEntries((list || []).map((l) => [l.num, l.locked ? c[l.num] : on]))); };
+  const none = !!list && !list.length;
+  const differs = !!list && list.some((l) => eff(l) !== l.on);
+  const save = async () => {
+    try {
+      await flush();
+      if (await doc.saveLayerState()) p.toast('The layer state is saved in the file. Ctrl+Z takes it back.', 'ok');
+    } catch (e) { p.toast(String((e as Error)?.message || e), 'err'); }
+    if (alive.current) await reload();
+  };
+  const free = (list || []).filter((l) => !l.locked);
+  return (
+    <div className="side-body col layers">
+      <div className="bm-tools">
+        <button className="btn sm" disabled={!free.length || free.every((l) => eff(l))} onClick={() => all(true)} title="Show every layer">All on</button>
+        <button className="btn sm" disabled={!free.length || free.every((l) => !eff(l))} onClick={() => all(false)} title="Hide every layer that is not locked">All off</button>
+        <button className="btn sm" disabled={!differs} onClick={() => void save()} title="Write what is shown into the file as its own layer state (one Ctrl+Z takes it back). Until then the file is not changed.">Save the layer state</button>
+      </div>
+      <div className="ly-list">
+        {!list && <div className="faint pad">Reading…</div>}
+        {none && <div className="faint pad">This file has no layers.</div>}
+        {list && list.map((l) => (
+          <label key={l.num} className={'ly-row' + (l.locked ? ' locked' : '') + (eff(l) ? '' : ' off')} data-layer={l.name} data-on={eff(l) ? '1' : '0'} style={{ paddingLeft: 10 + l.depth * 16 }} title={l.locked ? `${l.name} – locked by the file` : l.name}>
+            {l.locked ? <span className="ly-lock"><Ico n="lock" size={13} /></span> : <input type="checkbox" checked={eff(l)} onChange={() => click(l)} />}
+            <span className="ly-name" dir="auto">{l.name}</span>
+          </label>
+        ))}
+        {list && list.length > 0 && <div className="faint pad small">{differs ? 'Shown here only – the file is unchanged until you save the layer state.' : 'As saved in the file.'}</div>}
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------- counts & totals (0.8.5)
@@ -1017,11 +1094,12 @@ function Comments(p: Props) {
   const selIds = new Set(p.sel.map((s) => s.id));
   const exportXlsx = async () => {
     // (a measurement's number and unit in their own cells, as Measure > To Excel writes them)
-    const rows = list.map((a) => { const n = measureNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y)); return [pageOf(a) === String(a.page + 1) ? a.page + 1 : pageOf(a), markupName(a), a.contents || '', n ? { v: n.v, s: numStyle(n.dec) } : '', n ? n.unit : '', (replies.get(a.id) || []).map((r) => `${r.author}: ${r.contents}`).join('\n'), a.author, a.state || '', a.modified ? new Date(a.modified).toLocaleString('en-GB') : '', colorName(shownColor(a)), a.locked ? 'Locked' : '']; });
+    // (Page = the label, PDF page = the physical page: measurexl.ts commentRow)
+    const rows = list.map((a) => commentRow({ page: a.page, label: doc.pages[a.page]?.label, type: markupName(a), contents: a.contents, num: measureNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y)), replies: (replies.get(a.id) || []).map((r) => `${r.author}: ${r.contents}`).join('\n'), author: a.author, state: a.state, date: a.modified ? new Date(a.modified).toLocaleString('en-GB') : '', colour: colorName(shownColor(a)), locked: !!a.locked }));
     const t = await gcc.saveDialog({ title: 'Save comments list', name: doc.name.replace(/\.pdf$/i, '') + ' comments.xlsx', filters: [{ name: 'Excel', extensions: ['xlsx'] }] });
     if (!t) return;
-    try { await gcc.write(t, writeXlsx([{ name: 'Comments', header: 1, widths: [7, 18, 50, 12, 12, 40, 16, 12, 18, 10, 8], rows: [['Page', 'Type', 'Comment', 'Value', 'Unit', 'Replies', 'Author', 'Status', 'Date', 'Colour', 'Lock'].map((v) => ({ v, s: 'h' as const })), ...rows] as never }]), { noBackup: true }); } catch (e) { p.toast(String((e as Error).message || e), 'err'); return; }
-    p.toast('Saved ' + t.split(/[\\/]/).pop(), 'ok', { label: 'Open', run: () => void gcc.openExternal(t) });
+    try { await gcc.write(t, writeXlsx([{ name: 'Comments', header: 1, widths: COMMENT_WIDTHS, rows: [headRow(COMMENT_HEAD), ...rows] }]), { noBackup: true }); } catch (e) { p.toast(String((e as Error).message || e), 'err'); return; }
+    p.toast('Saved ' + t.split(/[\\/]/).pop(), 'ok', { label: 'Open', run: () => void gcc.openExternal(t).catch((er) => p.toast(String((er as Error)?.message || er), 'err')) });
   };
   const [making, setMaking0] = useState('');
   // (the text changes a few times a second at most: each change redraws the whole list)
@@ -1075,7 +1153,7 @@ img { max-width: 50mm; max-height: 38mm; border: 1px solid #ddd; display: block;
 <table><thead><tr><th>No.</th><th>Page</th><th>Where</th><th>Type</th><th>Comment and replies</th><th>Author</th><th>Date</th><th>Status</th></tr></thead><tbody>${rows.join('')}</tbody></table></body></html>`;
       const f = await gcc.htmlToPdf(html, base + ' comments.pdf', { landscape: true });
       try { await gcc.commit(f, t, { noBackup: true }); } catch (e) { void gcc.dropTemp([f]); throw e; }
-      p.toast('Saved ' + t.split(/[\\/]/).pop(), 'ok', { label: 'Open', run: () => void gcc.openExternal(t) });
+      p.toast('Saved ' + t.split(/[\\/]/).pop(), 'ok', { label: 'Open', run: () => void gcc.openExternal(t).catch((er) => p.toast(String((er as Error)?.message || er), 'err')) });
     } catch (e) { p.toast(String((e as Error)?.message || e), 'err'); } finally { setMaking(''); }
   };
   return (
@@ -1115,8 +1193,8 @@ img { max-width: 50mm; max-height: 38mm; border: 1px solid #ddd; display: block;
       </div>
       <div className="cm-foot">
         <span className="faint">{making || `${list.length} of ${items.filter((a) => a.irt == null).length}`}</span>
-        <button className="btn sm" onClick={() => void exportXlsx()} disabled={!list.length || !!making} title="The list as shown, as an Excel sheet (a clarification log)"><Ico n="excel" size={14} /> Excel</button>
-        <button className="btn sm" onClick={() => void exportPdf()} disabled={!list.length || !!making} title="The list as shown, as a PDF with a picture of each markup"><Ico n="file" size={14} /> PDF</button>
+        <button className="btn sm" onClick={() => void exportXlsx().catch((er) => p.toast(String((er as Error)?.message || er), 'err'))} disabled={!list.length || !!making} title="The list as shown, as an Excel sheet (a clarification log)"><Ico n="excel" size={14} /> Excel</button>
+        <button className="btn sm" onClick={() => void exportPdf().catch((er) => p.toast(String((er as Error)?.message || er), 'err'))} disabled={!list.length || !!making} title="The list as shown, as a PDF with a picture of each markup"><Ico n="file" size={14} /> PDF</button>
       </div>
     </div>
   );
@@ -1331,10 +1409,10 @@ function Search(p: Props) {
         // (none chosen yet: Enter = the first, Shift+Enter = the last)
         const [f, i] = flat[j < 0 ? (e.shiftKey ? flat.length - 1 : 0) : (j + (e.shiftKey ? flat.length - 1 : 1)) % flat.length];
         pickAcross(f, i);
-      } else void goAll();
+      } else void goAll().catch((er) => p.toast(String((er as Error)?.message || er), 'err'));
       return;
     }
-    if (p.hits.length && !running && done !== null && last.current === key) p.setHitIndex((p.hitIndex + (e.shiftKey ? p.hits.length - 1 : 1)) % p.hits.length); else void go();
+    if (p.hits.length && !running && done !== null && last.current === key) p.setHitIndex((p.hitIndex + (e.shiftKey ? p.hits.length - 1 : 1)) % p.hits.length); else void go().catch((er) => p.toast(String((er as Error)?.message || er), 'err'));
   };
   const totalAll = across.files.reduce((n, f) => n + f.hits.length, 0);
   const shownFiles = across.files.filter((f) => p.docs.some((d) => d.id === f.id));
@@ -1351,7 +1429,7 @@ function Search(p: Props) {
           <label className="check sm"><input type="checkbox" checked={ww} onChange={(e) => setWw(e.target.checked)} /> Whole words</label>
           {scope === 'all' && across.running
             ? <button className="btn sm" onClick={() => { across.stop = true; across.running = false; across.emit(); }}>Stop</button>
-            : <button className="btn sm primary" onClick={() => void (scope === 'all' ? goAll() : go())}>Find</button>}
+            : <button className="btn sm primary" onClick={() => void (scope === 'all' ? goAll() : go()).catch((er) => p.toast(String((er as Error)?.message || er), 'err'))}>Find</button>}
         </div>
         {scope === 'file'
           ? <div className="faint">{running ? `Searching… page ${done} of ${doc.pages.length}` : done !== null ? `${p.hits.length} found${p.hits.length >= HIT_CAP ? ' (first 5000)' : ''} · Enter / F3 = next` : 'Scanned pages without text: run OCR first.'}</div>

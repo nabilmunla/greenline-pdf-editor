@@ -44,7 +44,7 @@ export async function exportArea(doc: PdfDoc, page: number, box: number[], targe
     const src = await mu<FileSpec>('drawSnapshot', doc.id, false);
     snap = src.delta || src.path;
     const b = box.map((v) => Math.round(v * 100) / 100) as [number, number, number, number];
-    await muBatch('exportBegin', id, fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), doc.password, { format: 'xlsx', sheets: 'joined', dropStamps: true, title: doc.name.replace(/\.pdf$/i, ''), region: { page, box: b } });
+    await muBatch('exportBegin', id, fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), doc.password, { format: 'xlsx', sheets: 'joined', dropStamps: true, title: doc.name.replace(/\.pdf$/i, ''), region: { page, box: b }, layers: await doc.layerOverlay() });
     running = true;
     const r = await muBatch<{ kind: string; words: number }>('exportRead', id, page);
     let words = r.words;
@@ -118,7 +118,7 @@ export function ExportDlg(p: Props) {
       // (the changes file - or a whole temp copy; the PDF itself is never dropped: main only
       // removes files in the app's temp folder)
       snap = src.delta || src.path;
-      await muBatch('exportBegin', id, fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), doc.password, { format, sheets, dropStamps: stamps, title: base });
+      await muBatch('exportBegin', id, fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), doc.password, { format, sheets, dropStamps: stamps, title: base, layers: await doc.layerOverlay() });
       const scans: number[] = [];
       for (const [k, i] of pages.entries()) {
         if (stop.current) throw new Error('stopped');
@@ -172,7 +172,7 @@ export function ExportDlg(p: Props) {
   return (
     <Modal title={`Export to ${what}`} onClose={dismiss}
       sub={format === 'docx' ? 'An editable Word document: text in paragraphs, tables as tables, pictures, page headers and page numbers.' : 'A workbook with the tables as real cells – numbers as numbers – ready for pricing and checking.'}
-      actions={<><button className="btn" onClick={cancel}>{prog ? 'Stop' : 'Cancel'}</button><button className="btn primary" disabled={!!prog} onClick={() => void go()}>Export…</button></>}>
+      actions={<><button className="btn" onClick={cancel}>{prog ? 'Stop' : 'Cancel'}</button><button className="btn primary" disabled={!!prog} onClick={() => void go().catch(p.fail)}>Export…</button></>}>
       {prog ? (
         <div className="xprog">
           <div className="prog"><span className="dot busy" /> {prog.text}</div>
@@ -185,7 +185,7 @@ export function ExportDlg(p: Props) {
           </div>
           <div className="row"><label>Pages</label>
             <div className="seg"><button className={which === 'all' ? 'on' : ''} onClick={() => setWhich('all')}>All {doc.pages.length}</button><button className={which === 'range' ? 'on' : ''} onClick={() => setWhich('range')}>Some</button></div>
-            {which === 'range' && <input className="input" autoFocus placeholder="e.g. 1-5, 9" value={range} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go(); }} />}
+            {which === 'range' && <input className="input" autoFocus placeholder="e.g. 1-5, 9" value={range} onChange={(e) => setRange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void go().catch(p.fail); }} />}
           </div>
           {/* (kept in place for Word too - the dialog doesn't jump when switching) */}
           {(

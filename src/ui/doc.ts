@@ -7,7 +7,7 @@ import { tiles } from './tiles';
 import { offOf } from '../engine/off';
 import { forgetDragged } from './pagedrag';
 import { fileArg, isEngineDown, engineDown, type FileRef } from '../engine/rpc';
-import type { AnnotData, PageInfo, AnnotSpec, Rect, Pt, TBlock, TextStyle, PageMark, MarkContext, SaveOpts, OutNode } from '../engine/mu';
+import type { AnnotData, PageInfo, AnnotSpec, Rect, Pt, TBlock, TextStyle, PageMark, MarkContext, SaveOpts, OutNode, LayerInfo } from '../engine/mu';
 
 export type { AnnotData, PageInfo, AnnotSpec, Rect, Pt };
 
@@ -173,6 +173,12 @@ export class PdfDoc {
   private drawSrc: FileSpec | Uint8Array | null = null;
   /** temp files owned by this document (removed when it closes) */
   private temps = new Set<string>();
+  /** temp files the editing engine still reads after a Save as moved the document's name on (a
+   *  merged or new tab saved elsewhere: the engine keeps reading its temp source until the tab
+   *  closes or the file is opened again). Never dropped with a drawing copy - they were, and a heavy
+   *  page looked at after the save, or a restarted engine, found its file gone (0.12, 40 files
+   *  combined and saved) */
+  private engineReads = new Set<string>();
   closed = false;
   lastRecovery: { file: string; base: { path: string; size: number; mtime: number } | null } | null = null;
   /** view state kept per tab */
@@ -261,7 +267,7 @@ export class PdfDoc {
     if (!(src instanceof Uint8Array)) for (const t of tempsOf(src)) if (t !== this.srcPath()) this.temps.add(t);
     if (prev && !(prev instanceof Uint8Array)) {
       const keep = new Set(src instanceof Uint8Array ? [] : tempsOf(src));
-      const gone = tempsOf(prev).filter((t) => this.temps.has(t) && !keep.has(t) && t !== this.srcPath());
+      const gone = tempsOf(prev).filter((t) => this.temps.has(t) && !keep.has(t) && t !== this.srcPath() && !this.engineReads.has(t));
       for (const t of gone) this.temps.delete(t);
       if (gone.length) void gcc.dropTemp(gone);
     }
@@ -280,7 +286,7 @@ export class PdfDoc {
   /** a drawing copy that is not going to be used: its temp files go (never the document's own file) */
   private dropCopy(src: FileSpec | Uint8Array) {
     if (src instanceof Uint8Array) return;
-    const t = tempsOf(src).filter((x) => x !== this.srcPath());
+    const t = tempsOf(src).filter((x) => x !== this.srcPath() && !this.engineReads.has(x));
     if (t.length) void gcc.dropTemp(t);
   }
   /** the drawing engines may not have the latest content (a redraw after a change failed):
@@ -391,7 +397,7 @@ export class PdfDoc {
     this.releaseLookWaiters();
     await gcc.recoveryClear(this.id).catch(() => {});
     await Promise.all([...renderers.map((w) => w.call('close', [this.id]).catch(() => {})), mu('close', this.id).catch(() => {})]);
-    if (this.temps.size) await gcc.dropTemp([...this.temps]).catch(() => {});
+    if (this.temps.size || this.engineReads.size) await gcc.dropTemp([...this.temps, ...this.engineReads]).catch(() => {});
     gcc.docsClosed();
     // the JS side: the per-document caches, the listeners and the bytes the tab was opened from
     // (a file-backed source is only a path). The object itself is kept by whoever still holds it.
@@ -415,12 +421,20 @@ export class PdfDoc {
 
   // -------------------------------------------------------------- markups
 
+  /** a page the file does not have (any more): a panel or a view still pointing at a page that
+   *  was deleted, or at the page of the file before - nothing on it, no engine asked
+   *  (0.8.4's report: "invalid page number: 2" on a one-page file) */
+  private gonePage(page: number) { return !(page >= 0 && page < this.pages.length); }
   async annots(page: number): Promise<AnnotData[]> {
+    if (this.gonePage(page)) return [];
     let a = this.annotCache.get(page);
     if (!a) {
       a = await mu<AnnotData[]>('annots', this.id, page);
-      this.annotCache.set(page, a);
-    }
+      // (the last 200 pages looked at: a scroll through thousands of marked-up pages kept them all -
+      // sweep S12; a page let go is asked for again)
+      if (this.annotCache.size >= 200) this.annotCache.delete(this.annotCache.keys().next().value!);
+    } else this.annotCache.delete(page);
+    this.annotCache.set(page, a);
     return a;
   }
   cachedAnnots(page: number) { return this.annotCache.get(page); }
@@ -450,7 +464,7 @@ export class PdfDoc {
     this.changes++;
     this.changedSinceRecovery = true;
     this.scheduleRecovery();
-    void this.refreshHistory().then(() => this.emit());
+    void this.refreshHistory().then(() => this.emit()).catch(() => {});
   }
 
   async refreshHistory() {
@@ -523,8 +537,11 @@ export class PdfDoc {
 
   // -------------------------------------------------------------- content changes (redraw base)
 
-  /** after anything that changes page content or the page list */
-  private async contentChanged(pages: PageInfo[] | undefined, ch: Change) {
+  /** after anything that changes page content or the page list. `quiet`: what is shown changed,
+   *  the file did not (layers switched for display - PLAN 7.8): the drawing engines get a new
+   *  copy and every page is drawn afresh, but nothing is marked changed (no "unsaved", no recovery
+   *  copy, no undo step) and heavy pages keep what was merged for them */
+  private async contentChanged(pages: PageInfo[] | undefined, ch: Change, quiet = false) {
     // Invisible text (OCR) changes no picture, no page size and no markup: only the text is new
     // (read again from the drawing engines, keyed by baseRev). They get it a moment later, once
     // for a run of pages, instead of after every page (text, search and copy wait for it).
@@ -541,7 +558,7 @@ export class PdfDoc {
     const before = this.pages.length;
     if (pages) this.pages = pages;
     else this.pages = await mu<PageInfo[]>('pageInfos', this.id);
-    this.lookChanged(ch);
+    if (!quiet) this.lookChanged(ch);
     this.baseRev++;
     // what the drawing engines show: the file + only the changed parts (small, quick).
     // MuPDF has the change already: if this fails (a drawing engine went down meanwhile...) the
@@ -572,7 +589,7 @@ export class PdfDoc {
     this.annRev = this.pages.map(nextRev);
     tiles.drop(this.id + '|a');
     this.allCache = null;
-    this.changed();
+    if (quiet) this.emit(); else this.changed();
     if (failed) {
       // the drawing engines may still have the copy from before: they get the document again
       // and every page is drawn afresh (also when an engine restarts first: reopenIn)
@@ -598,6 +615,38 @@ export class PdfDoc {
       await this.contentChanged(Array.isArray(r) && r.length && (r[0] as PageInfo).w !== undefined && (r[0] as PageInfo).label !== undefined ? (r as unknown as PageInfo[]) : undefined, ch);
       return r;
     } finally { if (shows) this.changing--; }
+  }
+
+  // ---------------------------------------------------------------- layers (PLAN 7.8)
+  /** the file's layers, with what is shown now */
+  layers() { return mu<LayerInfo[]>('layers', this.id); }
+  /** layers shown other than the file says (OCG number -> shown): what a batch job is given */
+  layerOverlay() { return mu<Record<number, boolean> | null>('layerOverlay', this.id); }
+  private layerJob: Promise<unknown> = Promise.resolve();
+  /**
+   * Show / hide layers (OCG object number -> shown; the whole state each time, null: as the file
+   * says). Display only: no undo step, the file not marked changed; the drawing engines get a new
+   * copy and every page is drawn again. Returns whether anything now differs from the file.
+   */
+  setLayers(map: Record<number, boolean> | null): Promise<boolean> {
+    const run = async () => {
+      if (this.closed) return false;
+      this.changing++;
+      try {
+        const differs = await mu<boolean>('setLayersShown', this.id, map);
+        await this.contentChanged(undefined, { all: true }, true);
+        return differs;
+      } finally { this.changing--; }
+    };
+    const job = this.layerJob.then(run, run);
+    this.layerJob = job.catch(() => {});
+    return job;
+  }
+  /** the layers as shown now become the file's own state: one undo step (nothing differs: nothing happens) */
+  async saveLayerState(): Promise<boolean> {
+    if (!(await mu<boolean>('layerStateSet', this.id))) return false;
+    const r = await this.content<PageInfo[] | null>('saveLayerState', { all: true });
+    return !!r;
   }
 
   rotate(pages: number[], delta: number) { return this.content<PageInfo[]>('rotatePages', { pages }, pages, delta); }
@@ -817,6 +866,26 @@ export class PdfDoc {
     this.changed();
     return r;
   }
+  /**
+   * Link the sheets (PLAN 7.5): links over the references and the "Sheets" bookmark group (null:
+   * bookmarks left as they are) - one undo step; a rerun replaces what the last one made. Nothing
+   * to write: nothing changes (no step, the file not marked changed).
+   */
+  async linkSheets(links: { page: number; box: Rect; target: number }[] | null, marks: { page: number; title: string }[] | null) {
+    this.changing++;
+    try {
+      const r = await mu<{ links: number; skipped: number; removed: number; bookmarks: number; pages: PageInfo[] | null; touched: number[] }>('linkSheets', this.id, links, marks);
+      if (!r.pages) return r;
+      // (links draw nothing: only the pages whose links changed get a new copy in the drawing engines)
+      const ch: Change = r.touched.length ? { pages: r.touched } : { none: true };
+      void mu('noteChange', this.id, ch).catch(() => {});
+      await this.contentChanged(r.pages, ch);
+      if (marks) this.marksRev++;
+      this.linkCache.clear();
+      this.changed();
+      return r;
+    } finally { this.changing--; }
+  }
   /** pages of another file open here, as it is now (unsaved changes included) */
   insertFromOpen(at: number, src: PdfDoc, pages?: number[]) { return this.content<PageInfo[]>('insertFromOpen', { insert: at, count: 0 }, at, src.id, pages); }
   /** pages replaced by pages of another file (open here, or a path): see mu.replacePages */
@@ -870,6 +939,7 @@ export class PdfDoc {
   // -------------------------------------------------------------- text
 
   async chars(page: number) {
+    if (this.gonePage(page)) return { text: '', box: new Float32Array(0) };
     await this.ensurePage(page);
     await this.drawReady();
     const k = this.baseRev + ':' + page;
@@ -882,6 +952,7 @@ export class PdfDoc {
     return c;
   }
   async rangeRects(page: number, start: number, count: number) {
+    if (this.gonePage(page)) return [];
     await this.ensurePage(page);
     await this.drawReady();
     return renderers[0].call<number[][]>('rangeRects', [this.id, page, start, count]);
@@ -889,18 +960,23 @@ export class PdfDoc {
   private linkCache = new Map<string, { rect: number[]; url?: string; page?: number }[]>();
   /** links on a page (asked once per page and content version, not on every scroll) */
   async links(page: number) {
+    if (this.gonePage(page)) return [];
     const k = this.baseRev + ':' + page;
     let l = this.linkCache.get(k);
     if (!l) {
       await this.ensurePage(page);
-      l = await renderers[0].call<{ rect: number[]; url?: string; page?: number }[]>('links', [this.id, page]).catch(() => []);
-      this.linkCache.set(k, l);
+      // (a read that failed - an engine starting afresh - is not kept as "no links": asked again
+      // next time the page is shown, sweep S9)
+      let ok = true;
+      l = await renderers[0].call<{ rect: number[]; url?: string; page?: number }[]>('links', [this.id, page]).catch(() => { ok = false; return []; });
+      if (ok) this.linkCache.set(k, l);
       if (this.linkCache.size > 200) this.linkCache.delete(this.linkCache.keys().next().value as string);
     }
     return l;
   }
 
   async blocks(page: number) {
+    if (this.gonePage(page)) return [];
     const k = this.baseRev + ':' + page;
     let b = this.blockCache.get(k);
     if (!b) {
@@ -1016,8 +1092,10 @@ export class PdfDoc {
       // that change is gone - said so (it vanished without a word, the file marked saved)
       if (lost) { this.emit(); throw new Error(`${this.name} was saved, but another program is holding it, so it was opened again from the saved file - the changes made while it was saving were not kept. Please make them again.`); }
     } else {
-      // the saved file is now what a restarted engine would reopen (a temp source stays
-      // listed in this.temps: the engine still reads it until the tab closes)
+      // the saved file is now what a restarted engine would reopen; the source the editing engine
+      // reads is kept until the tab closes (a temp one was dropped with the next drawing copy)
+      const was = this.src && !(this.src instanceof Uint8Array) ? this.src : null;
+      if (was && was.path !== target) for (const t of tempsOf(was)) this.engineReads.add(t);
       this.src = { path: target };
     }
     this.emit();

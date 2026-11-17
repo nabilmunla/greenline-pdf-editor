@@ -250,6 +250,8 @@ test('BUG-254: work brought back after the editing engine restarted stays unsave
 
 test('BUG-82: the text-line cache keeps the last 40 pages', async () => {
   const d = await opened();
+  // (60 pages: a page the file does not have is no longer asked of the engine - share reports, 16 Nov)
+  d.pages = Array.from({ length: 60 }, () => d.pages[0]);
   mu.textBlocks = () => [];
   for (let p = 0; p < 60; p++) await d.blocks(p);
   const n = calls.filter((c) => c === 'edit:textBlocks').length;

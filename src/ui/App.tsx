@@ -20,7 +20,7 @@ import { TOOLS, toolStyle, MEASURE_TOOLS, HOW_HINT, type ToolId, type Style, typ
 import { BUILTIN_STAMPS, fillFields, designSize, dataUrlToBytes, type StampDef } from './stamps';
 import type { ScanSource } from './StampScan';
 import { STANDARD_SCALES, PT_M, dist, fmtLen, scaleText, type MeasureFmt } from './geom';
-import { measureNumber, perimeterNumber, numStyle } from './measurexl';
+import { measureNumber, perimeterNumber, measureRow, headRow, MEASURE_HEAD, MEASURE_WIDTHS } from './measurexl';
 import { charsToWords, wordsToTable, toTsv, toHtml } from './table';
 import { ocrPage, type OcrLang } from './ocr';
 import { writeXlsx } from './xlsxwrite';
@@ -94,6 +94,7 @@ export type Dialog =
   | { k: 'print'; page: number; area?: Rect }
   | { k: 'counttag'; page: number }
   | { k: 'settings' }
+  | { k: 'count' }
   | { k: 'whatsnew'; back?: boolean }
   | { k: 'licences' }
   | { k: 'report'; shot: string | null }
@@ -101,12 +102,13 @@ export type Dialog =
   | { k: 'crop'; page: number; rect: Rect }
   | { k: 'table'; rows: string[][]; page: number; rect: Rect; docId: string }
   | { k: 'export'; format: ExportFormat }
+  | { k: 'sheets' }
   | { k: 'about' };
 
 let toastSeq = 1;
 
 /** dialogs that work on the file in front when they were opened */
-const FOR_THE_FILE = new Set<Dialog['k']>(['calibrate', 'scale', 'viewport', 'copypages', 'split', 'extract', 'toPictures', 'link', 'table', 'insert', 'protect', 'ocr', 'redact-search', 'props', 'print', 'crop', 'export']);
+const FOR_THE_FILE = new Set<Dialog['k']>(['calibrate', 'scale', 'viewport', 'copypages', 'split', 'extract', 'toPictures', 'link', 'table', 'insert', 'protect', 'ocr', 'redact-search', 'props', 'print', 'crop', 'export', 'sheets']);
 const forTheFile = (x: Dialog | null) => !!x && (FOR_THE_FILE.has(x.k) || (x.k === 'marks' && !x.batch));
 
 /** tabs closed whose engine clean-up is still running */
@@ -157,7 +159,7 @@ export function App() {
     }
     const all = [...new Set([...combineWaiting.current.splice(0), ...files])];
     // (marked open at once: a second batch before the next render joins it, not replaces it)
-    if (all.length > 1) { const nd: Dialog = { k: 'merge', files: all }; dialogRef.current = nd; setDialog(nd); } else void openPaths(all);
+    if (all.length > 1) { const nd: Dialog = { k: 'merge', files: all }; dialogRef.current = nd; setDialog(nd); } else void openPaths(all).catch(fail);
   };
   useEffect(() => {
     if (dialog) return;
@@ -199,7 +201,7 @@ export function App() {
   const styleSave = useRef(0);
   // (a style change still waiting to be written goes now if the window closes)
   useEffect(() => {
-    const f = () => { if (styleSave.current) { window.clearTimeout(styleSave.current); styleSave.current = 0; void gcc.setSettings({ styles: S.current.styles }); } };
+    const f = () => { if (styleSave.current) { window.clearTimeout(styleSave.current); styleSave.current = 0; void gcc.setSettings({ styles: S.current.styles }).catch(() => {}); } };
     window.addEventListener('beforeunload', f);
     return () => window.removeEventListener('beforeunload', f);
   }, []);
@@ -225,8 +227,17 @@ export function App() {
 
   // ---------------------------------------------------------------- start-up
 
+  // Greenline's user counter: the first-start pop-up, once per start, when nothing else is open
+  // (nothing is sent until it is answered; the company build has no counter: active is false)
+  const countAsked = useRef(false);
   useEffect(() => {
-    (async () => {
+    if (!ready || dialog || countAsked.current) return;
+    countAsked.current = true;
+    void gcc.countClaim().then((ask) => { if (ask) setDialog((cur) => cur || { k: 'count' }); }).catch(() => {});
+  }, [ready, dialog]);
+
+  useEffect(() => {
+    void (async () => {
       try {
         const i = await gcc.info();
         // (a damaged entry in the settings file must not blank the window - nothing on screen could put it right)
@@ -254,14 +265,14 @@ export function App() {
         void gcc.updateAfterStart().then((x) => { if (x) setUpdated(x); }).catch(() => {});
         // after a restart for an update: the files that were open come back
         const again = Array.isArray(s.reopenAfterRestart) ? s.reopenAfterRestart.filter((x) => typeof x === 'string') : [];
-        if (again.length) void gcc.setSettings({ reopenAfterRestart: null });
+        if (again.length) void gcc.setSettings({ reopenAfterRestart: null }).catch(() => {});
         const toOpen = [...again.filter((x) => !i.open.includes(x)), ...i.open];
-        if (toOpen.length) void openPaths(toOpen);
+        if (toOpen.length) void openPaths(toOpen).catch(fail);
       } catch (e) {
         setFatal(String((e as Error).message || e));
       }
     })();
-    gcc.onOpen((files) => void openPaths(files));
+    gcc.onOpen((files) => void openPaths(files).catch(fail));
     // another window changed the settings: taken in here, so this window's next write of a whole
     // list (recent files, stamps, signatures, Tool chest) keeps what the other one added or removed
     gcc.onSettings?.((patch) => setSettingsState((s) => ({ ...s, ...cleanSettings(patch as Partial<Settings>) })));
@@ -292,7 +303,7 @@ export function App() {
       const paths = o.restart ? ds.map((d) => d.path).filter((x): x is string => !!x) : [];
       if (paths.length) await gcc.setSettings({ reopenAfterRestart: paths }).catch((e: unknown) => gcc.log('reopen list: ' + e));
       gcc.closed();
-    })());
+    })().catch((e) => { fail(e); gcc.closeCancelled(); }));
   }, []);
 
   useEffect(() => {
@@ -402,7 +413,7 @@ export function App() {
 
   const addRecent = (p: string) => {
     const r = [p, ...(S.current.recent || []).filter((x) => x.toLowerCase() !== p.toLowerCase())].slice(0, 15);
-    saveSettings({ recent: r });
+    void saveSettings({ recent: r });
   };
 
   /** files being opened now, and password-protected ones waiting for their prompt (lower-case
@@ -802,7 +813,7 @@ export function App() {
     // (0.8.4's Rectangle area tool - from a Tool Chest item or Find a tool - is the Area tool
     // drawing rectangles now)
     let how = S.current.measureHow || 'points';
-    if (t === 'm-rectarea') { t = 'm-area'; how = 'rect'; saveSettings({ measureHow: how }); }
+    if (t === 'm-rectarea') { t = 'm-area'; how = 'rect'; void saveSettings({ measureHow: how }); }
     setToolState(t);
     setMenu(null);
     if (t !== 'select') setSel([]);
@@ -813,7 +824,7 @@ export function App() {
   const setToolStyle = (t: ToolId, patch: Partial<Style>) => {
     if ('fmt' in patch) {
       const { fmt, ...rest } = patch;
-      saveSettings({ measureFmt: fmt });
+      void saveSettings({ measureFmt: fmt });
       if (!Object.keys(rest).length) return;
       patch = rest;
     }
@@ -876,11 +887,12 @@ export function App() {
   const targetPages = (): number[] => (pageSel.length ? [...pageSel].sort((a, b) => a - b) : [viewer.current?.page() ?? pageNo]);
 
   const A = {
-    open: openDialog,
+    open: () => openDialog().catch(fail),
+    fail,
     openPaths,
     save: () => doc && saveDoc(doc),
     saveAs: () => doc && saveDoc(doc, true),
-    close: () => doc && closeDoc(doc),
+    close: () => doc && closeDoc(doc).catch(fail),
     print: () => { if (doc) { const pg = viewer.current?.page() ?? pageNo; void (doc.finishEditing?.() ?? Promise.resolve()).catch(() => {}).then(() => setDialog({ k: 'print', page: pg })); } },
     undo: async () => { if (doc) { if (await doc.undoTyping?.().catch(() => false)) { setSel([]); return; } await doc.undo().catch(fail); setSel([]); } },
     redo: async () => { if (doc) { if (await doc.redoTyping?.().catch(() => false)) return; await doc.redo().catch(fail); setSel([]); } },
@@ -917,6 +929,8 @@ export function App() {
     replacePages: () => doc && setDialog({ k: 'insert', at: (viewer.current?.page() ?? 0) + 1, mode: 'replace' }),
     // (the pages typed like in Print; saved now or opened as a tab; taken out of this file or not)
     extract: () => doc && setDialog({ k: 'extract' }),
+    /** links between the sheets of a drawing set and a Sheets bookmark group (PLAN 7.6) */
+    linkSheets: () => doc && setDialog({ k: 'sheets' }),
     /** an area of a page as shown (page + markups) at s pixels per point */
     areaPicture: (d: PdfDoc, page: number, r: Rect, s: number) => areaPicture(d, page, r, s),
     /** pages as PNG / JPG files */
@@ -1051,26 +1065,29 @@ export function App() {
       // the number as a number, its unit in the next cell (measurexl.ts); the label as written
       // on the drawing beside them
       // (an area's perimeter in its own columns beside it)
-      const rows = [['Page', 'Type', 'Value', 'Unit', 'Perimeter', 'Unit', 'Label on the drawing', 'Count group', 'Author', 'Date'], ...all.map((a) => {
-        const n = measureNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y));
-        const pn = perimeterNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y));
-        return [a.page + 1, (a.subject || a.kind || '').replace('measure-', ''), n ? { v: n.v, s: numStyle(n.dec) } : '', n ? n.unit : '', pn ? { v: pn.v, s: numStyle(pn.dec) } : '', pn ? pn.unit : '', a.contents || '', a.group || '', a.author, a.modified ? new Date(a.modified).toLocaleString('en-GB') : ''];
-      })];
+      // (Page = the label, PDF page = the physical page: measurexl.ts measureRow)
+      const rows = [headRow(MEASURE_HEAD), ...all.map((a) => measureRow({
+        page: a.page, label: doc.pages[a.page]?.label, type: (a.subject || a.kind || '').replace('measure-', ''),
+        num: measureNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y)), perimeter: perimeterNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y)),
+        contents: a.contents, group: a.group, author: a.author, date: a.modified ? new Date(a.modified).toLocaleString('en-GB') : '',
+      }))];
       const counts = new Map<string, number>();
       for (const a of all) if (a.kind === 'measure-count') counts.set(a.group || 'Count', (counts.get(a.group || 'Count') || 0) + 1);
       const target = await gcc.saveDialog({ title: 'Save measurements', name: doc.name.replace(/\.pdf$/i, '') + ' measurements.xlsx', filters: [{ name: 'Excel', extensions: ['xlsx'] }] });
       if (!target) return;
       try { await gcc.write(target, writeXlsx([
-        { name: 'Measurements', rows: rows.map((r, i) => (i === 0 ? r.map((v) => ({ v: v as string, s: 'h' as const })) : r)) as never, header: 1, widths: [7, 14, 12, 8, 12, 8, 30, 16, 16, 18] },
+        { name: 'Measurements', rows, header: 1, widths: MEASURE_WIDTHS },
         { name: 'Counts', rows: [[{ v: 'Count', s: 'h' }, { v: 'Number', s: 'h' }], ...[...counts].map(([k, v]) => [k, v])] as never, header: 1, widths: [24, 10] },
       ]), { noBackup: true }); } catch (e) { fail(e); return; }
-      toast('Saved ' + baseName(target), 'ok', { label: 'Open', run: () => void gcc.openExternal(target) });
+      toast('Saved ' + baseName(target), 'ok', { label: 'Open', run: () => void gcc.openExternal(target).catch(fail) });
     },
     togglePanel: () => saveSettings({ propsPanel: S.current.propsPanel === false }),
     /** how Area / Perimeter draw their shape (corners, rectangle, circle) - remembered */
     setHow: (h: MeasureHow) => { void saveSettings({ measureHow: h }); setStatus(HOW_HINT[h]); },
     /** the Counts & totals panel (left) */
     totals: () => setSide('totals'),
+    /** the Layers panel (left): the file's layers on and off (PLAN 7.8) */
+    layers: () => setSide('layers'),
     /** count more of a name (from the Counts & totals panel) */
     countWith: (g: string) => { setCountGroup(g); setTool('m-count'); setStatus(`Counting "${g}" – click each one.`); },
     setCounting: (g: string) => setCountGroup(g),
@@ -1097,7 +1114,7 @@ export function App() {
       void _f;
       // (0.8.4's Rectangle area items draw with the Area tool now: their look goes with them)
       setToolStyle(c.tool === 'm-rectarea' ? 'm-area' : c.tool, st);
-      if (c.tool === 'm-rectarea') saveSettings({ measureHow: 'rect' });
+      if (c.tool === 'm-rectarea') void saveSettings({ measureHow: 'rect' });
       if (c.place?.stampId) { const st = [...BUILTIN_STAMPS, ...(S.current.stamps || [])].find((s) => s.id === c.place!.stampId); if (st) { useStamp(st); return; } }
       setTool(c.tool);
     },
@@ -1114,7 +1131,7 @@ export function App() {
       const name = sname ? 'Stamp: ' + sname : TOOLS[tool].label + ' ' + ((S.current.chest || []).filter((c) => c.tool === tool).length + 1);
       const { fmt: _f, ...st } = style;
       void _f;
-      saveSettings({ chest: [...(S.current.chest || []), { id: Math.random().toString(36).slice(2), name, tool, style: st, ...(place ? { place } : {}) }] });
+      void saveSettings({ chest: [...(S.current.chest || []), { id: Math.random().toString(36).slice(2), name, tool, style: st, ...(place ? { place } : {}) }] });
       toast(`Added "${name}" to the Tool Chest.`, 'ok');
     },
     chestRemove: (id: string) => saveSettings({ chest: (S.current.chest || []).filter((c) => c.id !== id) }),
@@ -1132,7 +1149,7 @@ export function App() {
       case 'note': toast(e.text, 'info', undefined, 8000); break;
       case 'error': toast(e.text, 'err'); break;
       case 'created': break;
-      case 'comment': setSel([{ page: e.page, id: e.id }]); if (S.current.propsPanel === false) saveSettings({ propsPanel: true }); setCommentFocus((n) => n + 1); break;
+      case 'comment': setSel([{ page: e.page, id: e.id }]); if (S.current.propsPanel === false) void saveSettings({ propsPanel: true }); setCommentFocus((n) => n + 1); break;
       case 'menu': setMenu({ x: e.x, y: e.y, page: e.page, at: e.at, text: e.text }); break;
       case 'calibrate': setDialog({ k: 'calibrate', page: e.page, a: e.a, b: e.b }); break;
       case 'viewport': setDialog({ k: 'viewport', page: e.page, rect: e.rect }); setToolState('select'); setStatus(TOOLS.select.hint ?? ''); break;
@@ -1262,7 +1279,7 @@ export function App() {
           body: R(document.body), html: [document.documentElement.clientWidth, document.documentElement.clientHeight],
           chain: (() => { const out: string[] = []; let el: HTMLElement | null = v; while (el && out.length < 8) { const r = el.getBoundingClientRect(); out.push(`${el.className.toString().split(' ')[0] || el.tagName}:${Math.round(r.top)}+${Math.round(r.height)}`); el = el.parentElement; } return out.join(' < '); })(),
         });
-        void gcc.copyText(diag);
+        void gcc.copyText(diag).catch(fail);
         toast(diag, 'info', undefined, 60000);
         return;
       }
@@ -1292,11 +1309,11 @@ export function App() {
       if (e.key === 'F3' && !e.altKey && !e.metaKey && (!typing || (e.target as HTMLElement)?.closest?.('.search-in, .find-in, .search'))) { e.preventDefault(); if (hits.length) setHitIndex((i) => (i + (e.shiftKey ? hits.length - 1 : 1)) % hits.length); return; }
       if (typing || e.altKey || e.metaKey) return;
       if (e.key === 'Escape' && marked) setMarked(null);
-      if (e.key === 'F9') { e.preventDefault(); A.toggleSnap(); return; }
-      if (e.key === 'F8') { e.preventDefault(); A.toggleOrtho(); return; }
-      if (e.key === 'F6') { e.preventDefault(); A.toggleCross(); return; }
-      if (e.key === 'F7') { e.preventDefault(); A.toggleLoupe(); return; }
-      if (e.key === 'F4') { e.preventDefault(); A.togglePanel(); return; }
+      if (e.key === 'F9') { e.preventDefault(); void A.toggleSnap(); return; }
+      if (e.key === 'F8') { e.preventDefault(); void A.toggleOrtho(); return; }
+      if (e.key === 'F6') { e.preventDefault(); void A.toggleCross(); return; }
+      if (e.key === 'F7') { e.preventDefault(); void A.toggleLoupe(); return; }
+      if (e.key === 'F4') { e.preventDefault(); void A.togglePanel(); return; }
       if (e.key === 'PageDown' || e.key === 'PageUp') { /* native scrolling */ return; }
       if (e.key === 'Home' && !sel.length) { e.preventDefault(); A.goTo(0); return; }
       if (e.key === 'End' && !sel.length) { e.preventDefault(); if (doc) A.goTo(doc.pages.length - 1); return; }
@@ -1343,7 +1360,7 @@ export function App() {
           }
         } catch (er) { fail(er); }
       }
-      if (ext.length) void openPaths(ext);
+      if (ext.length) void openPaths(ext).catch(fail);
     };
     window.addEventListener('dragover', over);
     window.addEventListener('drop', drop);
@@ -1484,7 +1501,7 @@ export function App() {
     { label: "What's new", where: 'File tab', title: 'What changed in this version, in short', icon: 'info', run: () => A.whatsNew() },
     { label: 'Undo', where: 'Title bar', title: 'Undo (Ctrl+Z)', icon: 'undo', disabled: !doc?.canUndo, run: () => void A.undo() },
     { label: 'Redo', where: 'Title bar', title: 'Redo (Ctrl+Y)', icon: 'redo', disabled: !doc?.canRedo, run: () => void A.redo() },
-    { label: resolved === 'dark' ? 'Light theme' : 'Dark theme', where: 'Title bar', title: 'Light or dark colours', icon: resolved === 'dark' ? 'sun' : 'moon', run: () => { const m = resolved === 'dark' ? 'light' : 'dark'; setThemeMode(m); saveSettings({ theme: m }); } },
+    { label: resolved === 'dark' ? 'Light theme' : 'Dark theme', where: 'Title bar', title: 'Light or dark colours', icon: resolved === 'dark' ? 'sun' : 'moon', run: () => { const m = resolved === 'dark' ? 'light' : 'dark'; setThemeMode(m); void saveSettings({ theme: m }); } },
   ];
   /** a tool picked in "Find a tool": its tab comes up, the button is pointed out, and it runs */
   const runFound = (c: FoundCmd) => {
@@ -1530,7 +1547,7 @@ export function App() {
           <div className="crumb">{doc && <span className="pname">{doc.name}{doc.dirty ? ' •' : ''}</span>}{doc?.readOnly && <span className="ro-badge">Read-only</span>}</div>
           <div className="spacer" />
           <ToolSearch commands={ribbonCmds} extras={extraCmds} onRun={runFound} hasDoc={!!doc} />
-          <button className="tb-btn" title={resolved === 'dark' ? 'Light theme' : 'Dark theme'} onClick={() => { const m = resolved === 'dark' ? 'light' : 'dark'; setThemeMode(m); saveSettings({ theme: m }); }}><Ico n={resolved === 'dark' ? 'sun' : 'moon'} size={18} /></button>
+          <button className="tb-btn" title={resolved === 'dark' ? 'Light theme' : 'Dark theme'} onClick={() => { const m = resolved === 'dark' ? 'light' : 'dark'; setThemeMode(m); void saveSettings({ theme: m }); }}><Ico n={resolved === 'dark' ? 'sun' : 'moon'} size={18} /></button>
           <button className="tb-btn" title="Settings" onClick={() => A.settings()}><Ico n="gear" size={18} /></button>
         </div>
         <div className="rtabs">
@@ -1549,7 +1566,7 @@ export function App() {
         <div className="dtabs-scroll" ref={stripRef} onWheel={(e) => { const el = stripRef.current; if (el && e.deltaY && el.scrollWidth > el.clientWidth) el.scrollLeft += e.deltaY; }}>
         {docs.map((d) => (
           <div key={d.id} data-id={d.id} className={'dtab' + (d.id === activeId ? ' on' : '') + (dragTab === d.id ? ' dragover' : '') + (tabDrag?.id === d.id ? ' dragging' : '')} onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); void closeDoc(d); } else if (e.button === 0) setActiveId(d.id); }} title={d.path || d.name}
-            onPointerDown={(e) => tabDown(e, d)} onPointerMove={tabMove} onPointerUp={(e) => void tabUp(e, d)} onPointerCancel={() => { tabPtr.current = null; setTabDrag(null); gcc.tabHover(null, null); }}
+            onPointerDown={(e) => tabDown(e, d)} onPointerMove={tabMove} onPointerUp={(e) => void tabUp(e, d).catch(fail)} onPointerCancel={() => { tabPtr.current = null; setTabDrag(null); gcc.tabHover(null, null); }}
             onLostPointerCapture={() => { if (tabPtr.current && !tabPtr.current.on) tabPtr.current = null; }}
             onContextMenu={(e) => { e.preventDefault(); setTabMenu({ x: e.clientX, y: e.clientY, id: d.id }); }}
             onDragOver={(e) => {
@@ -1585,7 +1602,7 @@ export function App() {
             <Ico n="file" size={15} className="dtab-ic" />
             <TabName name={d.name} skip={tabSkip} />
             {d.dirty && <span className="dirty" title="Unsaved changes" />}
-            <button className="x" title="Close (Ctrl+W)" onMouseDown={(e) => { e.stopPropagation(); }} onClick={(e) => { e.stopPropagation(); void closeDoc(d); }}><Ico n="close" size={13} /></button>
+            <button className="x" title="Close (Ctrl+W)" onMouseDown={(e) => { e.stopPropagation(); }} onClick={(e) => { e.stopPropagation(); void closeDoc(d).catch(fail); }}><Ico n="close" size={13} /></button>
           </div>
         ))}
         <button className="dtab-add" title="Open a PDF (Ctrl+O)" onClick={() => void A.open()}><Ico n="plus" size={15} /></button>
@@ -1614,7 +1631,7 @@ export function App() {
           {doc ? (
             <div className="workarea">
               <div className="rail">
-                {([['pages', 'thumbs', 'Pages'], ['bookmarks', 'bookmark', 'Bookmarks'], ['comments', 'comments', 'Comments list'], ['totals', 'count', 'Counts & totals'], ['search', 'search', 'Search (Ctrl+F)']] as [SideKind, string, string][]).map(([k, ic, t]) => (
+                {([['pages', 'thumbs', 'Pages'], ['bookmarks', 'bookmark', 'Bookmarks'], ['comments', 'comments', 'Comments list'], ['totals', 'count', 'Counts & totals'], ['layers', 'layers', 'Layers'], ['search', 'search', 'Search (Ctrl+F)']] as [SideKind, string, string][]).map(([k, ic, t]) => (
                   <button key={k} className={'rail-btn' + (side === k ? ' on' : '')} title={t} onClick={() => setSide(side === k ? null : k)}><Ico n={ic} /></button>
                 ))}
               </div>
@@ -1630,7 +1647,7 @@ export function App() {
                 <Viewer
                   key={doc.id} doc={doc} rev={ver} tool={tool} setTool={setTool} style={style} place={place}
                   countGroup={countGroup} snapOn={snapOn} orthoOn={!!settings.ortho} crossOn={!!settings.cross} loupeOn={!!settings.loupe} loupeZoom={settings.loupeZoom ?? 3} marked={marked && doc && marked.docId === doc.id ? { page: marked.page, rect: marked.rect } : null} wheelZoom={!!settings.wheelZoom} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
-                  sel={sel} setSel={setSel} hits={hits} hitIndex={hitIndex} onEvent={(e) => void onViewerEvent(e)} apiRef={viewer} readOnly={false}
+                  sel={sel} setSel={setSel} hits={hits} hitIndex={hitIndex} onEvent={(e) => void onViewerEvent(e).catch(fail)} apiRef={viewer} readOnly={false}
                   how={settings.measureHow || 'points'}
                 />
                 {(tool === 'm-area' || tool === 'm-perimeter') && <HowBar how={settings.measureHow || 'points'} set={A.setHow} />}
@@ -1910,9 +1927,9 @@ export const scaleFromCalibration = (a: Pt, b: Pt, real: number, unit: string): 
 export { STANDARD_SCALES, fmtLen };
 
 /** a tab's file name: when it doesn't fit, the middle goes ("Spec sec…n 07.pdf") - names that
- *  start alike stay told apart. `skip`: the start every open tab's name shares ("P04-24-ARC-DWG-"
+ *  start alike stay told apart. `skip`: the start every open tab's name shares ("PRJ-12-ARC-DWG-"
  *  of a set of drawings) - left out, so the part that differs shows ("…1001 Rev C.pdf"; every tab
- *  of a set read "P04-24-ARC…ev C.pdf") */
+ *  of a set read "PRJ-12-ARC…ev C.pdf") */
 /** how much of the start every name shares, ended where a word / part ends (a space, - _ . or a
  *  digit-to-letter change is not looked for: only separators) - 0 when under 8 characters or for
  *  one tab; at least 6 characters of each name are left */

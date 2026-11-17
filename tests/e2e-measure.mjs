@@ -257,21 +257,21 @@ const rows = JSON.parse(execFileSync('python3', ['-c', `
 import openpyxl, json, sys
 ws = openpyxl.load_workbook(sys.argv[1]).worksheets[0]
 print(json.dumps([[c.value for c in r] + [c.number_format for c in r] for r in ws.iter_rows()]))`, XL]).toString());
-const head = rows[0].slice(0, 10);
-ok(JSON.stringify(head) === JSON.stringify(['Page', 'Type', 'Value', 'Unit', 'Perimeter', 'Unit', 'Label on the drawing', 'Count group', 'Author', 'Date']), 'columns: ' + JSON.stringify(head));
-const F0 = 10; // (each row: its 10 values, then their number formats)
+const head = rows[0].slice(0, 11);
+ok(JSON.stringify(head) === JSON.stringify(['Page', 'PDF page', 'Type', 'Value', 'Unit', 'Perimeter', 'Unit', 'Label on the drawing', 'Count group', 'Author', 'Date']), 'columns: ' + JSON.stringify(head));
+const F0 = 11; // (each row: its 11 values, then their number formats)
 const body = rows.slice(1);
-const ar = body.filter((r) => r[3] === 'm²');
-ok(ar.length === 3 && ar.every((r) => typeof r[2] === 'number') && ar.some((r) => r[2] === Number(want1.split(' ')[0]) && areaPart(r[6]) === want1), 'areas: numbers in Value, "m²" in Unit, the label beside: ' + JSON.stringify(ar.map((r) => r.slice(2, 7))));
-ok(ar.every((r) => typeof r[4] === 'number' && r[4] > 0 && r[5] === 'm'), 'areas: their perimeter in its own columns: ' + JSON.stringify(ar.map((r) => r.slice(4, 6))));
-ok(ar.every((r) => r[F0 + 2] === '#,##0.00'), 'shown with the decimals the drawing shows (2): ' + ar.map((r) => r[F0 + 2]).join(', '));
-const ln = body.filter((r) => r[3] === 'm' || r[3] === 'mm');
-ok(ln.length >= 4 && ln.every((r) => typeof r[2] === 'number'), 'lengths: numbers, unit apart (' + ln.map((r) => r[2] + ' ' + r[3]).join(', ') + ')');
-const sill = body.find((r) => r[6] === '706 mm');
-ok(sill && sill[2] === 0.706 && sill[3] === 'm' && sill[F0 + 2] === '#,##0.000', 'a length shown in mm only because it is under a metre: in metres (0.706 m), so the lengths add up: ' + JSON.stringify(sill?.slice(2, 7)));
-const typed = body.find((r) => r[6] === 'Wall W1');
-ok(typed && typeof typed[2] === 'number' && (typed[3] === 'm' || typed[3] === 'mm'), 'a label typed by hand ("Wall W1"): the measured number and unit still there: ' + JSON.stringify(typed?.slice(2, 5)));
-ok(!body.some((r) => typeof r[2] === 'string' && /\d/.test(r[2])), 'no number left as text in Value');
+const ar = body.filter((r) => r[4] === 'm²');
+ok(ar.length === 3 && ar.every((r) => typeof r[3] === 'number') && ar.some((r) => r[3] === Number(want1.split(' ')[0]) && areaPart(r[7]) === want1), 'areas: numbers in Value, "m²" in Unit, the label beside: ' + JSON.stringify(ar.map((r) => r.slice(3, 8))));
+ok(ar.every((r) => typeof r[5] === 'number' && r[5] > 0 && r[6] === 'm'), 'areas: their perimeter in its own columns: ' + JSON.stringify(ar.map((r) => r.slice(5, 7))));
+ok(ar.every((r) => r[F0 + 3] === '#,##0.00'), 'shown with the decimals the drawing shows (2): ' + ar.map((r) => r[F0 + 3]).join(', '));
+const ln = body.filter((r) => r[4] === 'm' || r[4] === 'mm');
+ok(ln.length >= 4 && ln.every((r) => typeof r[3] === 'number'), 'lengths: numbers, unit apart (' + ln.map((r) => r[3] + ' ' + r[4]).join(', ') + ')');
+const sill = body.find((r) => r[7] === '706 mm');
+ok(sill && sill[3] === 0.706 && sill[4] === 'm' && sill[F0 + 3] === '#,##0.000', 'a length shown in mm only because it is under a metre: in metres (0.706 m), so the lengths add up: ' + JSON.stringify(sill?.slice(3, 8)));
+const typed = body.find((r) => r[7] === 'Wall W1');
+ok(typed && typeof typed[3] === 'number' && (typed[4] === 'm' || typed[4] === 'mm'), 'a label typed by hand ("Wall W1"): the measured number and unit still there: ' + JSON.stringify(typed?.slice(3, 6)));
+ok(!body.some((r) => typeof r[3] === 'string' && /\d/.test(r[3])), 'no number left as text in Value');
 // the Comments list's Excel: measurements get their number and unit too
 const XL2 = join(TMP, 'comments.xlsx');
 await app.evaluate(({ dialog }, f) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: f }); }, XL2);
@@ -284,9 +284,9 @@ const crows = JSON.parse(execFileSync('python3', ['-c', `
 import openpyxl, json, sys
 ws = openpyxl.load_workbook(sys.argv[1]).worksheets[0]
 print(json.dumps([[c.value for c in r] for r in ws.iter_rows()]))`, XL2]).toString());
-ok(JSON.stringify(crows[0].slice(0, 5)) === JSON.stringify(['Page', 'Type', 'Comment', 'Value', 'Unit']), 'comments list Excel: Value and Unit after the comment: ' + JSON.stringify(crows[0]));
-const cm = crows.slice(1).filter((r) => r[4]);
-ok(cm.length >= 8 && cm.every((r) => typeof r[3] === 'number'), 'comments list Excel: every measurement with a number and unit: ' + cm.map((r) => r[3] + ' ' + r[4]).join(', '));
+ok(JSON.stringify(crows[0].slice(0, 6)) === JSON.stringify(['Page', 'PDF page', 'Type', 'Comment', 'Value', 'Unit']), 'comments list Excel: Value and Unit after the comment: ' + JSON.stringify(crows[0]));
+const cm = crows.slice(1).filter((r) => r[5]);
+ok(cm.length >= 8 && cm.every((r) => typeof r[4] === 'number'), 'comments list Excel: every measurement with a number and unit: ' + cm.map((r) => r[4] + ' ' + r[5]).join(', '));
 
 await app.evaluate(({ app: a }) => a.exit(0)).catch(() => {});
 console.log(fails ? `${fails} failed, ${passes} passed` : 'all passed');

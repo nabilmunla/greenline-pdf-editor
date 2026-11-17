@@ -175,6 +175,8 @@ export function Viewer(props: Props) {
   const { doc } = props;
   const P = useRef(props);
   P.current = props;
+  /** an engine answer that failed on a user's action: shown as an error (the window keeps going) */
+  const showErr = (e: unknown) => P.current.onEvent({ type: 'error', text: String((e as Error)?.message || e) });
   const scroller = useRef<HTMLDivElement>(null);
   const [z, setZ] = useState(doc.view.z || 0);
   const [vp, setVp] = useState({ top: 0, left: 0, w: 1200, h: 800 });
@@ -546,7 +548,7 @@ export function Viewer(props: Props) {
         add[i] = await doc.links(i);
       }
       if (live) setLinks(add);
-    })();
+    })().catch(() => {});
     return () => { live = false; };
   }, [visible.join(','), doc.baseRev]);
 
@@ -558,7 +560,7 @@ export function Viewer(props: Props) {
       const add: typeof blocks = {};
       for (const i of visible) add[i] = (await doc.blocks(i)).flatMap((b) => b.lines.map((l) => ({ bbox: l.bbox, text: l.text, origin: l.origin, dir: l.dir, size: l.size, color: l.color, bold: l.bold, italic: l.italic, serif: l.serif, mono: l.mono })));
       if (live) setBlocks(add);
-    })();
+    })().catch((e) => { if ((e as { fileRead?: boolean })?.fileRead) throw e; /* (a page that can't be read: no lines to edit on it) */ });
     return () => { live = false; };
   }, [props.tool, visible.join(','), doc.baseRev]);
 
@@ -592,6 +594,15 @@ export function Viewer(props: Props) {
         if (!el || page < 0 || page >= pages.length) return;
         // (a jump of the app's own: the spot restored a moment ago is no longer to be kept)
         restoreTo.current = null;
+        // a zoom asked for a moment ago is not drawn yet (Fit page, then a jump at once - a bookmark,
+        // a search hit): the jump is where it lands. Scrolling now was undone by that zoom, which
+        // put back the page that was in view (found with 40 files combined, 0.12)
+        if (fitPage.current != null || anchor.current) {
+          fitPage.current = null;
+          const cx = rect ? (rect[0] + rect[2]) / 2 : pages[page].w / 2, cy = rect ? (rect[1] + rect[3]) / 2 : 0;
+          anchor.current = { page, x: cx, y: cy, cx: el.clientWidth / 2, cy: rect ? el.clientHeight / 2 : GAP / 2 };
+          return;
+        }
         let zz = zRef.current;
         if (rect && !keepZoom) zz = zoomToShow(zz, rect, el.clientWidth, el.clientHeight, zMax);
         if (Math.abs(zz - zRef.current) > 1e-6) {
@@ -622,7 +633,7 @@ export function Viewer(props: Props) {
       page: () => curPage(),
       copySelection() {
         if (!textSel) return false;
-        void copyText();
+        void copyText().catch(showErr);
         return true;
       },
       editAnnot(page, id) {
@@ -665,7 +676,12 @@ export function Viewer(props: Props) {
   const charsOf = async (page: number) => {
     const k = doc.baseRev + ':' + page;
     if (!charsCache.current[k]) {
-      charsCache.current[k] = await doc.chars(page);
+      // a page the drawing engine can't read ("Could not read page 4" in a 0.8.1 report: an answer
+      // nothing caught - the pointer over a page asks here, unawaited) has no text to pick
+      // (not kept: the next look asks again - an engine restarted meanwhile may read it)
+      let c: Awaited<ReturnType<typeof doc.chars>>;
+      try { c = await doc.chars(page); } catch (e) { if ((e as { fileRead?: boolean })?.fileRead) throw e; return { text: '', box: new Float32Array(0) }; }
+      charsCache.current[k] = c;
       // keep the last 40 pages (a 1,500-page spec read through would otherwise keep them all)
       const keys = Object.keys(charsCache.current);
       if (keys.length > 40) delete charsCache.current[keys[0]];
@@ -712,7 +728,7 @@ export function Viewer(props: Props) {
   };
   useEffect(() => {
     if (!textSel) { setSelRects([]); return; }
-    void charsOf(textSel.page).then((c) => setSelRects(rectsFor(c, textSel.a, textSel.b)));
+    void charsOf(textSel.page).then((c) => setSelRects(rectsFor(c, textSel.a, textSel.b))).catch(() => {});
   }, [textSel]);
   // the page's text changed (pages deleted, moved, turned, OCR'd...): a text selection is by
   // character number on a page number - it stayed lit, and Ctrl+C copied text of another page
@@ -730,7 +746,7 @@ export function Viewer(props: Props) {
     if (!a || !isTextMarkup(a) || a.locked) { setEdge(null); return; }
     let gone = false;
     const page = s[0].page;
-    void charsOf(page).then((c) => { if (gone) return; const r = rangeOfMarkup(c, a); setEdge(r ? { page, id: a.id, a: r[0], b: r[1] } : null); });
+    void charsOf(page).then((c) => { if (gone) return; const r = rangeOfMarkup(c, a); setEdge(r ? { page, id: a.id, a: r[0], b: r[1] } : null); }).catch(() => {});
     return () => { gone = true; };
   }, [props.sel, annots]);
   /** the ends of chars [lo, hi]: start = left edge of the first char, end = right edge of the last */
@@ -1276,7 +1292,7 @@ export function Viewer(props: Props) {
       if (doc.redoTyping === redoTyping) doc.redoTyping = undefined;
       if (doc.finishEditing === finish) doc.finishEditing = undefined;
       if (doc.undoTyping === undoTyping) doc.undoTyping = undefined;
-      void finish();
+      void finish().catch(showErr);
     };
   }, []);
 
@@ -1504,7 +1520,7 @@ export function Viewer(props: Props) {
       return;
     }
     if (e.button === 2) {
-      if (draft && draft.kind === 'poly') { e.preventDefault(); void finishDraft(draft); return; }
+      if (draft && draft.kind === 'poly') { e.preventDefault(); void finishDraft(draft).catch(showErr); return; }
       if (at) {
         const hit = hitList(annots[at.page] || [], at.p, 6 / z);
         if (hit && !props.sel.some((s) => s.id === hit.id)) props.setSel([{ page: at.page, id: hit.id }]);
@@ -1637,7 +1653,7 @@ export function Viewer(props: Props) {
       }
       case 'rect': setDraft({ kind: 'rect', page, a: p, b: p }); return;
       case 'two':
-        if (draft && draft.kind === 'two' && draft.clicked) { const q = onDraftPage(draft.page); const d = { ...draft, b: twoEnd(draft.a, q, e.shiftKey, draft.page, straight(e, draft.page, q)) }; void finishDraft(d); return; }
+        if (draft && draft.kind === 'two' && draft.clicked) { const q = onDraftPage(draft.page); const d = { ...draft, b: twoEnd(draft.a, q, e.shiftKey, draft.page, straight(e, draft.page, q)) }; void finishDraft(d).catch(showErr); return; }
         setDraft({ kind: 'two', page, a: p, b: p, clicked: false });
         return;
       case 'poly': {
@@ -1645,9 +1661,9 @@ export function Viewer(props: Props) {
           const last = draft.pts[draft.pts.length - 1];
           const q = straight(e, page, p) ? ortho(last, p) : p;
           // double-click or click on the start point: finish
-          if (dbl || (draft.pts.length > 2 && dist(q, draft.pts[0]) < 6 / z)) { void finishDraft(draft); return; }
+          if (dbl || (draft.pts.length > 2 && dist(q, draft.pts[0]) < 6 / z)) { void finishDraft(draft).catch(showErr); return; }
           const pts = [...draft.pts, q];
-          if (tool === 'm-angle' && pts.length === 3) { void finishDraft({ ...draft, pts }); return; }
+          if (tool === 'm-angle' && pts.length === 3) { void finishDraft({ ...draft, pts }).catch(showErr); return; }
           setDraft({ ...draft, pts, cur: q });
           return;
         }
@@ -1656,7 +1672,7 @@ export function Viewer(props: Props) {
       }
       case 'ink':
         // a stroke on another page: the strokes so far become their markup first
-        if (draft && draft.kind === 'ink' && draft.page !== page) void finishDraft(draft);
+        if (draft && draft.kind === 'ink' && draft.page !== page) void finishDraft(draft).catch(showErr);
         setDraft(draft && draft.kind === 'ink' && draft.page === page ? { ...draft, strokes: [...draft.strokes, [p]] } : { kind: 'ink', page, strokes: [[p]], spec: common() });
         return;
       case 'callout':
@@ -1729,7 +1745,7 @@ export function Viewer(props: Props) {
         detail: `${u}\n\n${mail ? 'Your e-mail program opens with this address.' : 'It opens in your web browser.'} Links in a PDF can lead anywhere – go on only if you trust the file and this address.`,
         buttons: [mail ? 'Write e-mail' : 'Open link', 'Cancel'],
         type: 'warning',
-      }).then((r) => { if (r === 0) void gcc.openLink(u); });
+      }).then((r) => { if (r === 0) void gcc.openLink(u).catch(showErr); }).catch(showErr);
       return true;
     }
     void e;
@@ -1834,7 +1850,7 @@ export function Viewer(props: Props) {
             else if (ci !== drag.cur) setDrag({ ...drag, cur: ci });
           };
           const have = charsCache.current[doc.baseRev + ':' + page];
-          if (have) use(have); else void charsOf(page).then(use);
+          if (have) use(have); else void charsOf(page).then(use).catch(() => {});
           return;
         }
       }
@@ -1901,7 +1917,7 @@ export function Viewer(props: Props) {
       // I-beam over text (cached chars only, no waiting)
       const c = charsCache.current[doc.baseRev + ':' + page];
       if (c && charAt(c, p, 1.5) >= 0) el.dataset.cursor = 'text';
-      else if (!c) void charsOf(page);
+      else if (!c) void charsOf(page).catch(() => {});
     } else if (TOOLS[tool].gesture === 'text' && !space) {
       // highlight / underline...: an I-beam says "this marks the text"; off the text the
       // crosshair says "an area" (highlight, redaction) - the others do nothing there
@@ -2132,17 +2148,17 @@ export function Viewer(props: Props) {
       } finally {
         setGhosts({});
         ghostGen.current++;
-        if ('page' in d) { const pg = d.page; void doc.annots(pg).then((l) => setAnnots((x) => ({ ...x, [pg]: l }))); }
+        if ('page' in d) { const pg = d.page; void doc.annots(pg).then((l) => setAnnots((x) => ({ ...x, [pg]: l }))).catch(() => {}); }
       }
       return;
     }
     if (draft) {
-      if (draft.kind === 'rect') { void finishDraft(draft); return; }
+      if (draft.kind === 'rect') { void finishDraft(draft).catch(showErr); return; }
       if (draft.kind === 'two') {
         // (a rectangle area: a first click that slipped a few pixels - or along one side only - is
         // still a click; finished as a drag it made nothing, or a speck of an area)
         const thin = howOf(props.tool) === 'rect' && Math.min(Math.abs(draft.b[0] - draft.a[0]), Math.abs(draft.b[1] - draft.a[1])) * z <= 4;
-        if (dist(draft.a, draft.b) * z > 4 && !thin) void finishDraft(draft);
+        if (dist(draft.a, draft.b) * z > 4 && !thin) void finishDraft(draft).catch(showErr);
         else setDraft({ ...draft, clicked: true });
         return;
       }
@@ -2150,14 +2166,14 @@ export function Viewer(props: Props) {
         // strokes made within a moment of each other become one markup
         const d0 = draft;
         // (not a stroke on another page, nor one still being drawn)
-        window.setTimeout(() => setDraft((cur) => { if (cur && !btnDown.current && (cur === d0 || (cur.kind === 'ink' && cur.page === d0.page && cur.strokes.length === d0.strokes.length))) { void finishDraft(cur); return null; } return cur; }), 900);
+        window.setTimeout(() => setDraft((cur) => { if (cur && !btnDown.current && (cur === d0 || (cur.kind === 'ink' && cur.page === d0.page && cur.strokes.length === d0.strokes.length))) { void finishDraft(cur).catch(showErr); return null; } return cur; }), 900);
         return;
       }
-      if (draft.kind === 'callout' && draft.box) { void finishDraft(draft); return; }
+      if (draft.kind === 'callout' && draft.box) { void finishDraft(draft).catch(showErr); return; }
       // Cloud: a box dragged from the first corner is a cloud round that box (the tool's hint
       // offers it; a drag did nothing - only corner clicks made a cloud)
       const box = draft.kind === 'poly' ? cloudBox(draft) : null;
-      if (box && draft.kind === 'poly') { void finishDraft({ ...draft, pts: box }); return; }
+      if (box && draft.kind === 'poly') { void finishDraft({ ...draft, pts: box }).catch(showErr); return; }
     }
   };
   /** the four corners of a box being dragged out with the Cloud tool (button held since the first corner) */
@@ -2208,7 +2224,7 @@ export function Viewer(props: Props) {
   }
 
   const onDoubleClick = () => {
-    if (draft && draft.kind === 'poly') void finishDraft(draft);
+    if (draft && draft.kind === 'poly') void finishDraft(draft).catch(showErr);
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -2307,7 +2323,7 @@ export function Viewer(props: Props) {
     if (!d || d.kind !== 'poly' || P.current.tool === 'm-angle') return;
     const closedTool = ['polygon', 'cloud', 'm-area', 'm-perimeter'].includes(P.current.tool);
     if (d.pts.length < (closedTool ? 3 : 2)) return;
-    void finishDraft(closedTool || samePts([d.pts[0]], [d.pts[d.pts.length - 1]]) ? d : { ...d, pts: [...d.pts, d.pts[0]] });
+    void finishDraft(closedTool || samePts([d.pts[0]], [d.pts[d.pts.length - 1]]) ? d : { ...d, pts: [...d.pts, d.pts[0]] }).catch(showErr);
   };
   /** the status line says what is drawn so far (and how to take a point back) */
   const tellPoints = (d: Extract<Draft, { kind: 'poly' }>) => {
@@ -2393,7 +2409,7 @@ export function Viewer(props: Props) {
       else if (cur && k === ' ') next = cur;
       else if (cur && k === 'Backspace') next = cur.slice(0, -1);
       else if (cur && k === 'Escape') next = '';
-      else if (cur && k === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); void applyNow.current(cur); return; }
+      else if (cur && k === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); void applyNow.current(cur).catch(showErr); return; }
       if (next === null) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -2416,7 +2432,7 @@ export function Viewer(props: Props) {
       if (e.key === ' ' && !e.repeat) { if (t && t.closest?.('button, a, [role="button"], [role="menuitem"], summary, label')) return; setSpace(true); e.preventDefault(); return; }
       if (e.key === 'Escape') {
         // (pencil strokes already drawn are kept - Escape within a moment of a stroke lost it)
-        if (draft?.kind === 'ink' && !btnDown.current) { void flushInk(); setTip(null); return; }
+        if (draft?.kind === 'ink' && !btnDown.current) { void flushInk().catch(showErr); setTip(null); return; }
         if (draft) { cancelDraft(); return; }
         if (textSel) { setTextSel(null); return; }
         // (the area marked with the Snapshot tool goes first)
@@ -2425,8 +2441,8 @@ export function Viewer(props: Props) {
         if (pr.tool !== 'select') pr.setTool('select');
         return;
       }
-      if (e.key === 'Enter' && draft?.kind === 'poly') { e.preventDefault(); void finishDraft(draft); return; }
-      if (e.key === 'Enter' && draft?.kind === 'ink') { void finishDraft(draft); return; }
+      if (e.key === 'Enter' && draft?.kind === 'poly') { e.preventDefault(); void finishDraft(draft).catch(showErr); return; }
+      if (e.key === 'Enter' && draft?.kind === 'ink') { void finishDraft(draft).catch(showErr); return; }
       // Enter / F2 on a selected text box: type in it - not while it is being typed in (the text
       // stored before was put back over what was typed), and Enter on a focused button presses
       // that button (it opened the text box instead)
@@ -2483,7 +2499,7 @@ export function Viewer(props: Props) {
         if (cx || cy) await moveAndRelabel(items, cx, cy).catch((err) => pr.onEvent({ type: 'error', text: String((err as Error).message || err) }));
         return;
       }
-      if (e.ctrlKey && e.key.toLowerCase() === 'c' && textSel) { e.preventDefault(); void copyText(); return; }
+      if (e.ctrlKey && e.key.toLowerCase() === 'c' && textSel) { e.preventDefault(); void copyText().catch(showErr); return; }
       if (e.ctrlKey && !e.altKey && !pr.readOnly) {
         const k = e.key.toLowerCase();
         if (k === 'c' && pr.sel.length) { e.preventDefault(); await copyMarkups(false); return; }
@@ -2511,7 +2527,7 @@ export function Viewer(props: Props) {
   // tool changes drop half-made shapes
   // (pencil strokes drawn a moment before the tool changed become their markup - they were dropped)
   useEffect(() => {
-    snapWanted.current = false; snapRef.current = null; void flushInk();
+    snapWanted.current = false; snapRef.current = null; void flushInk().catch(showErr);
     // (a line being continued: its draft comes with the tool - right-click > Continue this line)
     setDraft(pendingDraft.current); pendingDraft.current = null;
     setTip(null); setSnapMark(null); if (props.tool !== 'select') setTextSel(null);
@@ -2769,7 +2785,7 @@ export function Viewer(props: Props) {
         <span className="db-v">{live || `${n} point${n === 1 ? '' : 's'}`}</span>
         <button title="Take back the last point (Ctrl+Z / Backspace) - Ctrl+Y puts it back" onClick={() => undoPoint()}>Undo point</button>
         {tool !== 'm-angle' && <button title="Close the shape (Shift+C)" disabled={draft.pts.length < (closedTool ? 3 : 2)} onClick={() => closeDraft()}>Close</button>}
-        <button className="primary" title="Finish (Enter, double-click or right-click)" disabled={!enough} onClick={() => void finishDraft(draft)}>Finish</button>
+        <button className="primary" title="Finish (Enter, double-click or right-click)" disabled={!enough} onClick={() => void finishDraft(draft).catch(showErr)}>Finish</button>
         <button title="Cancel (Esc) - Ctrl+Z brings it back" onClick={() => cancelDraft()}>Cancel</button>
       </div>
     );
@@ -2906,10 +2922,10 @@ export function Viewer(props: Props) {
       ref={scroller}
       className={'viewer' + (space || drag?.mode === 'pan' ? ' panning' : '')}
       tabIndex={0}
-      onPointerDown={(e) => void onPointerDown(e)}
+      onPointerDown={(e) => void onPointerDown(e).catch(showErr)}
       onPointerMove={onPointerMove}
       onPointerLeave={() => { setHover(null); aidAt.current = null; paintAids(); }}
-      onPointerUp={(e) => void onPointerUp(e)}
+      onPointerUp={(e) => void onPointerUp(e).catch(showErr)}
       onDoubleClick={onDoubleClick}
       onWheel={onWheel}
       onContextMenu={(e) => e.preventDefault()}

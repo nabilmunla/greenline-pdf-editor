@@ -272,7 +272,7 @@ class TileStore {
       ? gcc.cacheGet(r.cache).then(async (b) => {
         if (b) { try { return await createImageBitmap(new Blob([b as unknown as BlobPart], { type: 'image/webp' })); } catch { /* re-draw */ } }
         const bmp = await draw();
-        if (bmp) void toWebp(bmp).then((w) => w && gcc.cachePut(r.cache!, w));
+        if (bmp) void toWebp(bmp).then((w) => w && gcc.cachePut(r.cache!, w)).catch(() => {});
         return bmp;
       })
       : draw();

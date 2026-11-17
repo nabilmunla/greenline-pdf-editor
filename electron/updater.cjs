@@ -35,6 +35,10 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
   // address is used only when the setup said nothing)
   const setupSaid = () => { const u = readJson(path.join(installDir(), 'update.json')); return !!(u && typeof u.source === 'string'); };
   const source = () => { const s = readSettings(); return typeof s.updateSource === 'string' ? s.updateSource.trim() : setupSaid() ? setupSource() : defaultSource; };
+  // The location the build starts from, for Settings' "Restore default": Greenline = its GitHub link;
+  // the company build = the folder its setup named (even an empty one: "no updates" was chosen there),
+  // else the build's own address if it has one, else nothing ("" - nobody to restore from).
+  const defaultFor = () => (build === 'greenline' ? defaultSource : setupSaid() ? setupSource() : defaultSource);
   const previous = () => { const p = readJson(path.join(installDir(), 'resources', 'app.old', 'package.json')); return (p && p.version) || ''; };
   const runtime = process.versions.electron;
   // Linux (Greenline): the whole program is one package - an AppImage (one file, swapped for the
@@ -78,6 +82,9 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
       web: feed.isWeb(source()),
       setupSource: setupSource(),
       defaultSource,
+      defaultFor: defaultFor(),
+      // (an empty default the setup chose - no updates - is still one to put back: sweep S11)
+      defaultSet: build === 'greenline' || setupSaid() || !!defaultSource,
       ownSource: typeof s.updateSource === 'string',
       checked: s.updateChecked || 0,
       previous: ii ? previous() : '',
@@ -563,6 +570,14 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     const s = readSettings();
     if (v === null) delete s.updateSource; else s.updateSource = String(v).trim();
     writeSettings(s);
+    // Greenline back on its own link (Restore default): a share path the setup left in update.json goes
+    // too (best effort - a machine-wide install may not be writable; the setting above wins anyway)
+    if (build === 'greenline' && defaultSource && v !== null && String(v).trim() === defaultSource) {
+      try {
+        const f = path.join(installDir(), 'update.json'), u = readJson(f);
+        if (u && typeof u.source === 'string' && u.source.trim() && !feed.isWeb(u.source)) fs.writeFileSync(f, JSON.stringify({ ...u, source: defaultSource }));
+      } catch (_) { /* not writable */ }
+    }
     latest = null;
     set({ state: 'idle', err: '', available: '', show: false });
     return snapshot();

@@ -1,4 +1,32 @@
 {
+  "0.12.1": {
+    "Fixes": [
+      "Combining no longer runs out of memory when one of the files holds a very large number of links or markups (hundreds of thousands, as some big drawing sets do). Such a combine used to fail; it now finishes."
+    ]
+  },
+  "0.12.0": {
+    "New features": [
+      "Link the sheets (Edit tab): reads each sheet's number and title from its title block, links every \"see A-301\" or detail reference to that sheet, and adds a \"Sheets\" bookmark group. Your own bookmarks are kept. One Undo removes it all; running it again replaces it. A 320-sheet set took about 1 second in testing; a combined set of 2,000 pages, 16 to 20 seconds.",
+      "Layers: a Layers panel turns a file's CAD layers on and off on screen, in print, in Save as PDF and in picture export. The file changes only when you press \"Save the layer state\".",
+      "Files up to 4 GB now open (the limit was 2 GB). Combining a big set gives a file you can open and work on: 40 files, 2.7 GB, were combined and opened in about 15 seconds in testing.",
+      "Excel exports (Comments list and Measurements): a new \"PDF page\" column gives the real page number next to the page label, so each markup can be found in the PDF.",
+      "The app now counts its users, anonymously. It asks at first start; one click turns it off, then or later in Settings › Privacy. The README says exactly what is sent."
+    ],
+    "General polishing": [
+      "Link the sheets on a specification, a scan or a mixed set (drawings combined with scans, for example): it links only the real sheets, or says none were found and changes nothing.",
+      "Link the sheets with \"Links between sheets\" unticked leaves the links from an earlier run in place.",
+      "Layers also switch on screen in protected files (password or restricted permissions).",
+      "Settings › Updates: \"Restore default\" puts the update address back as the setup chose it, if it was changed or deleted by accident."
+    ],
+    "Fixes": [
+      "A file that can no longer be read from its disk (moved, deleted, network gone) now gets a message saying so, instead of a crash report.",
+      "After \"Save as\" on a big combined file, the app no longer says later that the file cannot be read.",
+      "Background errors no longer raise crash reports.",
+      "Damaged files: errors from the editing engine no longer build up (it used to restart itself after many of them).",
+      "After deleting or extracting pages, the pages that are gone no longer cause errors.",
+      "A jump made right after \"Fit page\" (to a bookmark, for example) now lands on its page."
+    ]
+  },
   "0.11.0": {
     "New features": [
       "A file with a sheet of millions of lines (traced from CAD) opens in a fraction of a second instead of 8–9 seconds. The sheet is prepared when you reach it (\"Preparing this drawing…\") and takes about as long to draw as before.",

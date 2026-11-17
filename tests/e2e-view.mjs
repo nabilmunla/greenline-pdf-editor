@@ -54,5 +54,13 @@ await run(async (app, win) => {
   await open(app, win);
   const after = await state(win);
   ok(after.fit === 'width' && after.page === before.page, `fit width kept, page ${before.page + 1} -> ${after.page + 1}`);
+  // a jump right after a fit that changes the zoom (a bookmark or search hit in the same moment): the jump
+  // lands - the fit's zoom used to put back the page that was in view (0.12, found with 40 files combined)
+  for (const [mode, pg] of [['page', 700], ['width', 1300], ['page', 5]]) {
+    await win.evaluate(([m, p]) => { window.__gcc.viewer().fit(m); window.__gcc.viewer().goTo(p); }, [mode, pg]);
+    await sleep(900);
+    const s = await state(win);
+    ok(s.page === pg && s.fit === mode, `fit ${mode} and a jump to page ${pg + 1} at once: on page ${s.page + 1}, fit ${s.fit}`);
+  }
 });
 process.exit(fails ? 1 : 0);
