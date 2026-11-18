@@ -9,6 +9,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const { pathToFileURL } = require('url');
 const winprint = require('./winprint.cjs');
+const { spellMenu, labelsOf } = require('./spellmenu.cjs');
 
 const VERSION = require('../package.json').version;
 const APP = 'PDF Editor';
@@ -226,6 +227,10 @@ process.on('unhandledRejection', (e) => { log('main rejection: ' + (e && e.stack
 /** every window: its tabs live in its page; here its close state, engines' port target, and where its
  *  tab strip is (for tabs dragged in from another window) */
 const wins = new Map(); // BrowserWindow id -> W
+// (tests: the text boxes' right-click menu is recorded on the window record, not shown; the test
+// reads the records through this)
+const NO_MENU_POPUP = process.argv.includes('--no-menu-popup');
+if (NO_MENU_POPUP) globalThis.__pdfedWins = wins;
 const focusOrder = []; // window ids, the one used last at the end
 const W_of = (e) => { try { const w = e && e.sender ? BrowserWindow.fromWebContents(e.sender) : null; return w ? wins.get(w.id) || null : null; } catch (_) { return null; } };
 const live = (W) => !!W && !W.win.isDestroyed();
@@ -291,6 +296,24 @@ function createWindow(opts = {}) {
   });
   win.webContents.on('before-input-event', (e, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools();
+  });
+  // right-click in a text box / field: a native menu (spelling suggestions, Add to dictionary, Cut /
+  // Copy / Paste / Select all). Native on purpose: a menu drawn in the page would take the keyboard
+  // from the box, and the boxes finish typing when they lose it. Elsewhere in the window nothing
+  // is shown here (the page's own menus are the app's). Tests (--no-menu-popup): the labels are
+  // kept on the window record and nothing is popped up.
+  win.webContents.on('context-menu', (_e, params) => {
+    try {
+      const wc = win.webContents;
+      const tpl = spellMenu(params, {
+        replace: (w) => { if (!wc.isDestroyed()) wc.replaceMisspelling(w); },
+        addWord: (w) => { if (!wc.isDestroyed()) wc.session.addWordToSpellCheckerDictionary(w); },
+      });
+      if (!tpl) return;
+      W.lastMenu = labelsOf(tpl);
+      if (NO_MENU_POPUP) return;
+      Menu.buildFromTemplate(tpl).popup({ window: win });
+    } catch (err) { log('context menu: ' + (err && err.message)); }
   });
   win.webContents.on('render-process-gone', (_e, d) => {
     log('renderer gone: ' + JSON.stringify(d));
@@ -1542,6 +1565,15 @@ ipcMain.handle('engines:start', (ev, list) => {
   for (const { name, role } of list) spawnEngine(ev.sender, name, role === 'edit' ? 'edit' : 'render', false, 0);
   return true;
 });
+/** end one of this window's engines (it stopped answering, PLAN 10.4; or its memory is nearly gone,
+ *  10.5): the exit handler above starts a new one and the window reopens its files in it */
+ipcMain.handle('engines:kill', (ev, name) => {
+  const e = engines.get(ev.sender.id + ':' + name);
+  if (!e) return false;
+  log('engine ' + name + ' ended on request');
+  try { e.proc.kill(); } catch (_) { /* gone */ }
+  return true;
+});
 app.on('before-quit', () => { quitting = true; });
 
 // ---------------------------------------------------------------- tabs between windows
@@ -1615,6 +1647,8 @@ const updater = require('./updater.cjs').create({
   // (a build's own web address for updates - the public build's GitHub repository; none in others)
   defaultSource: String(process.env.PDFED_UPDATE_FEED || require('../package.json').updateFeed || ''),
   build: String(require('../package.json').brand || 'company'),
+  // (a copy that moved to the web: reports queued for the company's folder are dropped - PLAN 11.1)
+  onMoved: () => { if (reports) reports.dropQueue(); },
 });
 /** close like the windows' close buttons (save prompts), then quit: the update runs after */
 function closeForRestart() {
@@ -1648,6 +1682,8 @@ ipcMain.handle('update:rollback', async () => {
   return true;
 });
 ipcMain.handle('update:afterStart', () => updater.afterStart());
+ipcMain.handle('update:movedClaim', () => updater.movedClaim());
+ipcMain.handle('update:movedDone', () => updater.movedDone());
 
 // ---------------------------------------------------------------- crash + problem reports
 reports = require('./reports.cjs').create({
@@ -1902,6 +1938,8 @@ app.whenReady().then(() => {
   // left there - those older than 3 minutes are dropped)
   if (isCombine(process.argv)) log('combine: started for a selection');
   watchSpool(isCombine(process.argv) ? 10000 : 0);
+  // (before anything is checked: a company copy that was just updated into Greenline moves to the web - PLAN 11.1)
+  updater.adopt();
   updater.start();
   counter.start();
   reports.scheduleFlush(Number(process.env.PDFED_REPORT_FIRST) || 30000);

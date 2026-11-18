@@ -2928,7 +2928,9 @@ export function Viewer(props: Props) {
       onPointerUp={(e) => void onPointerUp(e).catch(showErr)}
       onDoubleClick={onDoubleClick}
       onWheel={onWheel}
-      onContextMenu={(e) => e.preventDefault()}
+      // (the window's own menu is not wanted over the page; a text box / field is let through - the
+      // main process shows its spelling / Cut / Copy / Paste menu there)
+      onContextMenu={(e) => { if (!(e.target as HTMLElement).closest?.('textarea, input, [contenteditable]:not([contenteditable="false"])')) e.preventDefault(); }}
     >
       <div className="vcontent" style={{ width: contentW, height: contentH }}>
         {visible.map((i) => {

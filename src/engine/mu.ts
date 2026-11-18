@@ -13,6 +13,27 @@ import { layoutText, lineOps, measureLine, toUnicodeCMap, visualOrder, paraLevel
 import { runsText, reflowRuns, settle, dropKey, fullStyle, toRC, toDS, fromRC, cleanRuns, type TextRun, type BaseStyle, type FullStyle } from './richtext';
 import type { Reader, ExtraPart } from './files';
 import { overlay } from './overlay';
+import { fixMupdfRefs } from './mupdf-refs';
+import { guardMupdf } from './mupdf-guard';
+
+// one reference per wrapped PDF object, so what is let go of is freed (PLAN 10.19; see the file):
+// before guardMupdf, which wraps the methods it reads
+const REFS = fixMupdfRefs(mupdf);
+// (the references stress run, tests only: every MuPDF call goes through the guard, which forces
+// the garbage collector every PDFED_GC_EVERY calls - also in tests that do not guard MuPDF)
+if (typeof process !== 'undefined' && Number(process.env?.PDFED_GC_EVERY) > 0) guardMupdf(mupdf);
+
+/**
+ * MuPDF's memory in use, in bytes (PLAN 10.5): its WebAssembly memory only grows, so this is the
+ * most the engine has needed so far. Both MuPDF engines (editing, batch) send it with every
+ * answer; the window gives the batch engine's back when it has grown too big, and asks the person
+ * about the editing engine's. 0 when MuPDF's memory is not reachable (MuPDF.js loaded before
+ * mupdf-pre.mjs).
+ */
+export function heap(): number {
+  const m = (globalThis as { $libmupdf_wasm_Module?: { HEAPU8?: { buffer: { byteLength: number } } } }).$libmupdf_wasm_Module;
+  return m?.HEAPU8?.buffer.byteLength ?? 0;
+}
 
 /** typefaces from the PC that text boxes can use (besides the built-in three) */
 export function fontFamilies(): string[] { return availableFamilies(); }
@@ -120,6 +141,19 @@ function emitStream(fill: (put: (b: string | Uint8Array) => void) => void): Uint
   fill((b) => parts.push(typeof b === 'string' ? bytes(b) : b.slice()));
   return new Uint8Array(Buffer.concat(parts));
 }
+/**
+ * A document finished by a batch job (page marks, Flatten, repair), written for the caller. A
+ * source up to the piece-wise limit (STREAM_SAVE) goes through MuPDF's save with `opts` as it
+ * always did (renumbered, streams compressed). A bigger one is written in pieces - MuPDF's save
+ * builds the whole file in memory and fails (about 1.2 GB, more than twice that for a protected
+ * file): the objects the trailer leads to, as they stand (no renumbering, streams as they are;
+ * what nothing leads to stays out). Not for a protected file (writeObjects would write its
+ * strings decrypted and its streams as they were): that one keeps MuPDF's save.
+ */
+function writeOut(doc: mupdf.PDFDocument, opts: string, srcSize: number): Uint8Array {
+  if (srcSize > pieceWiseFrom && !docEncrypted(doc)) return emitStream((put) => writeObjects(doc, put));
+  return out(doc.saveToBuffer(opts));
+}
 
 /**
  * A PDF written object by object, never whole in memory: what MuPDF's own save can't do past
@@ -132,7 +166,11 @@ function emitStream(fill: (put: (b: string | Uint8Array) => void) => void): Uint
 /** a stream's dictionary with its real length (written as text: the open document is not changed) */
 function streamDict(doc: mupdf.PDFDocument, obj: mupdf.PDFObject, len: number) {
   let d = '<<';
-  obj.forEach((v: mupdf.PDFObject, k: string | number) => { if (String(k) !== 'Length') d += doc.newName(String(k)).toString() + ' ' + v.toString(true, true); });
+  // (each wrapper let go of at once - see writeObjects' scan)
+  obj.forEach((v: mupdf.PDFObject, k: string | number) => {
+    if (String(k) !== 'Length') { const nm = doc.newName(String(k)); d += nm.toString() + ' ' + v.toString(true, true); nm.destroy?.(); }
+    v.destroy?.();
+  });
   return d + '/Length ' + len + '>>';
 }
 /**
@@ -140,7 +178,9 @@ function streamDict(doc: mupdf.PDFDocument, obj: mupdf.PDFObject, len: number) {
  * are; in the document they are null now). pinned: the objects those point at (kept, as if the
  * trailer led to them).
  */
-function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => void, spilled?: Map<number, { off: number; len: number }>, copy?: (off: number, len: number) => void, flushed?: Map<number, { off: number; len: number }>, pinned?: Set<number>) {
+/** a reference in an object's text: number, generation, R (not part of a longer token) */
+const REF_TEXT = /(?<![\d.])(\d+) (\d+) R(?![A-Za-z0-9#])/g;
+function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => void, spilled?: Map<number, { off: number; len: number }>, copy?: (off: number, len: number) => void, flushed?: Map<number, { off: number; len: number }>, pinned?: Set<number>): number {
   const n = doc.countObjects();
   const tr = doc.getTrailer();
   // (an object's generation, as a reference to it gives it - "12 1 R")
@@ -151,17 +191,24 @@ function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => v
   /** each object's generation as the references to it give it ("4 1 R"): newIndirect(num) always
    *  says 0 - written as 0 while the references said 1, strict readers lost those objects */
   const gen = new Map<number, string>();
-  const walk = (v: mupdf.PDFObject, depth: number) => {
-    if (depth > 64) return;
-    if (v.isIndirect()) { const k = v.asIndirect(); if (k > 0 && k < n && !keep.has(k)) { keep.add(k); if (!flushed?.has(k)) queue.push(k); gen.set(k, genOf(v)); } return; }
-    if (v.isArray()) { for (let i = 0; i < v.length; i++) walk(v.get(i), depth + 1); return; }
-    if (v.isDictionary()) v.forEach((x: mupdf.PDFObject) => walk(x, depth + 1));
-  };
-  for (const k of ['Root', 'Info']) walk(tr.get(k), 0);
-  for (const k of pinned ?? []) walk(doc.newIndirect(k), 0);
-  while (queue.length) walk(doc.newIndirect(queue.pop()!).resolve(), 0);
+  const found = (k: number, g: string) => { if (k > 0 && k < n && !keep.has(k)) { keep.add(k); if (!flushed?.has(k)) queue.push(k); gen.set(k, g); } };
+  /** the references an object holds, read from its text ("12 0 R"). Walking its values made a
+   *  wrapper for each - with its key's for a dictionary, and its finalizer entry - which only the
+   *  end of the call let go of: a save of a 345 MB set of 1.4 million objects held over 1 GB of the
+   *  engine's JavaScript memory with them, and a second save in the same task ran out (0.13
+   *  stress run). The same objects are kept (a string that reads like a reference keeps one more) */
+  const scan = (v: mupdf.PDFObject) => { for (const m of v.toString(true, true).matchAll(REF_TEXT)) found(Number(m[1]), m[2]); };
+  for (const k of ['Root', 'Info']) { const x = tr.get(k); try { scan(x); } finally { x.destroy?.(); } }
+  for (const k of pinned ?? []) { const r = doc.newIndirect(k); try { scan(r); } finally { r.destroy?.(); } }
+  while (queue.length) {
+    const ref = doc.newIndirect(queue.pop()!);
+    const obj = ref.resolve();
+    try { scan(obj); } finally { obj.destroy?.(); ref.destroy?.(); }
+  }
   let pos = 0;
-  const w = (b: string | Uint8Array) => { put(b); pos += typeof b === 'string' ? b.length : b.length; };
+  // (a file of the limit or more would not open again: it is refused while it is written, not after)
+  const grow = (n: number) => { pos += n; if (pos >= saveLimit) throw new Error(TOO_BIG_SAVE); };
+  const w = (b: string | Uint8Array) => { put(b); grow(b.length); };
   w('%PDF-1.7\n%\u00e2\u00e3\u00cf\u00d3\n');
   const offs: number[] = [0];
   const gens: string[] = ['65535'];
@@ -169,26 +216,32 @@ function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => v
   for (let num = 1; num < n; num++) {
     offs[num] = pos;
     const fl = flushed?.get(num);
-    if (fl && copy) { gens[num] = '0'; copy(fl.off, fl.len); pos += fl.len; continue; }
+    if (fl && copy) { gens[num] = '0'; copy(fl.off, fl.len); grow(fl.len); continue; }
+    // (the reference and what it resolves to are destroyed as each object is written: MuPDF's
+    // objects otherwise all stay until the call ends)
     const ref = doc.newIndirect(num);
-    if (!keep.has(num)) { gens[num] = '0'; w(`${num} 0 obj\nnull\nendobj\n`); continue; }
-    const g = (gens[num] = gen.get(num) ?? '0');
-    const obj = ref.resolve();
-    const sp = spilled?.get(num);
-    if (sp && copy) {
-      w(`${num} ${g} obj\n${dictWith(obj, sp.len)}\nstream\n`);
-      copy(sp.off, sp.len);
-      pos += sp.len;
-      w('\nendstream\nendobj\n');
-    } else if (ref.isStream()) {
-      const raw = ref.readRawStream();
+    try {
+      if (!keep.has(num)) { gens[num] = '0'; w(`${num} 0 obj\nnull\nendobj\n`); continue; }
+      const g = (gens[num] = gen.get(num) ?? '0');
+      const obj = ref.resolve();
       try {
-        const v = raw.asUint8Array();
-        w(`${num} ${g} obj\n${dictWith(obj, v.length)}\nstream\n`);
-        w(v);
-        w('\nendstream\nendobj\n');
-      } finally { raw.destroy?.(); }
-    } else w(`${num} ${g} obj\n${obj.isNull() ? 'null' : obj.toString(true, true)}\nendobj\n`);
+        const sp = spilled?.get(num);
+        if (sp && copy) {
+          w(`${num} ${g} obj\n${dictWith(obj, sp.len)}\nstream\n`);
+          copy(sp.off, sp.len);
+          grow(sp.len);
+          w('\nendstream\nendobj\n');
+        } else if (ref.isStream()) {
+          const raw = ref.readRawStream();
+          try {
+            const v = raw.asUint8Array();
+            w(`${num} ${g} obj\n${dictWith(obj, v.length)}\nstream\n`);
+            w(v);
+            w('\nendstream\nendobj\n');
+          } finally { raw.destroy?.(); }
+        } else w(`${num} ${g} obj\n${obj.isNull() ? 'null' : obj.toString(true, true)}\nendobj\n`);
+      } finally { obj.destroy?.(); }
+    } finally { ref.destroy?.(); }
   }
   const xref = pos;
   let x = `xref\n0 ${n}\n0000000000 65535 f\r\n`;
@@ -198,13 +251,15 @@ function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => v
   const id = tr.get('ID');
   x += `trailer\n<</Size ${n}${ref('Root')}${ref('Info')}${id.isArray() ? '/ID ' + id.toString(true, true) : ''}>>\nstartxref\n${xref}\n%%EOF\n`;
   w(x);
+  return pos;
 }
 /** a file this big is saved in pieces (MuPDF's own save fails at about 1 GB) */
 const STREAM_SAVE = 350e6;
 /** a heavy content's merged line work: the file it is in, the content streams it stands for,
  *  the page objects that show it */
 interface Display { file: { path: string; size: number }; orig: number[]; pageObjs: Set<number> }
-const encrypted = (o: Open) => { try { return !o.doc.getTrailer().get('Encrypt').isNull(); } catch { return true; } };
+const docEncrypted = (doc: mupdf.PDFDocument) => { try { return !doc.getTrailer().get('Encrypt').isNull(); } catch { return true; } };
+const encrypted = (o: Open) => docEncrypted(o.doc);
 /** "%PDF-" near the start (where every PDF program looks for it: the first 1 KB) */
 function looksLikePdf(b: In): boolean {
   const n = Math.min(1024, inSize(b));
@@ -251,10 +306,41 @@ function isSigned(doc: mupdf.PDFDocument): boolean {
 /** the .wasm MuPDF.js runs was patched at start (mupdf-pre.mjs): positions unsigned (4 GB), the
  *  stack pointer exported (errors no longer leak it) */
 const PATCH = ((globalThis as { $mupdfPatch?: { unsigned: boolean; sp: boolean } }).$mupdfPatch) ?? { unsigned: false, sp: false };
+// (MuPDF.js's references left as they came: every PDF object it ever wrapped stays in memory)
+if (!REFS.fixed) console.error('MuPDF.js references: ' + REFS.note);
 /** files this big can't be read by the editing engine (see openIn): 4 GB with the patch (the drawing
  *  engine's limit too), 2 GB without it (MuPDF.js reads through signed 32-bit positions) */
 export const TOO_BIG = PATCH.unsigned ? 2 ** 32 - 1 : 2 ** 31;
 const LIMIT_GB = PATCH.unsigned ? 4 : 2;
+/** what a save that would reach TOO_BIG says (the file is not written at all) */
+const TOO_BIG_SAVE = `The saved file would be ${TOO_BIG > 2 ** 31 ? 4 : 2} GB or more and could not be opened again, so nothing was saved. Split the file first (Organize › Split).`;
+/** the limit a save is refused at, and the size from which a save is written in pieces (tests only lower them: setTooBigForTests) */
+let saveLimit = TOO_BIG;
+let pieceWiseFrom = STREAM_SAVE;
+/** tests only: a save is refused at n bytes, and written in pieces from n / 2 bytes (0: the real limits again) */
+export function setTooBigForTests(n: number) { saveLimit = n > 0 ? n : TOO_BIG; pieceWiseFrom = n > 0 ? n / 2 : STREAM_SAVE; }
+/** tests only: a source over n bytes is written in pieces by the batch jobs (writeOut), and Compress refuses it (0: the real limit, STREAM_SAVE, again) */
+export function setStreamSaveForTests(n: number) { pieceWiseFrom = n > 0 ? n : STREAM_SAVE; compressFrom = n > 0 ? n : COMPRESS_MAX; }
+/**
+ * A protected or signed file saves with MuPDF's own writer, which builds the whole file in the
+ * engine's memory (a plain big file is written in pieces): measured PLAN 10.7 - saves work up to
+ * 1.2 GB, from 1.25 GB they fail ("realloc failed"). Such a file over this is told on open, and
+ * a save that runs out of memory says so in plain words (tests only change it: setLockedBigForTests)
+ */
+const LOCKED_BIG = 1.2e9;
+let lockedBigFrom = LOCKED_BIG;
+export function setLockedBigForTests(n: number) { lockedBigFrom = n > 0 ? n : LOCKED_BIG; }
+export type LockedBig = 'protected' | 'signed' | 'both';
+function lockedBigOf(size: number, isProtected: boolean, isSigned: boolean): LockedBig | undefined {
+  if (size <= lockedBigFrom || (!isProtected && !isSigned)) return undefined;
+  return isProtected && isSigned ? 'both' : isProtected ? 'protected' : 'signed';
+}
+/** what a save that ran out of memory says on a big protected or signed file (the file is as it was) */
+export const LOCKED_BIG_SAVE = 'This file is protected or signed, and too big to save here. Nothing was saved. To keep your work, print the pages you need to a PDF, or ask for an unprotected, unsigned copy.';
+/** the biggest file Compress takes (MuPDF's own writer builds the whole result in memory) */
+const COMPRESS_MAX = 1e9;
+let compressFrom = COMPRESS_MAX;
+const tooBigToReduce = () => `This file is too big to reduce here (over ${compressFrom >= 1e9 ? `${+(compressFrom / 1e9).toFixed(1)} GB` : `${Math.round(compressFrom / 1e6)} MB`}). Split it first (Organize › Split).`;
 export const tooBigText = (size: number) => `This file is ${(size / 2 ** 30).toFixed(1)} GB: files of ${LIMIT_GB} GB or more can't be opened here. Other PDF programs can; to work on it here, split it into smaller files there first.`;
 /** the largest file this engine opens (the window says so before a merge it couldn't open) */
 export function openLimit(): number { return TOO_BIG; }
@@ -375,6 +461,9 @@ interface Open {
   toUni?: Map<string, Map<number, string>>;
   /** the file it reads from (closed with the document) */
   reader?: Reader;
+  /** what other files' pages put in since it was opened (Insert, Replace pages) add to it, bytes:
+   *  their share of those files' sizes. That content is in MuPDF's memory, not in `reader` (memSize) */
+  grown?: number;
   /** where the original file's last cross-reference section starts (-1: unknown) */
   origXref?: number;
   /** size/rotation/label of every page, kept up to date by the page operations (reading
@@ -406,19 +495,82 @@ function O(id: string): Open {
 }
 function pg(o: Open, i: number): mupdf.PDFPage {
   let p = o.pages.get(i);
-  if (!p) {
-    p = o.doc.loadPage(i) as mupdf.PDFPage;
+  if (p) {
+    // (asked for again: it is the newest - the one pushed out below is never one a caller holds)
+    o.pages.delete(i);
     o.pages.set(i, p);
-    hideReplies(p);
-    if (o.pages.size > 64) {
-      const first = o.pages.keys().next().value as number;
-      if (first !== i) o.pages.delete(first);
-    }
+    return p;
+  }
+  p = o.doc.loadPage(i) as mupdf.PDFPage;
+  o.pages.set(i, p);
+  hideReplies(p);
+  if (o.pages.size > 64) {
+    const first = o.pages.keys().next().value as number;
+    // (let go at once: MuPDF.js frees a page only when its garbage collector runs, which is
+    // never inside one long call - a walk over every page of a 5,000-page set kept them all)
+    if (first !== i) { const old = o.pages.get(first); o.pages.delete(first); if (old) freePage(old); }
   }
   return p;
 }
+/** a page object let go: its markup index with it */
+function freePage(p: mupdf.PDFPage) {
+  annotIndex.delete(p);
+  try { p.destroy?.(); } catch { /* gone */ }
+}
 /** forget cached page objects (after anything that moves pages around) */
-function resetPages(o: Open) { o.pages.clear(); }
+function resetPages(o: Open) {
+  const all = [...o.pages.values()];
+  o.pages.clear();
+  for (const p of all) freePage(p);
+}
+
+/**
+ * A page's markups by object number and the replies to each (`IRT` -> its replies), built the
+ * first time a markup on the page is looked for and kept while the page is cached. Looking for a
+ * markup by going through the page's list cost a wrapper for each markup's object each time:
+ * deleting or moving N markups on a page of M was N x M. Anything that adds markups to the page
+ * throws it away (`dropIndex`); deleting ones goes through `forget`, which keeps it in step.
+ */
+interface AnnotIndex { byId: Map<number, mupdf.PDFAnnotation>; /** page order */ pos: Map<number, number>; replies: Map<number, mupdf.PDFAnnotation[]> }
+const annotIndex = new WeakMap<mupdf.PDFPage, AnnotIndex>();
+function indexOf(p: mupdf.PDFPage): AnnotIndex {
+  let ix = annotIndex.get(p);
+  if (ix) return ix;
+  ix = { byId: new Map(), pos: new Map(), replies: new Map() };
+  let k = 0;
+  for (const a of p.getAnnotations()) {
+    const ob = a.getObject();
+    const n = ob.asIndirect();
+    ix.byId.set(n, a);
+    ix.pos.set(n, k++);
+    const irt = ob.get('IRT');
+    if (!irt.isNull()) {
+      const to = irt.asIndirect();
+      const l = ix.replies.get(to);
+      if (l) l.push(a); else ix.replies.set(to, [a]);
+    }
+  }
+  annotIndex.set(p, ix);
+  return ix;
+}
+/** markups were added to this page: the index is made again at the next look */
+function dropIndex(p: mupdf.PDFPage) { annotIndex.delete(p); }
+/** a markup deleted from its page (the page's own list shrinks with it) */
+function forget(p: mupdf.PDFPage, a: mupdf.PDFAnnotation) {
+  const ix = annotIndex.get(p);
+  if (!ix) return;
+  const ob = a.getObject();
+  const n = ob.asIndirect();
+  ix.byId.delete(n);
+  ix.pos.delete(n);
+  ix.replies.delete(n);
+  const irt = ob.get('IRT');
+  if (!irt.isNull()) {
+    const l = ix.replies.get(irt.asIndirect());
+    const at = l ? l.indexOf(a) : -1;
+    if (l && at >= 0) l.splice(at, 1);
+  }
+}
 
 function hideReplies(p: mupdf.PDFPage) {
   for (const a of p.getAnnotations()) {
@@ -436,7 +588,7 @@ function hideReplies(p: mupdf.PDFPage) {
  * match the index - every object is still there; Acrobat and qpdf repair such files without a
  * word) is repaired quietly.
  */
-export interface OpenResult { pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; /** pages must be looked at (heavyCandidates) before they are drawn */ look?: boolean; title: string; author: string; encrypted: boolean; hasForms: boolean; signed?: boolean }
+export interface OpenResult { pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; /** pages must be looked at (heavyCandidates) before they are drawn */ look?: boolean; title: string; author: string; encrypted: boolean; hasForms: boolean; signed?: boolean; /** a protected and / or signed file too big for its save to work (lockedBigFrom): the window says so */ lockedBig?: LockedBig }
 
 export function open(id: string, bytes: In, password?: string, author = ''): OpenResult {
   close(id);
@@ -463,61 +615,69 @@ export function open(id: string, bytes: In, password?: string, author = ''): Ope
   try { o.fileObjs = doc.countObjects(); } catch { /* unknown */ }
   o.signed = isSigned(doc);
   docs.set(id, o);
-  // a page turned by something other than a quarter turn (/Rotate 45): MuPDF rounds it, PDFium
-  // cuts it down - the two would disagree on the page's shape (markups off the drawing). Set to
-  // MuPDF's value here; the drawing engine then gets this copy.
-  let turned = false;
-  // (with `repaired`, what tells real damage from a mere misplaced index - see OpenResult.lossy:
-  // pages that can't be found, and what a page uses that leads nowhere after the repair - its
-  // content, markups, pictures, fonts: a page whose content or scan was cut out opened blank, and
-  // nothing was said)
-  const repaired = doc.wasRepaired();
-  let broken = 0;
-  const gone = (v: mupdf.PDFObject) => v.isIndirect() && v.resolve().isNull();
-  for (let i = 0, n = doc.countPages(); i < n; i++) {
-    let po: mupdf.PDFObject;
-    try { po = doc.findPage(i); if (!po.isDictionary()) { broken++; continue; } } catch { broken++; continue; }
-    if (repaired && !broken) {
+  try {
+    // a page turned by something other than a quarter turn (/Rotate 45): MuPDF rounds it, PDFium
+    // cuts it down - the two would disagree on the page's shape (markups off the drawing). Set to
+    // MuPDF's value here; the drawing engine then gets this copy.
+    let turned = false;
+    // (with `repaired`, what tells real damage from a mere misplaced index - see OpenResult.lossy:
+    // pages that can't be found, and what a page uses that leads nowhere after the repair - its
+    // content, markups, pictures, fonts: a page whose content or scan was cut out opened blank, and
+    // nothing was said)
+    const repaired = doc.wasRepaired();
+    let broken = 0;
+    const gone = (v: mupdf.PDFObject) => v.isIndirect() && v.resolve().isNull();
+    for (let i = 0, n = doc.countPages(); i < n; i++) {
+      let po: mupdf.PDFObject;
+      try { po = doc.findPage(i); if (!po.isDictionary()) { broken++; continue; } } catch { broken++; continue; }
+      if (repaired && !broken) {
+        try {
+          for (const k of ['Contents', 'Annots']) {
+            const v = po.get(k);
+            if (gone(v)) broken++;
+            else if (v.isArray()) for (let j = 0; j < v.length; j++) if (gone(v.get(j))) broken++;
+          }
+          const res = po.getInheritable('Resources');
+          for (const k of ['XObject', 'Font']) { const dd = res.get(k); if (dd.isDictionary()) dd.forEach((v: mupdf.PDFObject) => { if (gone(v)) broken++; }); }
+        } catch { broken++; }
+      }
       try {
-        for (const k of ['Contents', 'Annots']) {
-          const v = po.get(k);
-          if (gone(v)) broken++;
-          else if (v.isArray()) for (let j = 0; j < v.length; j++) if (gone(v.get(j))) broken++;
-        }
-        const res = po.getInheritable('Resources');
-        for (const k of ['XObject', 'Font']) { const dd = res.get(k); if (dd.isDictionary()) dd.forEach((v: mupdf.PDFObject) => { if (gone(v)) broken++; }); }
-      } catch { broken++; }
+        const r = po.getInheritable('Rotate');
+        if (r.isNumber() && r.asNumber() % 90 !== 0) { po.put('Rotate', (((Math.round(r.asNumber() / 90) * 90) % 360) + 360) % 360); turned = true; }
+      } catch { /* a broken page: left as it is */ }
     }
-    try {
-      const r = po.getInheritable('Rotate');
-      if (r.isNumber() && r.asNumber() % 90 !== 0) { po.put('Rotate', (((Math.round(r.asNumber() / 90) * 90) % 360) + 360) % 360); turned = true; }
-    } catch { /* a broken page: left as it is */ }
+    // (heavy pages are looked at when they are about to be drawn, not here: see heavyCandidates)
+    // (a protected file that opens without a password - permissions only - is looked at too: its
+    // drawing copy is then a decrypted one, see drawPlain; one that needs a password is not: no
+    // decrypted copy of it is ever written - PLAN 4.3)
+    o.look = !!mergeContent && inSize(bytes) >= HEAVY_RAW && !(encrypted(o) && o.password);
+    const pages = pageInfos(o);
+    // (cached from here on: see Open.infos)
+    doc.enableJournal();
+    let hasForms = false;
+    // (an empty list - a form whose fields were all flattened - is no form)
+    try { const f = doc.getTrailer().get('Root', 'AcroForm', 'Fields'); hasForms = f.isArray() && f.length > 0; } catch { /* none */ }
+    return {
+      pages,
+      needsPassword: false,
+      repaired,
+      lossy: repaired && (broken > 0 || !pages.length || cutShort(bytes)),
+      fixedTurn: turned,
+      heavy: 0,
+      look: !!o.look,
+      title: doc.getMetaData('info:Title') || '',
+      author: doc.getMetaData('info:Author') || '',
+      encrypted: !!password,
+      hasForms,
+      signed: !!o.signed,
+      lockedBig: lockedBigOf(inSize(bytes), docEncrypted(doc), !!o.signed),
+    };
+  } catch (e) {
+    // (a file that fails late - a damaged page tree - is not left in the editing engine: its entry
+    // and its reader go, and the error goes on to the window)
+    close(id);
+    throw e;
   }
-  // (heavy pages are looked at when they are about to be drawn, not here: see heavyCandidates)
-  // (a protected file that opens without a password - permissions only - is looked at too: its
-  // drawing copy is then a decrypted one, see drawPlain; one that needs a password is not: no
-  // decrypted copy of it is ever written - PLAN 4.3)
-  o.look = !!mergeContent && inSize(bytes) >= HEAVY_RAW && !(encrypted(o) && o.password);
-  const pages = pageInfos(o);
-  // (cached from here on: see Open.infos)
-  doc.enableJournal();
-  let hasForms = false;
-  // (an empty list - a form whose fields were all flattened - is no form)
-  try { const f = doc.getTrailer().get('Root', 'AcroForm', 'Fields'); hasForms = f.isArray() && f.length > 0; } catch { /* none */ }
-  return {
-    pages,
-    needsPassword: false,
-    repaired,
-    lossy: repaired && (broken > 0 || !pages.length || cutShort(bytes)),
-    fixedTurn: turned,
-    heavy: 0,
-    look: !!o.look,
-    title: doc.getMetaData('info:Title') || '',
-    author: doc.getMetaData('info:Author') || '',
-    encrypted: !!password,
-    hasForms,
-    signed: !!o.signed,
-  };
 }
 
 /**
@@ -530,10 +690,12 @@ export function open(id: string, bytes: In, password?: string, author = ''): Ope
  * or blending is in play (merged strokes would overlap differently).
  * Returns the number of pages drawn from merged line work.
  */
-let mergeContent: ((rawParts: Uint8Array[], force?: boolean) => Uint8Array | null | Promise<Uint8Array | null>) | null = null;
-/** the merging: given the page's content streams (Flate-compressed, in order), the new compressed
- *  content - or null when the page is not one of those (`force`: asked for on a page that took the
- *  drawing engine down - a lower bar) */
+/** a content stream's bytes as they are in the file: Flate-compressed, or with no filter (PLAN 10.10) */
+export interface RawPart { bytes: Uint8Array; flate: boolean }
+let mergeContent: ((rawParts: RawPart[], force?: boolean) => Uint8Array | null | Promise<Uint8Array | null>) | null = null;
+/** the merging: given the page's line work (its heavy content streams, in order - see lineWork),
+ *  the new compressed content - or null when the page is not one of those (`force`: asked for on a
+ *  page that took the drawing engine down - a lower bar) */
 export function setContentMerger(f: typeof mergeContent) { mergeContent = f; }
 /** where merged line work is kept (a file the drawing engines read): set by the engine host */
 let storeDisplay: ((bytes: Uint8Array) => { path: string; size: number }) | null = null;
@@ -545,38 +707,82 @@ let HEAVY_RAW = 2e6;
 export function setHeavyRaw(n: number) { HEAVY_RAW = n; }
 const contentList = (po: mupdf.PDFObject) => { const c = po.get('Contents'); return c.isArray() ? [...Array(c.length).keys()].map((k) => c.get(k)) : c.isNull() ? [] : [c]; };
 const contentKey = (list: mupdf.PDFObject[]) => list.map((s) => (s.isIndirect() ? s.asIndirect() : -1)).join(',');
-/** a page that may be heavy: its content key and stream objects; 'shown' = already drawn merged
- *  (its content is, for another page); null = not one of those */
-function candidateOf(o: Open, i: number, force: boolean): { key: string; streams: number[]; pageObj: number; size: number } | 'shown' | null {
+/** a content part this small with no filter is one of ours - our wrappers, page marks, an OCR
+ *  layer - not line work (PLAN 10.10) */
+const OURS_MAX = 64 * 1024;
+/** a stream's filter: '' none, '?' one we don't merge from (several, or not a name) */
+const filterOf = (s: mupdf.PDFObject) => { const f = s.get('Filter'); return f.isNull() || (f.isArray() && !f.length) ? '' : f.isName() ? f.asName() : f.isArray() && f.length === 1 && f.get(0).isName() ? f.get(0).asName() : '?'; };
+/**
+ * A page's line work (PLAN 10.10, H1): its heavy content parts - Flate-compressed with no
+ * /DecodeParms (as such files are), or with no filter and bigger than OURS_MAX (what MuPDF writes
+ * for a page after a redaction or a text edit) - one run of them, in order; the parts are one
+ * content together (a path can begin in one and be stroked in the next), so they are merged as
+ * one. The parts around them are ours (no filter, at most OURS_MAX) and stay as they are: a page
+ * numbered, flattened or given an OCR layer before it was looked at is still merged (every part
+ * had to be Flate, and those three parts aren't). Any other part, or one of ours between two heavy
+ * ones (the merged run would move it), or no heavy part: null. `local`: a heavy part is not in the
+ * file as opened (made since - a redaction, pages inserted - or with no filter): merged in the
+ * editing engine (mergeLocal), the batch engine reads the file as opened.
+ */
+function lineWork(o: Open, list: mupdf.PDFObject[]): { parts: mupdf.PDFObject[]; local: boolean } | null {
+  let first = -1, last = -1, local = false;
+  for (let k = 0; k < list.length; k++) {
+    const s = list[k];
+    if (!s.isIndirect()) return null;
+    const nm = filterOf(s);
+    let heavy: boolean;
+    if (nm === 'FlateDecode' && s.get('DecodeParms').isNull()) heavy = true;
+    else if (nm === '') { const l = s.get('Length'); heavy = !l.isNumber() || l.asNumber() > OURS_MAX; }
+    else return null;
+    if (!heavy) continue;
+    if (last >= 0 && last !== k - 1) return null;
+    if (first < 0) first = k;
+    last = k;
+    if (!nm || o.fileObjs == null || s.asIndirect() >= o.fileObjs) local = true;
+  }
+  return first < 0 ? null : { parts: list.slice(first, last + 1), local };
+}
+/** the key a page's merged line work is kept under: its line work's stream objects ('' none) */
+const lineKey = (o: Open, page: mupdf.PDFObject) => { const lw = lineWork(o, contentList(page)); return lw ? contentKey(lw.parts) : ''; };
+/** a page that may be heavy: its line work's key and stream objects (`local`: merged here - see
+ *  lineWork); 'shown' = already drawn merged (its line work is, for another page); null = not one
+ *  of those */
+function candidateOf(o: Open, i: number, force: boolean): { key: string; streams: number[]; pageObj: number; size: number; local: boolean } | 'shown' | null {
   try {
     const ref = o.doc.findPage(i);
     if (!ref.isIndirect()) return null;
     const po = ref.resolve();
     const list = contentList(po);
     if (!list.length || list.some((s) => !s.isIndirect())) return null;
-    const key = contentKey(list);
+    const lw = lineWork(o, list);
+    if (!lw) return null;
+    // (the line work only: a sheet merged before it was numbered keeps its merge - displayOverlay
+    // swaps just those streams, the page's other parts stay around the merged one)
+    const key = contentKey(lw.parts);
     const have = o.display?.get(key);
     // ('shown': the page joins a merged content - a new drawing copy is needed; a page already
     // drawn from it needs nothing: not a candidate, drawn at once - PLAN 4.1)
     if (have) { const n = ref.asIndirect(); if (have.pageObjs.has(n)) return null; have.pageObjs.add(n); return 'shown'; }
     let total = 0;
-    for (const s of list) { const l = s.get('Length'); if (l.isNumber()) total += l.asNumber(); }
+    for (const s of lw.parts) { const l = s.get('Length'); if (l.isNumber()) total += l.asNumber(); }
     if (!force && total < HEAVY_RAW) return null;
     if (list.some((s) => !s.isStream() || !s.get('GCCMerged').isNull())) return null;
     if (!opaqueStates(po)) return null;
-    // every part Flate-compressed (as such files are); the parts are one content together - a
-    // path can begin in one and be stroked in the next, so they are merged as one
-    const flate = (s: mupdf.PDFObject) => { const f = s.get('Filter'); const nm = f.isName() ? f.asName() : f.isArray() && f.length === 1 && f.get(0).isName() ? f.get(0).asName() : ''; return nm === 'FlateDecode' && s.get('DecodeParms').isNull(); };
-    if (!list.every(flate)) return null;
-    return { key, streams: list.map((s) => s.asIndirect()), pageObj: ref.asIndirect(), size: total };
+    return { key, streams: lw.parts.map((s) => s.asIndirect()), pageObj: ref.asIndirect(), size: total, local: lw.local };
   } catch { return null; /* left as it is */ }
 }
 /** the merging itself: these content streams of `doc` -> merged line work in a file (or null) */
-/** the content streams' raw (compressed) bytes, copied out of the engine's memory */
-function rawStreams(doc: mupdf.PDFDocument, streams: number[]): Uint8Array[] {
-  return streams.map((n) => { const r = doc.newIndirect(n).readRawStream(); try { return r.asUint8Array().slice(); } finally { r.destroy?.(); } });
+/** the content streams' raw bytes (compressed, or with no filter: the content), copied out of the
+ *  engine's memory - its own copy let go before the merge starts */
+function rawStreams(doc: mupdf.PDFDocument, streams: number[]): RawPart[] {
+  return streams.map((n) => {
+    const s = doc.newIndirect(n);
+    const flate = filterOf(s) !== '';
+    const r = s.readRawStream();
+    try { return { bytes: r.asUint8Array().slice(), flate }; } finally { r.destroy?.(); }
+  });
 }
-async function mergeRaw(raws: Uint8Array[], force: boolean): Promise<{ path: string; size: number } | null> {
+async function mergeRaw(raws: RawPart[], force: boolean): Promise<{ path: string; size: number } | null> {
   if (!mergeContent || !storeDisplay) return null;
   const out = await mergeContent(raws, force);
   return out ? storeDisplay(out) : null;
@@ -586,19 +792,32 @@ function attach(o: Open, key: string, streams: number[], file: { path: string; s
   if (have) { have.pageObjs.add(pageObj); return; }
   (o.display ??= new Map()).set(key, { file, orig: streams, pageObjs: new Set([pageObj]) });
 }
-/** merge one page's strokes for display, here and now (simplify on request); true if drawn merged now */
-async function mergePage(o: Open, i: number, force: boolean): Promise<boolean> {
+/** the merged line work page `i` is drawn from now (null: none) */
+function drawnMerged(o: Open, i: number): { path: string; size: number } | null {
+  try { const ref = o.doc.findPage(i); const d = o.display?.get(lineKey(o, ref)); if (d && ref.isIndirect() && d.pageObjs.has(ref.asIndirect())) return d.file; } catch { /* not */ }
+  return null;
+}
+/** merge one page's strokes for display, here and now (simplify on request, a page whose line
+ *  work is not in the file as opened); the merged line work it is drawn from now, or null */
+async function mergePage(o: Open, i: number, force: boolean): Promise<{ path: string; size: number } | null> {
   // (already drawn from merged line work: nothing more to do)
-  try { const ref = o.doc.findPage(i); const d = o.display?.get(contentKey(contentList(ref))); if (d && ref.isIndirect() && d.pageObjs.has(ref.asIndirect())) return true; } catch { /* looked at below */ }
+  const now = drawnMerged(o, i);
+  if (now) return now;
   const c = candidateOf(o, i, force);
-  if (c === 'shown') return true;
-  if (!c) return false;
-  try {
-    const f = await mergeRaw(rawStreams(o.doc, c.streams), force);
-    if (!f) return false;
-    attach(o, c.key, c.streams, f, c.pageObj);
-    return true;
-  } catch { return false; }
+  if (c === 'shown') return drawnMerged(o, i);
+  if (!c) return null;
+  const f = await mergeRaw(rawStreams(o.doc, c.streams), force);
+  if (!f) return null;
+  attach(o, c.key, c.streams, f, c.pageObj);
+  return f;
+}
+/** merges in this engine, one sheet at a time (a sheet's line work and its merged copy are
+ *  hundreds of MB: two at once could take the editing engine past its memory) */
+let localRun: Promise<unknown> = Promise.resolve();
+function oneAtATime<T>(f: () => Promise<T>): Promise<T> {
+  const r = localRun.then(f, f);
+  localRun = r.catch(() => { /* the caller has it */ });
+  return r;
 }
 /**
  * 3.2: heavy pages are looked at when they are about to be drawn (or searched, or read), not on
@@ -608,16 +827,17 @@ async function mergePage(o: Open, i: number, force: boolean): Promise<boolean> {
  * and the result comes back here with attachDisplay), and those now drawn merged because they
  * show a content already merged for another page (the drawing copy must be made again).
  */
-export function heavyCandidates(id: string, pages: number[]): { candidates: { page: number; key: string; streams: number[]; size: number }[]; shown: number[] } {
+export function heavyCandidates(id: string, pages: number[]): { candidates: { page: number; key: string; streams: number[]; size: number; local?: true }[]; shown: number[] } {
   const o = O(id);
-  const out = { candidates: [] as { page: number; key: string; streams: number[]; size: number }[], shown: [] as number[] };
+  const out = { candidates: [] as { page: number; key: string; streams: number[]; size: number; local?: true }[], shown: [] as number[] };
   if (!o.look) return out;
   const n = o.doc.countPages();
   for (const i of pages) {
     if (i < 0 || i >= n) continue;
     const c = candidateOf(o, i, false);
     if (c === 'shown') out.shown.push(i);
-    else if (c) out.candidates.push({ page: i, key: c.key, streams: c.streams, size: c.size });
+    // (`local`: its line work is not in the file as opened - merged in this engine: mergeLocal)
+    else if (c) out.candidates.push({ page: i, key: c.key, streams: c.streams, size: c.size, ...(c.local ? { local: true as const } : {}) });
   }
   return out;
 }
@@ -626,7 +846,7 @@ export function heavyCandidates(id: string, pages: number[]): { candidates: { pa
 export async function mergeForDisplay(src: In, streams: number[], force = false): Promise<{ path: string; size: number } | null> {
   // (the streams are copied out and the file let go before the merge: the merge works in pieces
   // outside the engine's memory - PLAN 7.1)
-  let raws: Uint8Array[];
+  let raws: RawPart[];
   const d = openIn(src);
   try {
     const doc = d.asPDF();
@@ -640,9 +860,21 @@ export async function mergeForDisplay(src: In, streams: number[], force = false)
 export function attachDisplay(id: string, page: number, key: string, streams: number[], file: { path: string; size: number }): boolean {
   const o = O(id);
   const ref = o.doc.findPage(page);
-  if (!ref.isIndirect() || contentKey(contentList(ref)) !== key) return false;
+  if (!ref.isIndirect() || lineKey(o, ref) !== key) return false;
   attach(o, key, streams, file, ref.asIndirect());
   return true;
+}
+/**
+ * PLAN 10.10 (H1): a heavy page whose line work is not in the file as opened (a candidate with
+ * `local`: the content MuPDF wrote after a redaction or a text edit, a sheet inserted from another
+ * file and not saved) is merged here, from this engine's copy - the batch engine reads the file as
+ * opened, where those objects are not (or are the old content). One sheet at a time; its raw copy
+ * is let go before the merge starts. Attached as attachDisplay does: the merged line work the page
+ * is drawn from now, or null (not heavy after all, by the estimate).
+ */
+export function mergeLocal(id: string, page: number): Promise<{ path: string; size: number } | null> {
+  const o = O(id);
+  return oneAtATime(() => mergePage(o, page, false));
 }
 /**
  * A page that took the drawing engines down (out of memory): drawn from simplified line work on
@@ -651,11 +883,13 @@ export function attachDisplay(id: string, page: number, key: string, streams: nu
  */
 export async function simplifyPage(id: string, page: number): Promise<boolean> {
   const o = O(id);
-  if (!mergeContent || !storeDisplay || !(await mergePage(o, page, true))) throw new Error("This page's drawing can't be simplified (it isn't made of separate line pieces).");
+  // (the same line work as the look's - a page numbered or redacted in this session too)
+  const f = mergeContent && storeDisplay ? await oneAtATime(() => mergePage(o, page, true)).catch(() => null) : null;
+  if (!f) throw new Error("This page's drawing can't be simplified (it isn't made of separate line pieces).");
   // other pages showing the same content (one stream for several pages) are drawn from it too
-  const key = contentKey(contentList(o.doc.findPage(page)));
+  const key = lineKey(o, o.doc.findPage(page));
   const d = o.display!.get(key)!;
-  for (let i = 0, n = o.doc.countPages(); i < n; i++) if (i !== page) { try { const r = o.doc.findPage(i); if (r.isIndirect() && contentKey(contentList(r)) === key) d.pageObjs.add(r.asIndirect()); } catch { /* left as it is */ } }
+  for (let i = 0, n = o.doc.countPages(); i < n; i++) if (i !== page) { try { const r = o.doc.findPage(i); if (r.isIndirect() && lineKey(o, r) === key) d.pageObjs.add(r.asIndirect()); } catch { /* left as it is */ } }
   return true;
 }
 /**
@@ -971,7 +1205,7 @@ export function readerOf(id: string): Reader | null { return docs.get(id)?.reade
 export function close(id: string) {
   const o = docs.get(id);
   if (!o) return;
-  o.pages.clear();
+  resetPages(o);
   try { o.doc.destroy?.(); } catch { /* ignore */ }
   o.reader?.close();
   docs.delete(id);
@@ -1575,7 +1809,8 @@ function findToChange(o: Open, page: number, aid: number): mupdf.PDFAnnotation {
 }
 function find(o: Open, page: number, aid: number): mupdf.PDFAnnotation {
   const p = pg(o, page);
-  for (const a of p.getAnnotations()) if (a.getObject().asIndirect() === aid) return a;
+  const a = indexOf(p).byId.get(aid);
+  if (a) return a;
   for (const w of p.getWidgets()) if (w.getObject().asIndirect() === aid) return w as unknown as mupdf.PDFAnnotation;
   throw new Error('That markup no longer exists');
 }
@@ -2924,6 +3159,7 @@ export function createAnnot(id: string, page: number, s: AnnotSpec): AnnotData {
   return op(o, 'Add ' + (s.kind || s.type).toLowerCase(), 'a', () => {
     const p = pg(o, page);
     const a = p.createAnnotation(s.type);
+    dropIndex(p);
     if (o.author) a.setAuthor(o.author);
     a.setCreationDate(new Date());
     a.setFlags(PRINT);
@@ -2931,6 +3167,8 @@ export function createAnnot(id: string, page: number, s: AnnotSpec): AnnotData {
     if (s.irt != null) {
       const parent = find(o, page, s.irt);
       a.getObject().put('IRT', parent.getObject());
+      // (looking for the parent made the index with this markup in it, before it answered anything)
+      dropIndex(p);
       a.setRect(parent.hasRect() ? parent.getRect() : parent.getBounds());
       a.setHiddenForEditing(true);
     }
@@ -2943,7 +3181,9 @@ export function createAnnot(id: string, page: number, s: AnnotSpec): AnnotData {
 export function createAnnots(id: string, items: { page: number; spec: AnnotSpec }[], name = 'Add markups'): AnnotData[] {
   const o = O(id);
   const make = ({ page, spec }: { page: number; spec: AnnotSpec }) => {
-    const a = pg(o, page).createAnnotation(spec.type);
+    const pp = pg(o, page);
+    const a = pp.createAnnotation(spec.type);
+    dropIndex(pp);
     if (o.author) a.setAuthor(o.author);
     a.setCreationDate(new Date());
     a.setFlags(PRINT);
@@ -3025,8 +3265,7 @@ function copyInto(src: Open, o: Open, items: { page: number; id: number }[], pag
     return v;
   };
   {
-    const dp = pg(o, page);
-    const Cd = dp.getTransform() as unknown as number[];
+    const Cd = pg(o, page).getTransform() as unknown as number[];
     const Cdi = mupdf.Matrix.invert(Cd as unknown as mupdf.Matrix) as unknown as number[];
     const out: AnnotData[] = [];
     for (const it of items) {
@@ -3036,7 +3275,10 @@ function copyInto(src: Open, o: Open, items: { page: number; id: number }[], pag
       const so = a.getObject();
       if (!so.get('IRT').isNull()) continue; // replies go with nothing
       const Cs = pg(src, it.page).getTransform() as unknown as number[];
+      // (the page asked for again each time: copying markups from over 64 pages onto it would push it out of the cache)
+      const dp = pg(o, page);
       const b = dp.createAnnotation(t as mupdf.PDFAnnotationType);
+      dropIndex(dp);
       const bo = b.getObject();
       // (a callout's line is made again below: its old points, read on a page turned another way,
       // could lie thousands of points off - MuPDF then never finished working out the box)
@@ -3225,7 +3467,10 @@ export function deleteAnnots(id: string, items: { page: number; id: number }[]):
   const o = O(id);
   return op(o, items.length > 1 ? 'Delete ' + items.length + ' markups' : 'Delete markup', 'a', () => {
     let n = 0;
-    for (const { page, id: aid } of items) {
+    for (let k = 0; k < items.length; k++) {
+      // (every 60 markups a journal step is closed - see opMore)
+      if (k && k % 60 === 0) opMore(o);
+      const { page, id: aid } = items[k];
       const p = pg(o, page);
       // (already gone - an undo, another window: nothing to delete)
       let a: mupdf.PDFAnnotation;
@@ -3235,8 +3480,9 @@ export function deleteAnnots(id: string, items: { page: number; id: number }[]):
       // reply was deleted with its comment)
       const replies = threadOf(p, aid);
       if (replies.some((r) => r.getFlags() & LOCKED)) continue;
-      for (const r of replies) { noteDropped(o, r); p.deleteAnnotation(r); }
+      for (const r of replies) { noteDropped(o, r); forget(p, r); p.deleteAnnotation(r); }
       noteDropped(o, a);
+      forget(p, a);
       p.deleteAnnotation(a);
       n++;
     }
@@ -3249,8 +3495,19 @@ export function deleteAnnots(id: string, items: { page: number; id: number }[]):
  * its own: MuPDF's list shrinks as markups are deleted - going through it while deleting skipped
  * every other reply (left behind, pointing at nothing, never shown but still in the file).
  */
-function threadOf(p: mupdf.PDFPage, aid: number): mupdf.PDFAnnotation[] {
-  const all = [...p.getAnnotations()];
+export function threadOf(p: mupdf.PDFPage, aid: number): mupdf.PDFAnnotation[] {
+  const ix = indexOf(p);
+  // (the markups below it, found by the index - then in the order the page's list gives them, a
+  // reply listed before the one it answers coming in a later round, as going through the list did)
+  const under = new Set<number>();
+  const walk = [aid];
+  for (let n = walk.pop(); n !== undefined; n = walk.pop()) {
+    for (const r of ix.replies.get(n) ?? []) {
+      const rn = r.getObject().asIndirect();
+      if (!under.has(rn) && rn !== aid) { under.add(rn); walk.push(rn); }
+    }
+  }
+  const all = [...under].map((n) => ({ n, k: ix.pos.get(n) ?? 0 })).sort((a, b) => a.k - b.k).map((x) => ix.byId.get(x.n)!).filter(Boolean);
   const ids = new Set([aid]);
   const out: mupdf.PDFAnnotation[] = [];
   for (let grew = true; grew;) {
@@ -3487,6 +3744,7 @@ export function flatten(id: string, items: { page: number; id: number }[] | null
     else for (let i = 0; i < o.doc.countPages(); i++) byPage.set(i, null);
     /** form fields flattened (taken off the form's list afterwards) */
     const gone = new Set<number>();
+    let seen = 0;
     for (const [page, ids] of byPage) {
       const p = pg(o, page);
       const list = p.getAnnotations().filter((a) => {
@@ -3500,6 +3758,8 @@ export function flatten(id: string, items: { page: number; id: number }[] | null
       const all: mupdf.PDFAnnotation[] = [...list];
       if (opts.widgets && !ids) all.push(...(p.getWidgets() as unknown as mupdf.PDFAnnotation[]));
       for (const a of all) {
+        // (every 60 markups a journal step is closed - see opMore)
+        if (++seen % 60 === 0) opMore(o);
         const aid = a.getObject().asIndirect();
         const widget = a.getType() === 'Widget';
         if (!(a.getFlags() & HIDDEN)) {
@@ -3509,7 +3769,8 @@ export function flatten(id: string, items: { page: number; id: number }[] | null
         }
         noteDropped(o, a);
         // replies to it go with it (the whole thread, from a list of its own - see threadOf)
-        for (const r of threadOf(p, aid)) { noteDropped(o, r); p.deleteAnnotation(r); }
+        for (const r of threadOf(p, aid)) { noteDropped(o, r); forget(p, r); p.deleteAnnotation(r); }
+        forget(p, a);
         p.deleteAnnotation(a);
         if (widget) gone.add(aid);
       }
@@ -3657,17 +3918,22 @@ function addResource(o: Open, p: mupdf.PDFPage, kind: string, prefix: string, va
  * (a decode that failed half-way also wrapped the page a second time).
  */
 const WRAP_MAX = 256;
-function isWrapper(s: mupdf.PDFObject | undefined): boolean {
+/**
+ * Does this content stream start with `mark`? A stream longer than `max` (its /Length) is not
+ * decoded at all: the check is for our own small marks, and a heavy sheet's content is far bigger.
+ */
+function startsWith(s: mupdf.PDFObject | undefined, mark: string, max: number): boolean {
   if (!s) return false;
   let buf: mupdf.Buffer | null = null;
   try {
     if (!s.isStream()) return false;
     const len = s.get('Length').resolve();
-    if (!len.isNumber() || len.asNumber() > WRAP_MAX) return false;
+    if (!len.isNumber() || len.asNumber() > max) return false;
     buf = s.readStream();
-    return buf.asString().startsWith('q %GCC');
+    return buf.asString().startsWith(mark);
   } catch { return false; /* not ours */ } finally { buf?.destroy?.(); }
 }
+const isWrapper = (s: mupdf.PDFObject | undefined): boolean => startsWith(s, 'q %GCC', WRAP_MAX);
 
 /**
  * Add drawing commands on top of the page. The old content is wrapped once in q/Q so
@@ -4004,12 +4270,46 @@ export function insertBlank(id: string, at: number, w: number, h: number, count 
   });
 }
 
+/**
+ * Pages that came in from another file may be heavy sheets (PLAN 10.10b): a file is looked at
+ * from then on, as one is at open when it is big enough (`o.look` was set once, at open - a heavy
+ * sheet inserted into a light file was drawn stroke by stroke). The same conditions as at open:
+ * a source of HEAVY_RAW or more, or an open file that is looked at; never a file opened with its
+ * password (no decrypted copy of it is written).
+ */
+function lookFrom(o: Open, from: { size?: number; open?: Open }) {
+  if (o.look || !mergeContent || (encrypted(o) && o.password)) return;
+  if (from.open ? !!from.open.look : (from.size ?? 0) >= HEAVY_RAW) o.look = true;
+}
+/** pages of a file of `size` bytes put in (`share` of its pages): see Open.grown */
+function grewBy(o: Open, size: number, share: number) { if (size > 0 && share > 0) o.grown = (o.grown ?? 0) + size * Math.min(1, share); }
+/** an open document's size as a file (what it reads from, and what was put in since) */
+const docSize = (o: Open) => (o.reader?.size ?? 0) + (o.grown ?? 0);
+/**
+ * What building a copy of the document whole in MuPDF's memory weighs, for choosing between that
+ * and writing it in pieces (drawing copy, save): the file it reads from, and what was put in since
+ * 1.4 times over - that is held in MuPDF's memory as well as written into the copy. ("Original +
+ * changes" built whole needs up to 2.5 times its size while its buffer grows - the old block and
+ * the new one at once: 2.5 × (file + put in) + put in = 2.5 × (file + 1.4 × put in).) By the
+ * file's size alone, 200 sheets of a 522 MB set inserted into a 53 MB file were "53 MB": the
+ * drawing copy and every save were built whole and failed ("realloc (827430261 bytes) failed",
+ * 0.13 stress run - 0.12.1 failed the same way from about 280 such sheets).
+ */
+const memSize = (o: Open) => (o.reader?.size ?? 0) + 1.4 * (o.grown ?? 0);
+/** the file's pages are looked at before they are drawn (heavyCandidates) - the window asks after
+ *  an insert (lookFrom) */
+export function looking(id: string): boolean { return !!O(id).look; }
+
 /** insert pages of another PDF (all, or the listed ones) at `at` */
 export function insertFrom(id: string, at: number, bytes: In, pages?: number[], password?: string): PageInfo[] {
   const o = O(id);
   const src = openOther(bytes, password);
   try {
-    return insertPagesOf(o, at, src, pages);
+    const n = src.countPages();
+    const r = insertPagesOf(o, at, src, pages);
+    lookFrom(o, { size: inSize(bytes) });
+    grewBy(o, inSize(bytes), (pages?.length ?? n) / Math.max(1, n));
+    return r;
   } finally {
     src.destroy?.();
   }
@@ -4022,7 +4322,10 @@ export function insertFromOpen(id: string, at: number, srcId: string, pages?: nu
   if (o === s) throw new Error('Those pages are in this file already – use Duplicate, or drag them in the Pages panel.');
   const n = s.doc.countPages();
   if (pages?.some((i) => i < 0 || i >= n)) throw new Error(`That file has ${n} page${n === 1 ? '' : 's'}.`);
-  return insertPagesOf(o, at, s.doc, pages);
+  const r = insertPagesOf(o, at, s.doc, pages);
+  lookFrom(o, { open: s });
+  grewBy(o, docSize(s), (pages?.length ?? n) / Math.max(1, n));
+  return r;
 }
 
 /** form fields whose widgets (by object number) are gone: out of the form's field tree */
@@ -4099,9 +4402,10 @@ export function replacePages(id: string, targets: number[], from: { open?: strin
     if (targets.length !== list.length && !run) throw new Error(`${targets.length} pages to replace and ${list.length} to put in: give as many of each, or replace a run of pages (e.g. 5-8).`);
     if (targets.length > list.length && n0 - (targets.length - list.length) < 1) throw new Error('A PDF needs at least one page');
     const both = Math.min(targets.length, list.length);
+    roomFor(src, list);
     const old = pageInfos(o);
     o.removedContent = true;
-    return op(o, targets.length === 1 && list.length === 1 ? 'Replace page' : 'Replace pages', 'c', () => {
+    const r = op(o, targets.length === 1 && list.length === 1 ? 'Replace page' : 'Replace pages', 'c', () => {
       const lastT = targets[targets.length - 1];
       const dropOld = new Set(targets.slice(both));
       const order: number[] = [];
@@ -4118,7 +4422,7 @@ export function replacePages(id: string, targets: number[], from: { open?: strin
         const gm = o.doc.newGraftMap();
         try {
           list.forEach((sp, k) => { if (k && k % 100 === 0) opMore(o); gm.graftPage(n0 + k, src, sp); });
-          carryAnnots(o.doc, gm, src, list.map((sp, k) => [sp, n0 + k]));
+          carryAnnotsInto(o, gm, src, list.map((sp, k) => [sp, n0 + k]));
           carryLayers(o.doc, gm, src);
         } finally { gm.destroy?.(); }
         resetPages(o);
@@ -4175,20 +4479,55 @@ export function replacePages(id: string, targets: number[], from: { open?: strin
       const final = order.filter((i) => !(i >= n0 && i < n0 + both));
       return (o.infos = relabel(o, final.map((i, j) => (i < n0 && !slot.has(i) ? old[i] : info1(o, j)))));
     });
+    // (a revised sheet may be a heavy one: see lookFrom)
+    lookFrom(o, from.open ? { open: O(from.open) } : { size: inSize(from.bytes!) });
+    grewBy(o, from.open ? docSize(O(from.open)) : inSize(from.bytes!), list.length / Math.max(1, ns));
+    return r;
   } finally {
     if (own) src.destroy?.();
   }
 }
 
+/**
+ * Insert / Replace pages copy the pages' markups into the open file inside one undo step (PLAN
+ * 10.3a, the plan's 10.3c): nothing can be written out and emptied there as Combine does, so they must fit in
+ * MuPDF's memory (2 GB). The markups are counted before anything is copied, at MARKUP_BYTES each
+ * on top of the engine's memory now - past `refuse` the insert is refused; between the steps
+ * the memory is read again - past `stop` the step throws and op puts the file back as it was.
+ * Trade-off (recorded in the plan): such a set cannot be inserted at all; Combine can take it.
+ */
+const ROOM = { refuse: 1.7 * 2 ** 30, stop: 1.8 * 2 ** 30 };
+/** a markup object copied into an open file, with what it holds (a link and its action) */
+const MARKUP_BYTES = 1400;
+export const TOO_MANY_MARKUPS = 'These pages hold too many links and markups to insert into an open file, so nothing was inserted. Merge the files instead (Organize › Merge files).';
+/** tests: other limits (bytes of MuPDF's memory); no arguments - as built */
+export function setInsertRoom(refuse = 1.7 * 2 ** 30, stop = 1.8 * 2 ** 30) { ROOM.refuse = refuse; ROOM.stop = stop; }
+/** markup objects on these pages (their /Annots lists, a page listed twice counted twice) */
+function markupsOf(doc: mupdf.PDFDocument, pages: number[]): number {
+  let n = 0;
+  for (const i of pages) { try { const a = doc.findPage(i).get('Annots'); if (a.isArray()) n += a.length; } catch { /* not a page: its copy fails later */ } }
+  return n;
+}
+function roomFor(src: mupdf.PDFDocument, list: number[]) { if (markupsOf(src, list) * MARKUP_BYTES + heap() > ROOM.refuse) throw new Error(TOO_MANY_MARKUPS); }
+/** the markups of inserted pages, copied ANNOT_STEP pages at a time: each step its own part of the
+ *  undo step (opMore - one part for all took the journal's time up with the square of its size) */
+function carryAnnotsInto(o: Open, gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument, pairs: [number, number][]) {
+  for (const _ of carryAnnotsSteps(o.doc, gm, src, pairs)) {
+    opMore(o);
+    if (heap() > ROOM.stop) throw new Error(TOO_MANY_MARKUPS);
+  }
+}
+
 function insertPagesOf(o: Open, at: number, src: mupdf.PDFDocument, pages?: number[], label = 'Insert pages'): PageInfo[] {
+  const list = pages ?? [...Array(src.countPages()).keys()];
+  roomFor(src, list);
   return op(o, label, 'c', () => {
-    const list = pages ?? [...Array(src.countPages()).keys()];
     const old = pageInfos(o);
     const gm = o.doc.newGraftMap();
     try {
       keepLabels(o, (l) => [...l.slice(0, at), ...list.map(() => null), ...l.slice(at)], () => list.forEach((sp, k) => { if (k && k % 100 === 0) opMore(o); gm.graftPage(at + k, src, sp); }));
       // their markups, form fields and layers come along (graftPage leaves them behind)
-      carryAnnots(o.doc, gm, src, list.map((sp, k) => [sp, at + k]));
+      carryAnnotsInto(o, gm, src, list.map((sp, k) => [sp, at + k]));
       carryLayers(o.doc, gm, src);
     } finally { gm.destroy?.(); }
     resetPages(o);
@@ -4218,13 +4557,17 @@ function openOther(bytes: In, password?: string): mupdf.PDFDocument {
 export function extract(id: string, pages: number[]): Uint8Array {
   const o = O(id);
   const out = new mupdf.PDFDocument();
+  // (the graft map is let go however this ends: a copy that throws keeps no map alive)
+  let gm: mupdf.PDFGraftMap | null = null;
   try {
-    const gm = out.newGraftMap();
-    pages.forEach((sp, k) => gm.graftPage(k, o.doc, sp));
-    carryAnnots(out, gm, o.doc, pages.map((sp, k) => [sp, k]));
-    carryLayers(out, gm, o.doc);
-    carryFileInfo(out, gm, o.doc);
-    gm.destroy?.();
+    const map = out.newGraftMap();
+    gm = map;
+    pages.forEach((sp, k) => map.graftPage(k, o.doc, sp));
+    carryAnnots(out, map, o.doc, pages.map((sp, k) => [sp, k]));
+    carryLayers(out, map, o.doc);
+    carryFileInfo(out, map, o.doc);
+    map.destroy?.();
+    gm = null;
     carryScales(out, o.doc, pages.map((sp, k) => [sp, k]));
     // page labels ("A-101", "iv") of the pages taken, bookmarks that point at them
     if (hasLabels(o)) { const infos = pageInfos(o); writeLabels({ doc: out }, pages.map((i) => infos[i]?.label ?? null)); }
@@ -4234,7 +4577,7 @@ export function extract(id: string, pages: number[]): Uint8Array {
     // (a whole font from the PC came along with text boxes / edited text: cut down to the letters used)
     if (o.bigFont) { try { out.subsetFonts(); } catch { /* keep the full font */ } }
     return out_(out.saveToBuffer('garbage=compact,compress'));
-  } finally { out.destroy?.(); }
+  } finally { gm?.destroy?.(); out.destroy?.(); }
 }
 
 /** merge whole files into a new PDF; bookmarks: one per file (each file's own bookmarks under it) */
@@ -4300,10 +4643,13 @@ export function mergeAddFile(st: MergeState, name: string, bytes: In, spill: (ra
  * they hold are written out whole every ANNOT_STEP pages and emptied here (flushNew). A real
  * 345 MB drawing set held 1.4 million objects - 225,000 links with their actions, 166,000
  * measuring viewports: copied at once they took the engine past its 2 GB (malloc failed).
+ * `from`: a file's bytes, or a document open here (Extract, PLAN 10.3b - read, not closed);
+ * `more`: what else is copied through the pages' graft map before it is let go.
  */
-export function* mergeFileSteps(st: MergeState, name: string, bytes: In, spill: (raw: Uint8Array) => number, pages?: number[]): Generator<void, number> {
+export function* mergeFileSteps(st: MergeState, name: string, from: In | mupdf.PDFDocument, spill: (raw: Uint8Array) => number, pages?: number[], more?: (gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument) => void): Generator<void, number> {
   const { out } = st;
-  const src = openOther(bytes);
+  const own = !(from instanceof mupdf.PDFDocument);
+  const src = own ? openOther(from as In) : (from as mupdf.PDFDocument);
   let added = 0;
   try {
     const gm = out.newGraftMap();
@@ -4319,15 +4665,36 @@ export function* mergeFileSteps(st: MergeState, name: string, bytes: In, spill: 
       spillNew(st, spill);
       yield* carryAnnotsSteps(out, gm, src, list.map((sp, k) => [sp, first + k]), (from, keep) => flushNew(st, spill, from, keep));
       carryLayers(out, gm, src);
+      more?.(gm, src);
       carryScales(out, src, list.map((sp, k) => [sp, first + k]));
       if (list.length) st.marks.push({ title: name.replace(/\.pdf$/i, ''), page: first, children: keepMarks(readOutline(src), map) });
       // (a graft map keeps both files alive in the engine's memory until it is let go - also when
       // grafting failed)
     } finally { gm.destroy?.(); }
-  } finally { src.destroy?.(); }
+  } finally { if (own) src.destroy?.(); }
   spillNew(st, spill);
   return added;
 }
+/**
+ * Extract pages of a big file (PLAN 10.3b, R2): `extract` copies every markup at once and builds
+ * the new file in the editing engine's memory - a 300-sheet set with 300,000 links took it to
+ * 1,219 MB (589 MB once MuPDF.js's references were fixed, 10.19; here 237 MB); a set like the real
+ * 345 MB one (1.4 million objects) would take it past its 2 GB, in the engine that holds the open
+ * files. Here the pages go as Combine's do (mergeFileSteps: spilled and flushed to a temp file as
+ * it goes, written out with mergeWrite), then what `extract` adds: the file's title, author...,
+ * page labels; bookmarks, layers and scales come with mergeFileSteps. The fonts of text boxes are
+ * not cut down to the letters used (`extract` does: their streams are on disk by then) - the file
+ * is a little bigger, the same to read. With MuPDF.js's references as they came (refsFixed()
+ * false) the file is the same, only the memory higher (587 MB on that set).
+ */
+export function* extractSteps(st: MergeState, id: string, pages: number[], spill: (raw: Uint8Array) => number): Generator<void, number> {
+  const o = O(id);
+  const n = yield* mergeFileSteps(st, '', o.doc, spill, pages, (gm, src) => carryFileInfo(st.out, gm, src));
+  if (hasLabels(o)) { const infos = pageInfos(o); writeLabels({ doc: st.out }, pages.map((i) => infos[i]?.label ?? null)); }
+  return n;
+}
+/** markup objects on these pages of an open file (the window chooses extract or extractBig by it) */
+export function markupCount(id: string, pages: number[]): number { return markupsOf(O(id).doc, pages); }
 /** the objects made since `from` (all but `keep`) written whole to the spill file and made null here;
  *  what they point at is pinned (writeObjects keeps it) */
 function flushNew(st: MergeState, spill: (raw: Uint8Array) => number, from: number, keep: Set<number>) {
@@ -4336,8 +4703,9 @@ function flushNew(st: MergeState, spill: (raw: Uint8Array) => number, from: numb
   const pin = (v: mupdf.PDFObject, depth: number) => {
     if (depth > 64) return;
     if (v.isIndirect()) { st.pinned.add(v.asIndirect()); return; }
-    if (v.isArray()) { for (let i = 0; i < v.length; i++) pin(v.get(i), depth + 1); return; }
-    if (v.isDictionary()) v.forEach((x: mupdf.PDFObject) => pin(x, depth + 1));
+    // (each wrapper let go of at once: it would hold what it wraps after the flush emptied it - PLAN 10.3b)
+    if (v.isArray()) { for (let i = 0; i < v.length; i++) { const x = v.get(i); pin(x, depth + 1); x.destroy?.(); } return; }
+    if (v.isDictionary()) v.forEach((x: mupdf.PDFObject) => { pin(x, depth + 1); x.destroy?.(); });
   };
   for (let num = from; num < n; num++) {
     if (keep.has(num) || st.flushed.has(num) || st.spilled.has(num)) continue;
@@ -4365,11 +4733,13 @@ function spillNew(st: MergeState, spill: (raw: Uint8Array) => number) {
   const n = st.out.countObjects();
   for (let num = st.next; num < n; num++) {
     const ref = st.out.newIndirect(num);
-    if (!ref.isStream()) continue;
-    const raw = ref.readRawStream();
-    try { const v = raw.asUint8Array(); st.spilled.set(num, { off: spill(v), len: v.length }); }
-    finally { raw.destroy?.(); }
-    ref.writeRawStream(new Uint8Array(0));
+    try {
+      if (!ref.isStream()) continue;
+      const raw = ref.readRawStream();
+      try { const v = raw.asUint8Array(); st.spilled.set(num, { off: spill(v), len: v.length }); }
+      finally { raw.destroy?.(); }
+      ref.writeRawStream(new Uint8Array(0));
+    } finally { ref.destroy?.(); }
   }
   st.next = n;
 }
@@ -4414,19 +4784,17 @@ function keepMarks(marks: Mark[], at: Map<number, number>): OutItem[] {
   }
   return out;
 }
-/** bookmarks written into a new file (after any it has) */
-function writeOutline(doc: mupdf.PDFDocument, items: OutItem[]) {
+/**
+ * bookmarks written into a new file (after any it has): built as the file's own objects (as
+ * `setOutline` does) - MuPDF's outline iterator walks every bookmark again for each insert
+ * (23 s for 3,000), which a Combine of specifications paid at its end
+ */
+export function writeOutline(doc: mupdf.PDFDocument, items: OutItem[]) {
   if (!items.length) return;
-  const it = doc.outlineIterator();
-  for (let k = 0; k < 100000 && it.next() === 0; k++) { /* to the end */ }
-  const add = (list: OutItem[], depth: number) => {
-    for (const m of list) {
-      it.insert({ title: m.title, uri: '#page=' + (m.page + 1), open: false } as never);
-      // (insert leaves the iterator after the new bookmark: back onto it, into its children)
-      if (m.children.length && depth < 32 && it.prev() === 0 && it.down() >= 0) { add(m.children, depth + 1); it.up(); it.next(); }
-    }
-  };
-  add(items, 0);
+  const root = doc.getTrailer().get('Root');
+  const into = root.get('Outlines');
+  const top = buildOutline(doc, items, new Set(), into);
+  if (top !== into) root.put('Outlines', top);
 }
 
 /** the file's title, author... language, viewer settings and colour profile copied into a file
@@ -4529,9 +4897,18 @@ function carryAnnots(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: mupdf.P
  *  objects that must stay - the form and its fields, which later widgets join) */
 function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument, pairs: [number, number][], flush?: (from: number, keep: Set<number>) => void): Generator<void, void> {
   const pages = pageSet(src);
+  /**
+   * Wrappers kept for later (the new pages, objects copied by hand, the form and its fields); every
+   * other wrapper of the new file is let go of (`done`) as soon as it was used (PLAN 10.3b): with
+   * MuPDF.js's references fixed (10.19) what it held is freed then - also what a flush wrote out and
+   * emptied - not when the garbage collector gets to it, which a long run of steps may not give it
+   */
+  const kept = new Set<mupdf.PDFObject>();
+  const keep = (w: mupdf.PDFObject) => { kept.add(w); return w; };
+  const done = (w: mupdf.PDFObject | null | undefined) => { if (w && !kept.has(w)) w.destroy?.(); };
   const newPage = new Map<number, mupdf.PDFObject>();
   // (a page taken twice: links to it go to its first copy)
-  for (const [sp, dp] of pairs) { const n = src.findPage(sp).asIndirect(); if (!newPage.has(n)) newPage.set(n, dst.findPage(dp)); }
+  for (const [sp, dp] of pairs) { const n = src.findPage(sp).asIndirect(); if (!newPage.has(n)) newPage.set(n, keep(dst.findPage(dp))); }
   /** objects copied by hand (those that point at pages), by source number */
   const made = new Map<number, mupdf.PDFObject | null>();
   /** objects found to lead to no page (a big resource dictionary shared by many markups is
@@ -4558,27 +4935,31 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
       if (v.isStream()) {
         made.set(num, null);
         const d = dst.newDictionary();
-        r.forEach((x: mupdf.PDFObject, k: string | number) => { if (String(k) === 'Length') return; const c = copy(x, depth + 1); if (c) d.put(String(k), c); });
-        const s = dst.addRawStream(v.readRawStream(), d);
+        r.forEach((x: mupdf.PDFObject, k: string | number) => { if (String(k) === 'Length') return; const c = copy(x, depth + 1); if (c) d.put(String(k), c); done(c); });
+        const raw = v.readRawStream();
+        const s = keep(dst.addRawStream(raw, d));
+        raw.destroy?.();
+        d.destroy?.();
         made.set(num, s);
         return s;
       }
       // (made first: an object that refers back to itself gets the copy)
-      const ref = dst.createObject();
+      const ref = keep(dst.createObject());
       made.set(num, ref);
       const body = copy(r, depth + 1);
       if (!body) { made.set(num, null); return null; }
       ref.writeObject(body);
+      done(body);
       return ref;
     }
     if (v.isArray()) {
       const a = dst.newArray();
-      for (let i = 0; i < v.length; i++) { const c = copy(v.get(i), depth + 1); if (!c) return null; a.push(c); }
+      for (let i = 0; i < v.length; i++) { const c = copy(v.get(i), depth + 1); if (!c) { a.destroy?.(); return null; } a.push(c); done(c); }
       return a;
     }
     if (v.isDictionary()) {
       const d = dst.newDictionary();
-      v.forEach((x: mupdf.PDFObject, k: string | number) => { const c = copy(x, depth + 1); if (c) d.put(String(k), c); });
+      v.forEach((x: mupdf.PDFObject, k: string | number) => { const c = copy(x, depth + 1); if (c) d.put(String(k), c); done(c); });
       return d;
     }
     return v.isNull() ? null : v;
@@ -4595,7 +4976,7 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
     // the form's default font and resources (fields drawn again use them)
     const sf = src.getTrailer().get('Root', 'AcroForm');
     if (sf.isDictionary()) {
-      for (const k of ['DA', 'Q']) if (f.get(k).isNull() && !sf.get(k).isNull()) { const c = copy(sf.get(k), 0); if (c) f.put(k, c); }
+      for (const k of ['DA', 'Q']) if (f.get(k).isNull() && !sf.get(k).isNull()) { const c = copy(sf.get(k), 0); if (c) f.put(k, c); done(c); }
       const na = sf.get('NeedAppearances');
       if (na.isBoolean() && na.asBoolean()) f.put('NeedAppearances', true);
       const sdr = sf.get('DR');
@@ -4607,11 +4988,11 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
           if (!s.isDictionary()) return;
           let have = dr.get(String(cat));
           if (!have.isDictionary()) { have = dst.newDictionary(); dr.put(String(cat), have); }
-          s.forEach((x: mupdf.PDFObject, k: string | number) => { if (have.get(String(k)).isNull()) { const c = copy(x, 0); if (c) have.put(String(k), c); } });
+          s.forEach((x: mupdf.PDFObject, k: string | number) => { if (have.get(String(k)).isNull()) { const c = copy(x, 0); if (c) have.put(String(k), c); done(c); } });
         });
       }
     }
-    return (form = f);
+    return (form = keep(f));
   };
   /** a field (not a widget) copied once, with its parents; added to the form's list at the top */
   const fieldCopy = (ref: mupdf.PDFObject, depth: number): mupdf.PDFObject | null => {
@@ -4628,9 +5009,11 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
       if (key === 'Kids' || key === 'Parent' || (sig && (key === 'V' || key === 'Lock' || key === 'SV'))) return;
       const c = copy(x, 0);
       if (c) d.put(key, c);
+      done(c);
     });
     d.put('Kids', dst.newArray());
-    const nf = dst.addObject(d);
+    const nf = keep(dst.addObject(d));
+    d.destroy?.();
     fields.set(num, nf);
     const parent = r.get('Parent');
     const np = parent.isDictionary() ? fieldCopy(parent, depth + 1) : null;
@@ -4640,9 +5023,21 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
   };
   const SKIP = new Set(['P', 'Popup', 'IRT', 'Parent', 'StructParent']);
   const live = () => { const k = new Set<number>(); for (const f of fields.values()) if (f.isIndirect()) k.add(f.asIndirect()); if (form && form.isIndirect()) k.add(form.asIndirect()); return k; };
+  // The markups of all the pages are read first, in one go (PLAN 10.3b). MuPDF keeps what it has
+  // read of a file, and its table of the new file's objects grows one entry at a time: read while
+  // the copies are made, the source's objects landed after that table in memory, so it could not
+  // grow in place and was copied each time instead - the 300-sheet / 300,000-link set's Extract
+  // then went from 114 to 589 MB in one step (live: about 230 MB); read first, 237 MB at the most
+  // (Combine of the same set: 341 -> 237 MB).
+  for (const [sp] of pairs) {
+    const l = src.findPage(sp).get('Annots');
+    if (l.isArray()) for (let i = 0; i < l.length; i++) { const r = l.get(i); try { r.resolve().destroy?.(); } catch { /* copied (or not) below */ } r.destroy?.(); }
+    l.destroy?.();
+  }
   let from = dst.countObjects(), step = 0;
   for (const [sp, dp] of pairs) {
-    if (flush && step++ && step % ANNOT_STEP === 1) { flush(from, live()); from = dst.countObjects(); yield; }
+    // (no flush: Insert pages - in steps for the undo journal's sake only, see insertPagesOf)
+    if (step++ && step % ANNOT_STEP === 1) { if (flush) { flush(from, live()); from = dst.countObjects(); } yield; }
     const sPage = src.findPage(sp);
     const list = sPage.get('Annots');
     if (!list.isArray()) continue;
@@ -4651,29 +5046,41 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
     if (!out.isArray()) { out = dst.newArray(); np.put('Annots', out); }
     const map = new Map<number, mupdf.PDFObject>();
     const replies: [mupdf.PDFObject, mupdf.PDFObject][] = [];
+    /** this page's copies (let go of once its replies are joined up) */
+    const copies: mupdf.PDFObject[] = [];
     for (let i = 0; i < list.length; i++) {
       const ref = list.get(i);
+      let nd: mupdf.PDFObject | null = null;
       try {
         const a = ref.resolve();
         if (!a.isDictionary()) continue;
         const t = a.get('Subtype').isName() ? a.get('Subtype').asName() : '';
         if (t === 'Popup' || !t) continue;
         const sig = t === 'Widget' && isSigField(a);
-        const nd = dst.newDictionary();
+        const into = (nd = dst.newDictionary());
+        /** a link's target could not be carried (copy said null: a page left behind) */
+        let lost = false;
         a.forEach((x: mupdf.PDFObject, k: string | number) => {
           const key = String(k);
           if (SKIP.has(key) || (sig && (key === 'V' || key === 'Lock' || key === 'SV'))) return;
           const c = copy(x, 0);
-          if (c) nd.put(key, c);
+          if (c) into.put(key, c);
+          else if (t === 'Link' && (key === 'Dest' || key === 'A') && !x.isNull()) lost = true;
+          done(c);
         });
-        // a link whose target page was left behind: nothing to go to
-        if (t === 'Link') {
-          const act = nd.get('A');
-          const lostGoTo = act.isDictionary() && act.get('S').isName() && act.get('S').asName() === 'GoTo' && act.get('D').isNull();
-          if ((!a.get('Dest').isNull() && nd.get('Dest').isNull()) || (!a.get('A').isNull() && (act.isNull() || lostGoTo))) continue;
+        // a link whose target page was left behind: nothing to go to. Decided from the source and
+        // what copy said, never by reading the copy back (PLAN 10.3, R6): a shared action copied in
+        // an earlier step is emptied by then (written out, Combine) - reading it failed inside
+        // MuPDF ("cannot find object") and kept the link only because a failed read is not null
+        if (t === 'Link' && !lost) {
+          const sa = a.get('A');
+          const s = sa.isDictionary() ? sa.get('S') : null;
+          if (s && s.isName() && s.asName() === 'GoTo') { const d = sa.get('D'); const cd = d.isNull() ? null : copy(d, 1); if (!cd) lost = true; done(cd); }
         }
-        nd.put('P', np);
-        const na = dst.addObject(nd);
+        if (lost) continue;
+        into.put('P', np);
+        const na = dst.addObject(into);
+        copies.push(na);
         if (t === 'Widget') {
           const parent = a.get('Parent');
           const fp = parent.isDictionary() ? fieldCopy(parent, 0) : null;
@@ -4683,12 +5090,17 @@ function* carryAnnotsSteps(dst: mupdf.PDFDocument, gm: mupdf.PDFGraftMap, src: m
         if (ref.isIndirect()) map.set(ref.asIndirect(), na);
         if (!a.get('IRT').isNull()) replies.push([a, na]);
         out.push(na);
-      } catch { /* one that can't be copied: left out */ }
+      } catch { /* one that can't be copied: left out */ } finally { nd?.destroy?.(); ref.destroy?.(); }
     }
     // replies follow their copied markup (one whose markup isn't there is no reply any more)
     for (const [a, na] of replies) { const irt = a.get('IRT'); const to = irt.isIndirect() ? map.get(irt.asIndirect()) : undefined; if (to) na.put('IRT', to); }
+    for (const c of copies) c.destroy?.();
+    out.destroy?.();
+    np.destroy?.();
   }
   if (flush) flush(from, live());
+  // (and what was kept for the copy: a run stopped half-way leaves them to the garbage collector)
+  for (const w of kept) w.destroy?.();
 }
 /** a signature field (its value is a signature of the file it is in) */
 function isSigField(f: mupdf.PDFObject): boolean {
@@ -4811,6 +5223,82 @@ export function outlineFull(id: string): OutNode[] {
   return conv(items, 0);
 }
 
+/** a bookmark to build: `OutNode` (the panel's) or `OutItem` (a copy's: a page, closed, no styles) */
+interface BuildItem { title: string; page: number; uri?: string | null; open?: boolean; c?: number[]; f?: number; children?: BuildItem[]; ref?: number; repoint?: boolean }
+
+/**
+ * Outline items made as the file's own objects (title, `/Dest [page /Fit]`, Parent / Prev / Next /
+ * First / Last / Count, nested to 32 deep; a group is closed - negative Count - unless `open`).
+ * A bookmark with a `ref` in `current` keeps its destination, action and structure entry as they
+ * were unless `repoint`ed; a web or mail address becomes a link; colour and style go in as given.
+ * Returns the Outlines dictionary (a new one, or `into` - the file's own, indirect, with items -
+ * after which the new items are appended). Shared by `setOutline` and `writeOutline`.
+ */
+function buildOutline(doc: mupdf.PDFDocument, items: BuildItem[], current: Set<number>, into?: mupdf.PDFObject): mupdf.PDFObject {
+  const n = doc.countPages();
+  /** visible items under a list when everything open is open */
+  const shown = (l: BuildItem[]): number => l.reduce((c, m) => c + 1 + (m.open ? shown(m.children || []) : 0), 0);
+  const make = (list: BuildItem[], parent: mupdf.PDFObject, depth: number): mupdf.PDFObject[] => {
+    const objs = list.map((m) => {
+      const d = doc.newDictionary();
+      d.put('Title', doc.newString(String(m.title ?? '').slice(0, 1000)));
+      d.put('Parent', parent);
+      const old = m.ref && current.has(m.ref) ? doc.newIndirect(m.ref).resolve() : null;
+      // (a bookmark MuPDF gives no address for - "Next page", "Print", a form reset - keeps its
+      // action too: only one pointed elsewhere in the panel gets a new place)
+      if (old && old.isDictionary() && !m.repoint) {
+        // (as it was in the file)
+        for (const key of ['Dest', 'A', 'SE']) { const v = old.get(key); if (!v.isNull()) d.put(key, v); }
+      } else if (m.uri && /^(https?:|mailto:)/i.test(m.uri)) {
+        const a = doc.newDictionary();
+        a.put('S', doc.newName('URI'));
+        a.put('URI', doc.newString(m.uri));
+        d.put('A', a);
+      } else {
+        const page = Math.round(m.page);
+        if (page >= 0 && page < n) d.put('Dest', [doc.findPage(page), doc.newName('Fit')]);
+      }
+      if (m.c && m.c.length === 3) d.put('C', m.c.map((x) => Math.max(0, Math.min(1, Number(x) || 0))));
+      if (m.f) d.put('F', m.f & 3);
+      return { m, ref: doc.addObject(d) };
+    });
+    objs.forEach(({ m, ref }, i) => {
+      const d = ref.resolve();
+      if (i > 0) d.put('Prev', objs[i - 1].ref);
+      if (i < objs.length - 1) d.put('Next', objs[i + 1].ref);
+      const kids = depth < 32 ? m.children || [] : [];
+      if (kids.length) {
+        const k = make(kids, ref, depth + 1);
+        d.put('First', k[0]);
+        d.put('Last', k[k.length - 1]);
+        // (closed: minus the items that would show if it were opened)
+        d.put('Count', m.open ? shown(kids) : -shown(kids));
+      }
+    });
+    return objs.map((x) => x.ref);
+  };
+  // (appended after the items the file has: its Last gets a Next, the first new one a Prev)
+  const old = into && into.isIndirect() ? into.resolve() : null;
+  const lastOld = old && old.isDictionary() ? old.get('Last') : null;
+  if (old && lastOld && lastOld.isIndirect()) {
+    const list = make(items, into!, 0);
+    lastOld.resolve().put('Next', list[0]);
+    list[0].resolve().put('Prev', lastOld);
+    old.put('Last', list[list.length - 1]);
+    const c = old.get('Count').isNumber() ? old.get('Count').asNumber() : 0;
+    old.put('Count', (c < 0 ? -1 : 1) * (Math.abs(c) + shown(items)));
+    return into!;
+  }
+  const top = doc.addObject(doc.newDictionary());
+  const td = top.resolve();
+  td.put('Type', doc.newName('Outlines'));
+  const list = make(items, top, 0);
+  td.put('First', list[0]);
+  td.put('Last', list[list.length - 1]);
+  td.put('Count', shown(items));
+  return top;
+}
+
 /**
  * The whole outline written anew from the panel's list (one undo step). Built as the file's own
  * objects: a bookmark that was in the file keeps where it went exactly as it was (its view, a
@@ -4823,63 +5311,13 @@ export function setOutline(id: string, items: OutNode[], name = 'Edit bookmarks'
   op(o, name, 'm', () => {
     const doc = o.doc;
     const root = doc.getTrailer().get('Root');
-    const oldRoot = root.get('Outlines');
     // (an item's `ref` is honoured only if it is one of the outline's items now: after a save that
     // reopened the file (objects renumbered) a list read before pointed at other objects - a web
     // link's address became every bookmark's target)
     const current = new Set(outlineRefs(doc));
     root.delete('Outlines');
     if (!items.length) return;
-    /** visible items under a list when everything open is open */
-    const shown = (l: OutNode[]): number => l.reduce((c, m) => c + 1 + (m.open ? shown(m.children || []) : 0), 0);
-    const make = (list: OutNode[], parent: mupdf.PDFObject, depth: number): mupdf.PDFObject[] => {
-      const objs = list.map((m) => {
-        const d = doc.newDictionary();
-        d.put('Title', doc.newString(String(m.title ?? '').slice(0, 1000)));
-        d.put('Parent', parent);
-        const old = m.ref && current.has(m.ref) ? doc.newIndirect(m.ref).resolve() : null;
-        // (a bookmark MuPDF gives no address for - "Next page", "Print", a form reset - keeps its
-        // action too: only one pointed elsewhere in the panel gets a new place)
-        if (old && old.isDictionary() && !m.repoint) {
-          // (as it was in the file)
-          for (const key of ['Dest', 'A', 'SE']) { const v = old.get(key); if (!v.isNull()) d.put(key, v); }
-        } else if (m.uri && /^(https?:|mailto:)/i.test(m.uri)) {
-          const a = doc.newDictionary();
-          a.put('S', doc.newName('URI'));
-          a.put('URI', doc.newString(m.uri));
-          d.put('A', a);
-        } else {
-          const page = Math.round(m.page);
-          if (page >= 0 && page < n) d.put('Dest', [doc.findPage(page), doc.newName('Fit')]);
-        }
-        if (m.c && m.c.length === 3) d.put('C', m.c.map((x) => Math.max(0, Math.min(1, Number(x) || 0))));
-        if (m.f) d.put('F', m.f & 3);
-        return { m, ref: doc.addObject(d) };
-      });
-      objs.forEach(({ m, ref }, i) => {
-        const d = ref.resolve();
-        if (i > 0) d.put('Prev', objs[i - 1].ref);
-        if (i < objs.length - 1) d.put('Next', objs[i + 1].ref);
-        const kids = depth < 32 ? m.children || [] : [];
-        if (kids.length) {
-          const k = make(kids, ref, depth + 1);
-          d.put('First', k[0]);
-          d.put('Last', k[k.length - 1]);
-          // (closed: minus the items that would show if it were opened)
-          d.put('Count', m.open ? shown(kids) : -shown(kids));
-        }
-      });
-      return objs.map((x) => x.ref);
-    };
-    const top = doc.addObject(doc.newDictionary());
-    const td = top.resolve();
-    td.put('Type', doc.newName('Outlines'));
-    const list = make(items, top, 0);
-    td.put('First', list[0]);
-    td.put('Last', list[list.length - 1]);
-    td.put('Count', shown(items));
-    root.put('Outlines', top);
-    void oldRoot;
+    root.put('Outlines', buildOutline(doc, items, current));
   });
   return outlineFull(id);
 }
@@ -4937,13 +5375,15 @@ export function hasText(id: string, page: number): boolean {
  * every word would be found twice; 'ours' - its only text is this app's OCR layer (replaced
  * when read again); 'none' - no text to speak of.
  */
+/** a page's whole OCR layer is about 60 bytes a word: a stream this long is not one of ours */
+const OCR_MAX = 4 * 1024 * 1024;
 export function ocrState(id: string, page: number): 'none' | 'ours' | 'text' {
   const o = O(id);
   const p = pg(o, page);
   let mine = false;
   try {
     const c = p.getObject().get('Contents');
-    if (c.isArray()) c.forEach((v) => { try { if (!mine && v.readStream().asString().startsWith('%GCC-OCR')) mine = true; } catch { /* not ours */ } });
+    if (c.isArray()) c.forEach((v) => { if (!mine && startsWith(v, '%GCC-OCR', OCR_MAX)) mine = true; });
   } catch { /* none */ }
   // (OCR text is in a font that draws nothing - "GlyphLessFont", ours and Tesseract's)
   let real = 0, ocr = 0;
@@ -5042,6 +5482,7 @@ export function replaceText(id: string, page: number, area: Rect[], text: string
     for (const a of p.getAnnotations()) if (a.getType() === 'Redact') { const ob = a.getObject(); held.push(ob); ob.put('Subtype', o.doc.newName('GCCRedactHeld')); }
     for (const r of area) {
       const a = p.createAnnotation('Redact');
+      dropIndex(p);
       a.setRect(tightenAcross(r, dir));
       a.update();
     }
@@ -5097,11 +5538,12 @@ export function applyRedactions(id: string, opts: { black?: boolean; lineArt?: b
   const o = O(id);
   o.removedContent = true;
   return op(o, 'Apply redactions', 'c', () => {
-    let n = 0;
+    let n = 0, withMarks = 0;
     for (let i = 0; i < o.doc.countPages(); i++) {
       const p = pg(o, i);
       const marks = p.getAnnotations().filter((a) => a.getType() === 'Redact');
       if (!marks.length) continue;
+      if (++withMarks % 100 === 0) opMore(o);
       // the boxes left behind, each in its own colour (MuPDF's own are always black);
       // 'auto' = the page's colour around the mark, read before anything is removed
       const boxes: { r: Rect; c: number[] }[] = [];
@@ -5278,8 +5720,7 @@ function removeOcrLayer(o: Open, p: mupdf.PDFPage) {
   const keep = o.doc.newArray();
   let removed = false;
   c.forEach((v) => {
-    let ours = false;
-    try { ours = v.readStream().asString().startsWith('%GCC-OCR'); } catch { /* keep */ }
+    const ours = startsWith(v, '%GCC-OCR', OCR_MAX);
     if (ours) removed = true;
     else keep.push(v);
   });
@@ -5325,6 +5766,8 @@ function markDoc(o: Open, marks: PageMark[], ctx: MarkContext): number {
   let done = 0;
   const imgs = new Map<PageMark, { obj: mupdf.PDFObject; w: number; h: number }>();
   for (let k = 0; k < list.length; k++) {
+    // (every 100 pages a journal step is closed: one step of thousands of objects slows MuPDF's undo)
+    if (k && k % 100 === 0) opMore(o);
     const i = list[k];
     const p = pg(o, i);
     const b = p.getBounds();
@@ -5441,6 +5884,14 @@ export function breaksSignatures(id: string, s: SaveOpts = {}): boolean {
 }
 
 export function save(id: string, s: SaveOpts = {}): Uint8Array {
+  try { return saveFile(id, s); } catch (e) {
+    // (MuPDF's "realloc (1861718086 bytes) failed": said in words, with what to do instead)
+    const o = docs.get(id);
+    if (o && /malloc|realloc|memory/i.test(String(e)) && lockedBigOf(o.reader?.size ?? 0, encrypted(o), !!o.signed)) throw new Error(LOCKED_BIG_SAVE);
+    throw e;
+  }
+}
+function saveFile(id: string, s: SaveOpts): Uint8Array {
   const o = O(id);
   const canInc = appendable(o, s);
   // original + changes: when asked and only markups changed, or always for big files (no
@@ -5458,8 +5909,9 @@ export function save(id: string, s: SaveOpts = {}): Uint8Array {
   // a file this big (a merged set of volumes): written in pieces - MuPDF's own save, even "original
   // + changes", builds the whole file in memory and failed at about 1 GB (nothing was saved). Not
   // for what needs MuPDF's writer: a signed file (changes appended), a password set or taken off,
-  // "remove hidden info", or an encrypted file
-  if ((o.reader?.size ?? 0) > STREAM_SAVE && !keepSigs && !s.password && !s.decrypt && !s.sanitize && !s.clearMetadata && !encrypted(o)) {
+  // "remove hidden info", or an encrypted file. By what the document became (memSize): a small
+  // file with a big set's pages inserted was saved whole in memory and failed (0.13 stress run)
+  if (memSize(o) > pieceWiseFrom && !keepSigs && !s.password && !s.decrypt && !s.sanitize && !s.clearMetadata && !encrypted(o)) {
     return emitStream((put) => writeObjects(o.doc, put));
   }
   if (canInc && !o.removedContent && (keepSigs || big || (s.incremental && !o.changedContent && !tidy))) {
@@ -5542,8 +5994,8 @@ export function snapshotTo(id: string, write: (view: Uint8Array, from: number) =
   // engines must not be given)
   if (!full && base > 0 && o.reader && !o.doc.wasRepaired() && !o.doc.hasUnsavedChanges()) { write(new Uint8Array(0), base); return { base }; }
   // past ~600 MB "original + changes" is built whole in memory and fails: a whole copy written in
-  // pieces instead
-  if (stream && base > wholeAt && !encrypted(o)) { stream((put) => writeObjects(o.doc, put)); return { base: 0 }; }
+  // pieces instead - also when what was put in since opening makes it that big (memSize)
+  if (stream && memSize(o) > wholeAt && !encrypted(o)) { stream((put) => writeObjects(o.doc, put)); return { base: 0 }; }
   if (!full && base > 0 && o.reader && o.doc.canBeSavedIncrementally()) {
     let buf: mupdf.Buffer | null = null;
     try {
@@ -5640,6 +6092,12 @@ export interface CompressReport { images: number; changed: number; before: numbe
  * objects, with streams compressed and object streams. Line work and text untouched.
  */
 export function compress(bytes: In, c: CompressOpts, password?: string): { bytes: Uint8Array | null; report: CompressReport } {
+  // (it needs MuPDF's own writer - object streams, de-duplication - which builds the whole file in
+  // memory and fails on a big one: refused before any work is done. A limit; PLAN 10.13)
+  // (the limit is MuPDF's in-memory save, about 1.2 GB of output, not the piece-wise one: Compress
+  // worked on files up to about 1 GB before 0.13 and still does; past it, or if the save runs out
+  // of memory all the same, the same message)
+  if (inSize(bytes) > compressFrom) throw new Error(tooBigToReduce());
   const doc = openOther(bytes, password);
   const rep: CompressReport = { images: 0, changed: 0, before: inSize(bytes), after: 0 };
   try {
@@ -5692,7 +6150,9 @@ export function compress(bytes: In, c: CompressOpts, password?: string): { bytes
         rep.changed++;
       } catch { /* leave that picture as it is */ } finally { for (const x of made) { try { x.destroy?.(); } catch { /* already gone */ } } }
     }
-    const ob = doc.saveToBuffer('garbage=deduplicate,compress,compress-fonts,objstms');
+    let ob: mupdf.Buffer;
+    try { ob = doc.saveToBuffer('garbage=deduplicate,compress,compress-fonts,objstms'); }
+    catch (e) { if (/malloc|realloc|memory/i.test(String(e))) throw new Error(tooBigToReduce()); throw e; }
     rep.after = ob.getLength();
     // no gain: null = keep the original as it is
     if (rep.after >= rep.before) { ob.destroy?.(); return { bytes: null, report: { ...rep, after: rep.before } }; }
@@ -5707,7 +6167,7 @@ export function repair(bytes: In): { bytes: Uint8Array; repaired: boolean } {
   const doc = openOther(bytes);
   try {
     const r = doc.wasRepaired();
-    return { bytes: out(doc.saveToBuffer('garbage=compact,compress')), repaired: r };
+    return { bytes: writeOut(doc, 'garbage=compact,compress', inSize(bytes)), repaired: r };
   } finally {
     doc.destroy?.();
   }
@@ -5992,12 +6452,25 @@ function bytesOf(b: In): Uint8Array {
   return outB;
 }
 
+/** the most a PDF made from pictures may be (tests only lower it: setPicturesLimitForTests) */
+const PICTURES_MAX = 1e9;
+let picturesMax = PICTURES_MAX;
+/** tests only: pictures that add up to over n bytes are refused before any is opened (0: the real limit again) */
+export function setPicturesLimitForTests(n: number) { picturesMax = n > 0 ? n : PICTURES_MAX; }
+const tooManyPictures = (est: number) => `These pictures are too big for one PDF (about ${(est / 1e9).toFixed(1)} GB). Make two or more PDFs, then merge them (Organize › Merge files).`;
+/** a memory failure at close or when the file is copied out (MuPDF's writer holds the whole file in memory) */
+const memoryFailed = (e: unknown) => /malloc|realloc|memory/i.test(String((e as Error)?.message ?? e));
+
 /**
  * Pictures (JPG, PNG, TIFF - every page of a multi-page one -, BMP, GIF) into one PDF, a page per
  * picture: at the picture's own size (its dpi), or fitted on A4 / A3 / Letter turned to suit it.
  * JPGs go in as they are (no loss); a picture that can't be read is named, the rest still made.
  */
 export function picturesToPdf(files: { bytes: In; name: string }[], o: { size: 'picture' | 'a4' | 'a3' | 'letter'; margin?: number }): { bytes: Uint8Array; pages: number; skipped: string[] } {
+  // (the size of the result, counted before any picture is opened: a JPG goes in at its size, any
+  // other picture at 1.5 times as it is re-packed; the JPG is told by its name, nothing is read)
+  const est = files.reduce((n, f) => n + inSize(f.bytes) * (/\.(jpe?g|jfif)$/i.test(f.name) ? 1 : 1.5), 0);
+  if (est > picturesMax) throw new Error(tooManyPictures(est));
   const buf = new mupdf.Buffer();
   const w = new mupdf.DocumentWriter(buf, 'pdf', 'compress');
   let pages = 0, written = 0;
@@ -6046,17 +6519,19 @@ export function picturesToPdf(files: { bytes: In; name: string }[], o: { size: '
         skipped.push(`${f.name} (${String((e as Error)?.message || e).replace(/^Error: /, '').slice(0, 80)})`);
       } finally { d?.destroy?.(); }
     }
-    w.close();
+    try { w.close(); } catch (e) { throw memoryFailed(e) ? new Error(tooManyPictures(est)) : e; }
     if (!pages) throw new Error('None of those could be read as pictures: ' + skipped.join(', '));
-    if (failed.length) {
-      const doc = mupdf.Document.openDocument(buf.asUint8Array().slice(), 'application/pdf').asPDF()!;
-      try {
-        for (const i of failed.reverse()) doc.deletePage(i);
-        buf.destroy?.();
-        return { bytes: out(doc.saveToBuffer('garbage=compact,compress')), pages, skipped };
-      } finally { doc.destroy?.(); }
-    }
-    return { bytes: out(buf), pages, skipped };
+    try {
+      if (failed.length) {
+        const doc = mupdf.Document.openDocument(buf.asUint8Array().slice(), 'application/pdf').asPDF()!;
+        try {
+          for (const i of failed.reverse()) doc.deletePage(i);
+          buf.destroy?.();
+          return { bytes: out(doc.saveToBuffer('garbage=compact,compress')), pages, skipped };
+        } finally { doc.destroy?.(); }
+      }
+      return { bytes: out(buf), pages, skipped };
+    } catch (e) { throw memoryFailed(e) ? new Error(tooManyPictures(est)) : e; }
   } catch (e) { buf.destroy?.(); throw e; } finally { w.destroy?.(); }
 }
 
@@ -6076,7 +6551,7 @@ export function batchMark(bytes: In, marks: PageMark[], ctx: MarkContext): { byt
     const n = markDoc(o, marks, ctx);
     // (marks in a font from the PC - Arabic text: cut down to the letters used)
     if (o.bigFont) { try { o.doc.subsetFonts(); } catch { /* keep the full font */ } }
-    return { bytes: out(o.doc.saveToBuffer('garbage=compact,compress')), pages: n };
+    return { bytes: writeOut(o.doc, 'garbage=compact,compress', inSize(bytes)), pages: n };
   } finally { close(id); }
 }
 export function batchFlatten(bytes: In): Uint8Array {
@@ -6121,7 +6596,7 @@ export function batchFlatten(bytes: In): Uint8Array {
       if (!list.isArray()) { list = o.doc.newArray(); po.put('Annots', list); }
       for (const r of refs) list.push(r);
     }
-    return out(o.doc.saveToBuffer('garbage=compact,compress'));
+    return writeOut(o.doc, 'garbage=compact,compress', inSize(bytes));
   } finally { close(id); }
 }
 
@@ -6177,28 +6652,63 @@ export function thumbOf(bytes: In, page: number, width: number): { px: Uint8Clam
 /**
  * The file sent to the printer: each chosen page (or the part in view) placed on its sheet as
  * the print settings say - still vector, pictures not re-compressed. Markups are burnt in
- * (only those marked for printing) or left out; form fields always print.
+ * (only those marked for printing) or left out; form fields always print. Made in the editing
+ * engine from the open document (printBuild); a big selection is made by the batch engine from
+ * the window's copy instead (printFrom - PLAN 10.12).
  */
 export function printFile(id: string, opts: PrintOpts): Uint8Array {
   const o = O(id);
+  return printBuild(o.doc, opts, o.layerShow, o.reader?.size ?? 0);
+}
+
+/**
+ * The print file made from any document (`doc`: the open one, or the batch engine's copy of it),
+ * with `layers` (OCG object number -> shown) the layers the window shows other than the file says.
+ * Written with writeOut: a selection whose share of the file (`srcSize` x pages chosen / pages)
+ * is past the piece-wise limit is written in pieces - MuPDF's own save builds the whole file in
+ * memory, next to the copy of the pages (PLAN 10.12).
+ */
+export function printBuild(doc: mupdf.PDFDocument, opts: PrintOpts, layers: Map<number, boolean> | null | undefined, srcSize = 0): Uint8Array {
+  const it = printSteps(doc, opts, layers, srcSize);
+  for (;;) { const r = it.next(); if (r.done) return r.value; }
+}
+
+/**
+ * The batch engine's print job (PLAN 10.12): the print file made from a copy of the document (the
+ * window's drawSnapshot: unsaved changes included), in steps - the caller waits a moment between
+ * them and stops at the window's Cancel (`return()` lets everything go). The copy is closed when
+ * the job ends.
+ */
+export function* printFrom(bytes: In, opts: PrintOpts, layers: Record<number, boolean> | null): Generator<number, Uint8Array> {
+  const doc = openOther(bytes);
+  try {
+    return yield* printSteps(doc, opts, layers ? new Map(Object.entries(layers).map(([k, v]) => [Number(k), !!v])) : null, inSize(bytes));
+  } finally { doc.destroy?.(); }
+}
+
+/** print sheets made between two of printSteps' pauses */
+const PRINT_STEP = 25;
+/** printBuild in steps: yields between pages (how many done) */
+function* printSteps(src: mupdf.PDFDocument, opts: PrintOpts, layerShow: Map<number, boolean> | null | undefined, srcSize: number): Generator<number, Uint8Array> {
   const pd = new mupdf.PDFDocument();
   let gm: mupdf.PDFGraftMap | undefined;
+  const pause = (k: number) => k % PRINT_STEP === PRINT_STEP - 1;
   try {
     // one graft map for everything copied: the pages' layer references then point at the same
     // copies as /OCProperties (separate copies made a hidden layer print), and fonts / pictures
     // shared by many pages are copied once
     gm = pd.newGraftMap();
     const gmap = gm;
-    opts.pages.forEach((pi, k) => gmap.graftPage(k, o.doc, pi));
+    for (let k = 0; k < opts.pages.length; k++) { gmap.graftPage(k, src, opts.pages[k]); if (pause(k)) yield k; }
     // layers (optional content): the same ones on and off as in the file (without them every
     // hidden layer of a drawing would print)
-    const ocp = o.doc.getTrailer().get('Root', 'OCProperties');
+    const ocp = src.getTrailer().get('Root', 'OCProperties');
     if (!ocp.isNull()) pd.getTrailer().get('Root').put('OCProperties', gmap.graftObject(ocp));
     // (and the layers the window shows differently, not saved yet: a print shows what the screen
     // shows - PLAN 7.8. The sheets that go as pictures are made from this file, so they follow)
-    if (!ocp.isNull() && o.layerShow?.size) {
-      const d = layerDefaults(o);
-      if (d) writeLayerState(pd, o.layerShow, d, (n) => gmap.graftObject(o.doc.newIndirect(n)), o.layerShow);
+    if (!ocp.isNull() && layerShow?.size) {
+      const d = layerDefaults({ doc: src } as unknown as Open);
+      if (d) writeLayerState(pd, layerShow, d, (n) => gmap.graftObject(src.newIndirect(n)), layerShow);
     }
     // graftPage leaves the markups behind: copy the ones that print (without their page link,
     // pop-up and replies), then burn them into the page
@@ -6207,41 +6717,45 @@ export function printFile(id: string, opts: PrintOpts): Uint8Array {
     // /OC, and a markup on a layer turned off printed although it didn't show)
     const SKIP = new Set(['P', 'Popup', 'IRT', 'Parent', 'StructParent']);
     const onLayer: { k: number; d: mupdf.PDFObject }[] = [];
-    opts.pages.forEach((pi, k) => {
-      const list = o.doc.findPage(pi).get('Annots');
-      if (!list.isArray()) return;
-      const np = pd.findPage(k);
-      const arr2 = pd.newArray();
-      for (let i = 0; i < list.length; i++) {
-        const a = list.get(i).resolve();
-        if (!a.isDictionary()) continue;
-        const t = a.get('Subtype').isName() ? a.get('Subtype').asName() : '';
-        const f = a.get('F').isNumber() ? a.get('F').asNumber() : 0;
-        if (t === 'Popup' || t === 'Link' || (f & HIDDEN) || !(f & PRINT)) continue;
-        if (!a.get('IRT').isNull()) continue; // replies to comments (not shown on the page either)
-        if (t !== 'Widget' && !opts.markups) continue;
-        if (!a.get('AP').isDictionary() && t !== 'Widget') continue;
-        const nd = pd.newDictionary();
-        a.forEach((v: mupdf.PDFObject, key: string | number) => { if (!SKIP.has(String(key))) nd.put(String(key), gmap.graftObject(v)); });
-        nd.put('P', np);
-        if (t !== 'Widget' && !nd.get('OC').isNull()) { onLayer.push({ k, d: nd }); continue; }
-        arr2.push(pd.addObject(nd));
+    for (let k = 0; k < opts.pages.length; k++) {
+      const list = src.findPage(opts.pages[k]).get('Annots');
+      if (list.isArray()) {
+        const np = pd.findPage(k);
+        const arr2 = pd.newArray();
+        for (let i = 0; i < list.length; i++) {
+          const a = list.get(i).resolve();
+          if (!a.isDictionary()) continue;
+          const t = a.get('Subtype').isName() ? a.get('Subtype').asName() : '';
+          const f = a.get('F').isNumber() ? a.get('F').asNumber() : 0;
+          if (t === 'Popup' || t === 'Link' || (f & HIDDEN) || !(f & PRINT)) continue;
+          if (!a.get('IRT').isNull()) continue; // replies to comments (not shown on the page either)
+          if (t !== 'Widget' && !opts.markups) continue;
+          if (!a.get('AP').isDictionary() && t !== 'Widget') continue;
+          const nd = pd.newDictionary();
+          a.forEach((v: mupdf.PDFObject, key: string | number) => { if (!SKIP.has(String(key))) nd.put(String(key), gmap.graftObject(v)); });
+          nd.put('P', np);
+          if (t !== 'Widget' && !nd.get('OC').isNull()) { onLayer.push({ k, d: nd }); continue; }
+          arr2.push(pd.addObject(nd));
+        }
+        if (arr2.length) np.put('Annots', arr2);
       }
-      if (arr2.length) np.put('Annots', arr2);
-    });
+      if (pause(k)) yield k;
+    }
     pd.bake(true, true);
     if (onLayer.length) {
       const po = { doc: pd } as unknown as Open;
       for (const { k, d } of onLayer) bakeDict(po, pd.loadPage(k) as mupdf.PDFPage, d, opacityOf(d));
     }
+    yield opts.pages.length;
     // which sheets go as pictures (decided on the page as it is in the file, before it is
     // placed on its sheet)
     const send = opts.send || 'vector';
     const layered = !ocp.isNull();
     const pic: boolean[] = opts.pages.map((pi) => {
       if (send === 'vector') return false;
-      const p0 = pg(o, pi);
-      const b0 = p0.getBounds();
+      const p0 = src.loadPage(pi);
+      let b0: number[];
+      try { b0 = p0.getBounds() as unknown as number[]; } finally { p0.destroy?.(); }
       const L0 = sheetLayout(b0[2] - b0[0], b0[3] - b0[1], opts.region, opts);
       if (send === 'picture') return true;
       if (L0.W * L0.H > AUTO_PICTURE_MAX_AREA) return false;
@@ -6250,7 +6764,7 @@ export function printFile(id: string, opts: PrintOpts): Uint8Array {
       if (layered) return false;
       // (the whole page's area at the print scale: its pictures' pixels are the whole page's)
       const sheetIn2 = (((b0[2] - b0[0]) * L0.k) / 72) * (((b0[3] - b0[1]) * L0.k) / 72);
-      return heavyForPrinter(pageWeight(o.doc.findPage(pi)), sheetIn2, !!opts.gray);
+      return heavyForPrinter(pageWeight(src.findPage(pi)), sheetIn2, !!opts.gray);
     });
     for (let k = 0; k < opts.pages.length; k++) {
       const p = pd.loadPage(k) as mupdf.PDFPage;
@@ -6272,8 +6786,12 @@ export function printFile(id: string, opts: PrintOpts): Uint8Array {
       obj.put('MediaBox', [0, 0, +L.W.toFixed(3), +L.H.toFixed(3)]);
       for (const key of ['CropBox', 'TrimBox', 'BleedBox', 'ArtBox', 'Rotate', 'UserUnit', 'Annots']) obj.delete(key);
       p.destroy?.();
+      if (pause(k)) yield k;
     }
-    const bytes = out(pd.saveToBuffer('compress'));
+    // (the pages' share of the source decides how it is written: MuPDF's save up to the
+    // piece-wise limit - as it always was - in pieces past it)
+    const share = srcSize * opts.pages.length / Math.max(1, src.countPages());
+    const bytes = writeOut(pd, 'compress', share);
     // (the sheets to send as pictures are made from this file by the batch engine, one by one
     // - printPicture - so the open file stays usable and the print panel can show progress)
     if (send === 'vector') return bytes;
@@ -6303,11 +6821,13 @@ export function picSheet(st: PicState, k: number, gray: boolean, spill: (raw: Ui
   const n = st.doc.countObjects();
   for (let num = st.next; num < n; num++) {
     const ref = st.doc.newIndirect(num);
-    if (!ref.isStream()) continue;
-    const raw = ref.readRawStream();
-    try { const v = raw.asUint8Array(); st.spilled.set(num, { off: spill(v), len: v.length }); }
-    finally { raw.destroy?.(); }
-    ref.writeRawStream(new Uint8Array(0));
+    try {
+      if (!ref.isStream()) continue;
+      const raw = ref.readRawStream();
+      try { const v = raw.asUint8Array(); st.spilled.set(num, { off: spill(v), len: v.length }); }
+      finally { raw.destroy?.(); }
+      ref.writeRawStream(new Uint8Array(0));
+    } finally { ref.destroy?.(); }
   }
   st.next = n;
 }

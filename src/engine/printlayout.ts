@@ -32,6 +32,15 @@ export const AUTO_PICTURE_MAX_AREA = 1190.55 * 1683.78 * 1.05; // A2
 export const PICTURE_DPI = 300;
 
 /**
+ * A print whose pages' share of the file is past this is made by the batch engine from a copy of
+ * the document, not in the editing engine (PLAN 10.12): the print file is a second copy of those
+ * pages, and the editing engine keeps the memory it grows to for the rest of the session.
+ */
+export const PRINT_BIG = 150e6;
+/** the chosen pages' share of the file: pages chosen / pages x file size */
+export const printShare = (chosen: number, pages: number, size: number) => (size * chosen) / Math.max(1, pages);
+
+/**
  * Is a page heavy for a printer, printed on a sheet of `sheetIn2` square inches? Printers get
  * what Windows makes of the page: a scan's pictures at full size (a 600 dpi colour scan is
  * ~140 MB a page by then), every line of a drawing one by one. Heavy: pictures finer than

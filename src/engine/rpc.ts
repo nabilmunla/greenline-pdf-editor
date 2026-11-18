@@ -2,10 +2,21 @@
 // reached through a message port. If an engine process dies (out of memory on a monster
 // file), the app starts a new one and hands over a new port: calls in flight fail, the
 // open files are reopened in it (see engines.ts), and everything else carries on.
+import { SHORT, VIEW_TILE } from './callq';
 type Pending = { res: (v: unknown) => void; rej: (e: Error) => void; method: string; t0: number };
 /** slow calls (> 150 ms), newest last - for finding what makes the app wait (window.__gccSlow) */
 export const slowCalls: { engine: string; method: string; ms: number; at: number }[] = [];
 (globalThis as { __gccSlow?: unknown }).__gccSlow = slowCalls;
+
+/** calls that are long jobs by design: never reported as "not answering" (PLAN 10.4). 'memory' is
+ *  the first call an engine answers once it has loaded (starting has its own limit) */
+const LONG_JOBS = /^(?:mergeAdd|mergeFinish|save|compress|extractBig|printBig|linkSheets|drawSnapshot|writeRecovery|memory|ocr.*|export.*|printPic.*)$/;
+/** how long a call may run before its engine is said not to answer: 20 s for short calls and
+ *  tiles, 120 s for the rest, never for the long jobs (ms; Infinity = no limit) */
+export function hangLimit(method: string, shortMs = 20_000, longMs = 120_000): number {
+  if (LONG_JOBS.test(method)) return Infinity;
+  return SHORT.has(method) || method === 'tile' || method === VIEW_TILE ? shortMs : longMs;
+}
 
 /** a file made or read by an engine */
 export interface FileRef { $file: { path: string; size?: number; delta?: string; mtime?: number; extra?: ({ path: string; size: number } | { bytes: Uint8Array })[] } }
@@ -39,6 +50,9 @@ export class EngineClient {
   busy = 0;
   /** when it was last asked for something (performance.now(); its memory asked for doesn't count) */
   lastUse = 0;
+  /** MuPDF's memory in the engine (bytes) as of its last answer; 0 until it has answered, and for the
+   *  drawing engines (the MuPDF engines send it with every answer - PLAN 10.5) */
+  heap = 0;
   /** times the engine had to be restarted */
   restarts = 0;
   constructor(public name: string) {}
@@ -47,7 +61,10 @@ export class EngineClient {
   private restartedAt = 0;
   attach(port: MessagePort, restarted: boolean, code = 0) {
     this.gone = null;
+    this.answeredAt = performance.now();
     if (restarted) {
+      // (a new engine: its memory is not the old one's)
+      this.heap = 0;
       this.restarts++;
       this.restartedAt = performance.now();
       // an engine does one call at a time: the oldest one waiting is the one it was doing when it
@@ -109,14 +126,36 @@ export class EngineClient {
 
   /** the call the engine started ahead of older ones (PLAN 3.9), until it answers */
   private running: number | null = null;
+  /** when the engine said that call went ahead (performance.now()) */
+  private runningAt = 0;
+  /** when the engine last answered anything (or was attached): the oldest call waiting started no
+   *  earlier than this - what it queued behind has just ended */
+  private answeredAt = 0;
 
-  private reply(d: { id: number; ok: boolean; value: unknown; error: string; notice?: string; fatal?: boolean; running?: number; stale?: boolean }) {
+  /**
+   * The call the engine is running now and for how long (PLAN 10.4), or null when it is idle or has
+   * no engine: the one it said went ahead, else the oldest waiting (an engine does one call at a
+   * time, in order). It started when the engine last answered, if later than it was asked for.
+   */
+  stuck(now = performance.now()): { id: number; method: string; ms: number } | null {
+    if (this.gone || !this.port || !this.pending.size) return null;
+    if (this.running !== null) {
+      const p = this.pending.get(this.running);
+      if (p) return { id: this.running, method: p.method, ms: now - this.runningAt };
+    }
+    const [id, p] = this.pending.entries().next().value as [number, Pending];
+    return { id, method: p.method, ms: now - Math.max(p.t0, this.answeredAt) };
+  }
+
+  private reply(d: { id: number; ok: boolean; value: unknown; error: string; notice?: string; fatal?: boolean; running?: number; stale?: boolean; heap?: number }) {
     if (d.notice) { this.onNotice?.(d.notice); return; }
-    if (d.running) { this.running = d.running; return; }
+    if (d.running) { this.running = d.running; this.runningAt = performance.now(); return; }
+    if (typeof d.heap === 'number') this.heap = d.heap;
     const p = this.pending.get(d.id);
     if (!p) return;
     this.pending.delete(d.id);
     if (this.running === d.id) this.running = null;
+    this.answeredAt = performance.now();
     this.busy--;
     const ms = performance.now() - p.t0;
     if (ms > 150) { slowCalls.push({ engine: this.name, method: p.method, ms: Math.round(ms), at: Math.round(p.t0) }); if (slowCalls.length > 200) slowCalls.shift(); }
@@ -148,6 +187,12 @@ export class EngineClient {
    *  tiles at other scales are answered "stale" instead of drawn (PLAN 3.9) */
   want(doc: string, scales: number[] | null) {
     try { this.port?.postMessage({ want: { doc, scales } }); } catch { /* a port going away: its queue goes with it */ }
+  }
+
+  /** stop a long job (a merge) that the engine is running: taken at once, ahead of the queue, and
+   *  read by the job between its steps. The job's call then fails ("... was stopped."). */
+  cancel(job: string) {
+    try { this.port?.postMessage({ cancel: job }); } catch { /* a port going away: its job goes with it */ }
   }
 
   /**

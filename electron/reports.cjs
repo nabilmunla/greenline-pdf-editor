@@ -224,6 +224,18 @@ function create({ version, readSettings, writeSettings, log, logFile, source, ap
     try { await fsp.writeFile(f, JSON.stringify([...words].slice(0, 400))); } catch (_) { return ''; }
     return f;
   }
+  /** the queue emptied, nothing sent: a copy that moved from the company's folder to the web (PLAN 11.1) - what
+   *  waits was written under the company's terms and never goes to the public receiver */
+  function dropQueue() {
+    let names = [];
+    try { names = fs.readdirSync(queueDir()); } catch (_) { /* no queue */ }
+    // (each on its own: a folder in the queue, or a report Windows holds on to, stopped the loop and
+    // kept the rest - to go to the receiver at the next send)
+    for (const n of names) {
+      try { fs.rmSync(path.join(queueDir(), n), { force: true, recursive: true }); } catch (e) { log('reports: not dropped: ' + n + ' (' + (e.code || e.message || e) + ')'); }
+    }
+    send('reports:state', null);
+  }
   /** public build: anonymous crash reports on / off (only those made from now on are ever sent) */
   function crashSharing(on) {
     const s = readSettings();
@@ -240,7 +252,7 @@ function create({ version, readSettings, writeSettings, log, logFile, source, ap
     return JSON.stringify(require('./anon.cjs').anonymize(sample, who), null, 2);
   }
 
-  return { crash, problem, flush, scheduleFlush, status, crashSharing, preview };
+  return { crash, problem, flush, scheduleFlush, status, crashSharing, preview, dropQueue };
 }
 
 module.exports = { create };

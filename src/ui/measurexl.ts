@@ -1,7 +1,7 @@
 // Measurements in Excel: the number as a number, its unit in its own cell (one "7.056 m" text
 // cell couldn't be added up). Used by Measure > To Excel and the Comments list's Excel export.
 import { splitMeasure, measureValue, perimeterOf, LEGACY_FMT, type MeasureFmt } from './geom';
-import type { XCell, XStyle } from './xlsxwrite';
+import type { XCell, XSheet, XStyle } from './xlsxwrite';
 
 /** what a measurement needs here (an AnnotData) */
 interface MeasureLike { page: number; kind?: string; contents?: string; vertices?: number[][]; line?: number[][]; fmt?: MeasureFmt }
@@ -90,4 +90,79 @@ export interface MeasureIn {
 /** one row of the measurements sheet, in MEASURE_HEAD's order */
 export function measureRow(m: MeasureIn): XCell[] {
   return [pageCell(m.label, m.page), m.page + 1, m.type, numCell(m.num), m.num ? m.num.unit : '', numCell(m.perimeter), m.perimeter ? m.perimeter.unit : '', m.contents || '', m.group || '', m.author ?? '', m.date];
+}
+
+// ---------------------------------------------------------------- the table by sheet (7.7 / PLAN item 7)
+export const KIND_NAME: Record<string, string> = { 'measure-length': 'Lengths', 'measure-polylength': 'Polylengths', 'measure-perimeter': 'Perimeters', 'measure-area': 'Areas', 'area-perimeter': 'Areas: perimeters', 'measure-angle': 'Angles' };
+export const KIND_ORDER = ['measure-length', 'measure-polylength', 'measure-perimeter', 'measure-area', 'area-perimeter', 'measure-angle'];
+
+/** a mark as the by-sheet table needs it (page is 0-based) */
+export interface SheetMark {
+  page: number; label?: string; kind: string; group?: string;
+  num: { v: number; unit: string; dec: number } | null;
+  perimeter: { v: number; unit: string; dec: number } | null;
+}
+
+/**
+ * Most sheets (pages with marks) written as columns. Excel takes 16,384 columns but a table wider
+ * than a couple of hundred can't be read or printed; past this the table is turned: sheets down
+ * the side, items across (items are few; a file can have thousands of sheets).
+ */
+export const SHEET_COLS_MAX = 200;
+
+interface Item { name: string; unit: string; dec: number; count: boolean; order: number; by: Map<number, number>; total: number }
+const r6 = (x: number) => Math.round(x * 1e6) / 1e6;
+const hcell = (v: string | number): XCell => ({ v, s: 'h' });
+
+/**
+ * One sheet of the workbook: every count name and every kind of measurement (with its unit) as a
+ * row, the sheets that have marks as columns - the page label, else the PDF page number - with a
+ * total at the right and (counts only: lengths and areas can't be added to each other) at the
+ * bottom. Numbers are numbers. Past SHEET_COLS_MAX sheets the table is turned.
+ */
+export function bySheetTable(marks: SheetMark[]): XSheet {
+  const items = new Map<string, Item>();
+  const pagesSeen = new Map<number, string | number>();
+  const add = (key: string, name: string, count: boolean, order: number, unit: string, dec: number, page: number, v: number, label?: string) => {
+    let it = items.get(key);
+    if (!it) items.set(key, (it = { name, unit, dec: 0, count, order, by: new Map(), total: 0 }));
+    it.dec = Math.max(it.dec, dec);
+    it.by.set(page, (it.by.get(page) || 0) + v);
+    it.total += v;
+    if (!pagesSeen.has(page)) pagesSeen.set(page, pageCell(label, page));
+  };
+  for (const m of marks) {
+    if (m.kind === 'measure-count') { const g = m.group || 'Count'; add('c\u0000' + g, g, true, -1, 'No.', 0, m.page, 1, m.label); continue; }
+    if (!KIND_NAME[m.kind]) continue;
+    if (m.kind === 'measure-angle') { add('k' + m.kind, KIND_NAME[m.kind], false, KIND_ORDER.indexOf(m.kind), 'No.', 0, m.page, 1, m.label); continue; }
+    if (m.num) add('k' + m.kind + '\u0000' + m.num.unit, KIND_NAME[m.kind], false, KIND_ORDER.indexOf(m.kind), m.num.unit, m.num.dec, m.page, m.num.v, m.label);
+    if (m.kind === 'measure-area' && m.perimeter) add('karea-perimeter\u0000' + m.perimeter.unit, KIND_NAME['area-perimeter'], false, KIND_ORDER.indexOf('area-perimeter'), m.perimeter.unit, m.perimeter.dec, m.page, m.perimeter.v, m.label);
+  }
+  const list = [...items.values()].sort((a, b) => (a.count !== b.count ? (a.count ? -1 : 1) : a.count ? a.name.localeCompare(b.name, undefined, { numeric: true }) : a.order - b.order || a.unit.localeCompare(b.unit)));
+  const pages = [...pagesSeen.keys()].sort((a, b) => a - b);
+  const num = (x: number, dec: number): XCell => ({ v: r6(x), s: numStyle(dec) });
+  const anyLabel = pages.some((pg) => typeof pagesSeen.get(pg) === 'string');
+  const anyCount = list.some((it) => it.count);
+  const name = 'By sheet';
+
+  if (pages.length <= SHEET_COLS_MAX) {
+    const head1: XCell[] = [hcell('Item'), hcell('Unit'), ...pages.map((pg) => hcell(pagesSeen.get(pg)!)), hcell('Total')];
+    const rows: XCell[][] = [head1];
+    if (anyLabel) rows.push([hcell('PDF page'), hcell(''), ...pages.map((pg) => hcell(pg + 1)), hcell('')]);
+    for (const it of list) rows.push([it.name, it.unit, ...pages.map((pg) => (it.by.has(pg) ? num(it.by.get(pg)!, it.dec) : '')), num(it.total, it.dec)]);
+    if (anyCount) {
+      const cs = list.filter((it) => it.count);
+      rows.push([{ v: 'Total counts', s: 'b' }, 'No.', ...pages.map((pg) => (cs.some((it) => it.by.has(pg)) ? { v: cs.reduce((t, it) => t + (it.by.get(pg) || 0), 0), s: 'b' as const } : '')), { v: cs.reduce((t, it) => t + it.total, 0), s: 'b' }]);
+    }
+    return { name, rows, header: anyLabel ? 2 : 1, noFilter: true, widths: [26, 8, ...pages.map(() => 9), 11] };
+  }
+
+  // turned: a row per sheet, a column per item
+  const rows: XCell[][] = [[hcell('Sheet'), hcell('PDF page'), ...list.map((it) => hcell(it.name)), hcell('Total counts')], [hcell('Unit'), hcell(''), ...list.map((it) => hcell(it.unit)), hcell('No.')]];
+  for (const pg of pages) {
+    const cs = list.filter((it) => it.count);
+    rows.push([pagesSeen.get(pg)!, pg + 1, ...list.map((it) => (it.by.has(pg) ? num(it.by.get(pg)!, it.dec) : '')), cs.some((it) => it.by.has(pg)) ? num(cs.reduce((t, it) => t + (it.by.get(pg) || 0), 0), 0) : '']);
+  }
+  rows.push([{ v: 'Total', s: 'b' }, '', ...list.map((it) => ({ v: r6(it.total), s: numStyle(it.dec) })), anyCount ? { v: list.filter((it) => it.count).reduce((t, it) => t + it.total, 0), s: 'b' as const } : '']);
+  return { name, rows, header: 2, noFilter: true, widths: [14, 9, ...list.map(() => 13), 13] };
 }

@@ -3,7 +3,9 @@
 import '../src/engine/mupdf-pre.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { randomBytes, createHash } from 'node:crypto';
 import { join } from 'node:path';
 import * as mupdf from 'mupdf';
 import * as mu from '../src/engine/mu';
@@ -1754,4 +1756,688 @@ test('page changes keep the catalogue: form, page scales, names, open action (Mu
   mu.insertBlank('cat', 0, 595, 842, 2);
   assert.deepEqual(look().scales, { '*': { unit: 'm', k: 0.05 }, '4': { unit: 'm', k: 0.1 } }, 'and moves along when pages go in before it');
   mu.close('cat');
+});
+
+test('H2: the OCR checks never decode a content stream over 4 MB; every buffer read is destroyed', () => {
+  // a page: [wrapper, 5 MB of content, wrapper, our OCR layer]
+  const d = new mupdf.PDFDocument();
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, ''));
+  // (one long comment line: random letters, no operators, so MuPDF parses it without a complaint)
+  const noise = '%' + Buffer.from(randomBytes(5 << 20).map((b) => 97 + (b % 26))).toString('latin1') + '\n';
+  const contents = d.newArray();
+  contents.push(d.addStream('q %GCC\n', {}));
+  contents.push(d.addStream(noise, {}));
+  contents.push(d.addStream('\nq %GCC\n', {}));
+  contents.push(d.addStream('%GCC-OCR\nBT ET\n', {}));
+  d.findPage(0).put('Contents', contents);
+  mu.open('ocr-big', d.saveToBuffer('').asUint8Array().slice());
+  const words = [{ text: 'Scanned', box: [100, 100, 180, 115] as [number, number, number, number] }];
+
+  const proto = (mupdf as unknown as { PDFObject: { prototype: { readStream: () => mupdf.Buffer; get: (k: string) => mupdf.PDFObject } } }).PDFObject.prototype;
+  const bufProto = (mupdf as unknown as { Buffer: { prototype: { destroy: () => void } } }).Buffer.prototype;
+  const origRead = proto.readStream, origDestroy = bufProto.destroy;
+  let bigDecodes = 0, made = 0, destroyed = 0;
+  proto.readStream = function (this: mupdf.PDFObject) {
+    try { const l = this.get('Length').resolve(); if (l.isNumber() && l.asNumber() > 4 << 20) bigDecodes++; } catch { /* not a stream */ }
+    made++;
+    return origRead.call(this);
+  };
+  bufProto.destroy = function (this: mupdf.Buffer) { destroyed++; return origDestroy.call(this); };
+  let state: string, replaced = 0;
+  try {
+    state = mu.ocrState('ocr-big', 0);
+    replaced = mu.addTextLayer('ocr-big', 0, words, true, false);
+  } finally {
+    proto.readStream = origRead;
+    bufProto.destroy = origDestroy;
+  }
+  assert.equal(state, 'ours', 'our OCR layer is found');
+  assert.equal(bigDecodes, 0, 'the 5 MB stream was decoded');
+  assert.equal(destroyed, made, 'every buffer made was destroyed');
+  assert.equal(replaced, 1);
+  const saved = mupdf.Document.openDocument(mu.save('ocr-big'), 'application/pdf').asPDF()!;
+  const c = saved.findPage(0).get('Contents');
+  let ocrLayers = 0;
+  for (let i = 0; i < c.length; i++) if (c.get(i).readStream().asString().startsWith('%GCC-OCR')) ocrLayers++;
+  assert.equal(ocrLayers, 1, 'the old layer is replaced, not doubled');
+  mu.close('ocr-big');
+});
+
+test('B2: a file that fails late in open is not left in the engine: its entry and its reader go, and the file opens again', () => {
+  const d = new mupdf.PDFDocument();
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, 'BT ET'));
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, 'BT ET'));
+  const bytes = d.saveToBuffer('').asUint8Array().slice();
+  let closed = false;
+  const reader = { size: bytes.length, read: (buf: Uint8Array, off: number, len: number, pos: number) => { const n = Math.max(0, Math.min(len, bytes.length - pos)); buf.set(bytes.subarray(pos, pos + n), off); return n; }, close() { closed = true; } };
+  // the page count throws once, after the file is registered (open's late step)
+  const P = mupdf.PDFDocument.prototype as unknown as { countPages: () => number };
+  const orig = P.countPages;
+  P.countPages = function () { P.countPages = orig; throw new Error('page tree cut'); };
+  try {
+    assert.throws(() => mu.open('late', reader as never), /page tree cut/);
+  } finally { P.countPages = orig; }
+  assert.equal(closed, true, 'the reader is closed');
+  assert.equal(mu.readerOf('late'), null, 'the engine no longer holds the file');
+  assert.equal(mu.open('late', bytes).pages.length, 2, 'the same id opens again');
+  mu.close('late');
+});
+
+test('B3: extract: the graft map is let go when a copy throws', () => {
+  mu.open('ex', new mupdf.PDFDocument().saveToBuffer('').asUint8Array().slice());
+  const P = mupdf.PDFDocument.prototype as unknown as { newGraftMap: () => { destroy: () => void } };
+  const orig = P.newGraftMap;
+  let made = 0, freed = 0;
+  P.newGraftMap = function (this: unknown) {
+    const g = orig.call(this);
+    made++;
+    const destroy = g.destroy;
+    g.destroy = () => { freed++; destroy.call(g); };
+    return g as never;
+  };
+  try {
+    assert.throws(() => mu.extract('ex', [0]));
+  } finally { P.newGraftMap = orig; }
+  assert.equal(made, 1);
+  assert.equal(freed, made, 'the graft map was let go');
+  mu.close('ex');
+});
+
+test('B2/B3 host: a drawing copy or a recovery copy that throws leaves nothing in the work folder', async () => {
+  // (host.ts reads the glyphless font from the folder given as argv[2], when it is loaded)
+  const argv2 = process.argv[2];
+  process.argv[2] = 'assets';
+  let host: typeof import('../src/engine/host');
+  try { host = await import('../src/engine/host'); } finally { process.argv[2] = argv2; }
+  const { VFile, workDir } = await import('../src/engine/files');
+  const h = await host.editHandlers() as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const dir = mkdtempSync(join(tmpdir(), 'rev10-8-'));
+  try {
+    const file = join(dir, 'a.pdf');
+    const d = new mupdf.PDFDocument();
+    d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, 'BT ET'));
+    writeFileSync(file, d.saveToBuffer('').asUint8Array());
+    const vf = new VFile({ path: file }) as InstanceType<typeof VFile> & { $src?: { path: string } };
+    vf.$src = { path: file };
+    h.open('snap', vf);
+    mu.createAnnot('snap', 0, { type: 'Square', rect: [10, 10, 60, 60] } as never);
+    // the original can no longer be read: what the drawing copy and the recovery copy need from it
+    const r = mu.readerOf('snap')!;
+    const read = r.read.bind(r);
+    r.read = () => { throw new Error('original cut'); };
+    const mine = () => (existsSync(workDir()) ? readdirSync(workDir()).filter((n) => n.startsWith(process.pid + '-')) : []);
+    const before = mine();
+    assert.throws(() => h.drawSnapshot('snap', true));
+    assert.deepEqual(mine(), before, 'no temp folder left by the drawing copy');
+    // the copy is written whole, then cannot take the recovery file's name (a folder is there)
+    r.read = read;
+    mkdirSync(join(dir, 'rec.pdf'));
+    assert.throws(() => h.writeRecovery('snap', join(dir, 'rec.pdf'), 0));
+    assert.equal(existsSync(join(dir, 'rec.pdf.tmp')), false, 'no .tmp left by the recovery copy');
+    h.close('snap');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('10.6: a save that would reach 4 GB is refused while it is written; nothing is left; a smaller one saves', async () => {
+  // (host.ts reads the glyphless font from the folder given as argv[2], when it is loaded)
+  const argv2 = process.argv[2];
+  process.argv[2] = 'assets';
+  let host: typeof import('../src/engine/host');
+  try { host = await import('../src/engine/host'); } finally { process.argv[2] = argv2; }
+  const reader = (b: Uint8Array) => ({ size: b.length, read: (buf: Uint8Array, off: number, len: number, pos: number) => { const n = Math.max(0, Math.min(len, b.length - pos)); buf.set(b.subarray(pos, pos + n), off); return n; }, close() { /* */ } });
+  /** a PDF with `mb` MB of stream that is not compressed (the save copies it as it is) */
+  const sized = (mb: number) => {
+    const d = new mupdf.PDFDocument();
+    const page = d.addPage([0, 0, 595, 842], 0, {}, '');
+    page.put('Contents', d.addStream(randomBytes(mb << 20), {}));
+    d.insertPage(-1, page);
+    return d.saveToBuffer('').asUint8Array().slice();
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'rev10-6-'));
+  mu.setTooBigForTests(5e6);
+  try {
+    const six = sized(6);
+    mu.open('six', reader(six) as never);
+    const out = join(dir, 'six.pdf');
+    assert.throws(() => host.runToFile((write, run) => mu.withSink(write, run), out, () => mu.save('six')),
+      { message: 'The saved file would be 4 GB or more and could not be opened again, so nothing was saved. Split the file first (Organize › Split).' });
+    assert.equal(existsSync(out), false, 'no output file left');
+    mu.close('six');
+
+    const four = sized(4);
+    mu.open('four', reader(four) as never);
+    const saved = mu.save('four');
+    assert.ok(saved.length > 4e6 && saved.length < 5e6, 'a 4 MB file is saved: ' + saved.length);
+    assert.equal(mupdf.Document.openDocument(saved, 'application/pdf').countPages(), 1, 'and it opens again');
+    mu.close('four');
+  } finally {
+    mu.setTooBigForTests(0);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('10.2: the piece-wise writer lets go of the objects it makes (60,000 objects, same bytes)', () => {
+  // a file of 60,000 strings of 300 bytes, opened through a reader (as a file on disk is)
+  const d = new mupdf.PDFDocument();
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, ''));
+  const junk = d.newArray();
+  const text = 'y'.repeat(300);
+  for (let i = 0; i < 60000; i++) junk.push(d.addObject(d.newString(text + i)));
+  d.getTrailer().get('Root').put('Junk', junk);
+  const src = d.saveToBuffer('').asUint8Array().slice();
+  const reader = { size: src.length, read: (buf: Uint8Array, off: number, len: number, pos: number) => { const n = Math.max(0, Math.min(len, src.length - pos)); buf.set(src.subarray(pos, pos + n), off); return n; }, close() { /* */ } };
+  mu.open('w10-2', reader as never);
+  // (the piece-wise writer is used above 15 MB; the output is 21 MB)
+  mu.setTooBigForTests(30e6);
+  // every object reference the writer makes is counted as it is destroyed
+  const P = mupdf.PDFObject.prototype as unknown as { destroy: () => void };
+  const destroyOrig = P.destroy;
+  let destroys = 0;
+  P.destroy = function () { destroys++; return destroyOrig.call(this); };
+  try {
+    const out = mu.save('w10-2');
+    assert.ok(destroys >= 60000, 'references destroyed while writing: ' + destroys);
+    // the bytes as the writer wrote them before this change
+    assert.equal(createHash('sha256').update(out).digest('hex'), 'ef42401e982441755f174030fe2355dcf44078ebd7d94f0a89bbae0a3df62c2f');
+  } finally {
+    P.destroy = destroyOrig;
+    mu.setTooBigForTests(0);
+    mu.close('w10-2');
+  }
+});
+
+test('10.14: long edits are cut into journal parts; one undo takes back all of them, the step before stays', () => {
+  const pages = (n: number) => { const d = new mupdf.PDFDocument(); for (let i = 0; i < n; i++) d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, '')); return d.saveToBuffer('').asUint8Array().slice(); };
+  const pos = (id: string) => mu.journalBothWays(id).slow.position;
+  // page numbers on 1,500 pages (the journal moved by one step before 10.14)
+  mu.open('pn', pages(1500));
+  mu.createAnnot('pn', 0, { type: 'Square', rect: [100, 100, 200, 160], color: [1, 0, 0], bw: 1 });
+  const j0 = pos('pn');
+  mu.markPages('pn', [{ kind: 'text', text: 'PN{page}', pos: 'bc', size: 10 }], { file: 'f', date: 'd' });
+  assert.ok(pos('pn') - j0 >= 15, 'journal steps for the numbers: ' + (pos('pn') - j0));
+  assert.equal(textOf(mu.save('pn'), 1499).includes('PN1500'), true, 'the last page is numbered');
+  mu.undo('pn');
+  assert.equal(textOf(mu.save('pn'), 1499).includes('PN'), false, 'one undo removes every number');
+  assert.equal(mu.annots('pn', 0).length, 1, 'the step before is still there');
+  mu.redo('pn');
+  assert.equal(textOf(mu.save('pn'), 1499).includes('PN1500'), true, 'one redo puts them all back');
+  mu.undo('pn');
+  mu.undo('pn');
+  assert.equal(mu.annots('pn', 0).length, 0, 'and the step before is undone too');
+  mu.close('pn');
+
+  // a throw in page 700 of the numbers (page 701 is the 701st page transform read): the file as before
+  mu.open('pn2', pages(1500));
+  const P = mupdf.PDFPage.prototype as unknown as { getTransform: () => number[] };
+  const transformOrig = P.getTransform;
+  let reads = 0;
+  P.getTransform = function () { if (++reads === 701) throw new Error('test: page 700'); return transformOrig.call(this); };
+  try {
+    const before = pos('pn2');
+    assert.throws(() => mu.markPages('pn2', [{ kind: 'text', text: 'PN{page}', pos: 'bc', size: 10 }], { file: 'f', date: 'd' }), /test: page 700/);
+    assert.equal(pos('pn2'), before, 'journal position as before');
+    assert.equal(mu.history('pn2').undo.length, 0, 'no step left');
+    assert.equal(textOf(mu.save('pn2'), 0).includes('PN'), false, 'no number left on the first page');
+  } finally {
+    P.getTransform = transformOrig;
+    mu.close('pn2');
+  }
+
+  // Flatten all of 600 markups, and Delete of 600: one undo takes each back, in parts
+  const squares = (id: string, n: number) => mu.createAnnots(id, Array.from({ length: n }, (_, k) => ({ page: k % 60, spec: { type: 'Square', rect: [10 + (k % 20) * 25, 10 + Math.floor(k / 20) * 25, 30 + (k % 20) * 25, 30 + Math.floor(k / 20) * 25], color: [1, 0, 0], bw: 1 } as mu.AnnotSpec })));
+  const count = (id: string) => Array.from({ length: 60 }, (_, p) => mu.annots(id, p).length).reduce((a, b) => a + b, 0);
+  mu.open('fl', pages(60));
+  const made = squares('fl', 600);
+  let j = pos('fl');
+  mu.flatten('fl', null);
+  assert.equal(count('fl'), 0, 'all flattened');
+  assert.ok(pos('fl') - j >= 10, 'flatten: journal steps ' + (pos('fl') - j));
+  mu.undo('fl');
+  assert.equal(count('fl'), 600, 'one undo brings all 600 back');
+  mu.close('fl');
+  mu.open('dl', pages(60));
+  const made2 = squares('dl', 600);
+  j = pos('dl');
+  assert.equal(mu.deleteAnnots('dl', made2.map((a) => ({ page: a.page, id: a.id }))), 600);
+  assert.ok(pos('dl') - j >= 9, 'delete: journal steps ' + (pos('dl') - j));
+  mu.undo('dl');
+  assert.equal(count('dl'), 600, 'one undo brings all 600 back');
+  mu.close('dl');
+  void made;
+});
+
+test('10.13: the batch jobs write a big source in pieces (no MuPDF save), the result is right; Compress refuses it', async () => {
+  const argv2 = process.argv[2];
+  process.argv[2] = 'assets';
+  let host: typeof import('../src/engine/host');
+  try { host = await import('../src/engine/host'); } finally { process.argv[2] = argv2; }
+  const { workDir, removeTemp } = await import('../src/engine/files');
+  const left = () => { try { return readdirSync(workDir()).sort(); } catch { return []; } };
+  /** 6 pages of text, one 3 MB stream that is not compressed on the first page, an object nothing leads to, and a markup on page 2 */
+  const make = () => {
+    const d = new mupdf.PDFDocument();
+    const f = d.addSimpleFont(new mupdf.Font('Helvetica'));
+    const filler = d.addStream(randomBytes(3 << 20), { Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 1, 1] });
+    for (let i = 0; i < 6; i++) d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, { Font: { F1: f }, ...(i === 0 ? { XObject: { Fill: filler } } : {}) }, `BT /F1 20 Tf 72 700 Td (BODY ${i + 1}) Tj ET`));
+    d.addObject(d.newString('nothing leads here ' + 'x'.repeat(500)));
+    const p = d.loadPage(1) as mupdf.PDFPage;
+    const sq = p.createAnnotation('Square');
+    sq.setRect([100, 400, 200, 500]); sq.setColor([1, 0, 0]); sq.setInteriorColor([1, 0, 0]); sq.update();
+    return d.saveToBuffer('').asUint8Array().slice();
+  };
+  const src = make();
+  assert.ok(src.length > 3e6 && src.length < 4e6, 'a 3 MB file: ' + src.length);
+  /** live (not null) objects of a file, and how many it lists */
+  const objects = (b: Uint8Array) => {
+    const d = mupdf.Document.openDocument(b, 'application/pdf').asPDF()!;
+    let live = 0;
+    const n = d.countObjects();
+    for (let i = 1; i < n; i++) if (!d.newIndirect(i).resolve().isNull()) live++;
+    return { live, n };
+  };
+  const pagesText = (b: Uint8Array) => { const d = mupdf.Document.openDocument(b, 'application/pdf'); return Array.from({ length: d.countPages() }, (_, i) => d.loadPage(i).toStructuredText('').asText().replace(/\s+/g, ' ').trim()); };
+  const marks: mu.PageMark[] = [{ kind: 'text', text: 'Page {page} of {pages}', pos: 'bc', size: 9 }];
+  const ctx = { file: 'x', date: 'd' };
+  // MuPDF's save, counted (the pieces must not use it)
+  const proto = mupdf.PDFDocument.prototype as unknown as { saveToBuffer: (...a: unknown[]) => unknown };
+  const orig = proto.saveToBuffer;
+  let saves = 0;
+  proto.saveToBuffer = function (this: unknown, ...a: unknown[]) { saves++; return orig.apply(this, a); };
+  const run = (fn: () => unknown) => { saves = 0; const r = fn(); return { r, saves }; };
+  try {
+    // the real limit: as before - MuPDF's save, the file comes back as bytes
+    const small = run(() => mu.batchMark(src, marks, ctx));
+    assert.ok(small.saves >= 1, 'under the limit: MuPDF saves');
+    const wantMark = pagesText((small.r as { bytes: Uint8Array }).bytes);
+    assert.equal(wantMark[2], 'BODY 3 Page 3 of 6');
+    const wantObjs = objects((small.r as { bytes: Uint8Array }).bytes);
+
+    mu.setStreamSaveForTests(2e6);
+    // page marks
+    const big = run(() => mu.batchMark(src, marks, ctx));
+    assert.equal(big.saves, 0, 'over the limit: MuPDF\'s save is never called');
+    const got = (big.r as { bytes: Uint8Array; pages: number });
+    assert.equal(got.pages, 6);
+    assert.deepEqual(pagesText(got.bytes), wantMark, 'every page: its text and its mark');
+    const gotObjs = objects(got.bytes);
+    assert.ok(Math.abs(gotObjs.live - wantObjs.live) <= wantObjs.live * 0.01, `no orphan objects: ${gotObjs.live} live, ${wantObjs.live} in the in-memory result`);
+    assert.ok(got.bytes.length > 3e6 && got.bytes.length < src.length + 100e3, 'the filler is in, nothing else big: ' + got.bytes.length);
+    // Flatten: the markup is burnt in
+    const fl = run(() => mu.batchFlatten(src));
+    assert.equal(fl.saves, 0, 'Flatten: no MuPDF save');
+    const flDoc = mupdf.Document.openDocument(fl.r as Uint8Array, 'application/pdf');
+    assert.equal(flDoc.countPages(), 6);
+    assert.equal((flDoc.loadPage(1) as mupdf.PDFPage).getAnnotations().length, 0, 'the square is burnt in');
+    const px = flDoc.loadPage(1).toPixmap(mupdf.Matrix.identity, mupdf.ColorSpace.DeviceRGB, false).getPixels();
+    let red = 0; for (let i = 0; i < px.length; i += 3) if (px[i] > 200 && px[i + 1] < 60) red++;
+    assert.ok(red > 5000, 'and drawn: ' + red + ' red pixels');
+    // repair
+    const rp = run(() => mu.repair(src));
+    assert.equal(rp.saves, 0, 'repair: no MuPDF save');
+    assert.equal(mupdf.Document.openDocument((rp.r as { bytes: Uint8Array }).bytes, 'application/pdf').countPages(), 6);
+    // the engine host's file for the result: a file, in pieces, that opens
+    const before = left();
+    const asFile = host.runToFile((w, r) => mu.withSink(w, r), true, () => mu.batchMark(src, marks, ctx)) as { bytes: { $file: { path: string; size: number } }; pages: number };
+    assert.equal(asFile.pages, 6);
+    assert.ok(asFile.bytes.$file.size > 3e6);
+    assert.deepEqual(pagesText(new Uint8Array(readFileSync(asFile.bytes.$file.path))), wantMark);
+    removeTemp([asFile.bytes.$file.path]);
+    // Compress: refused before any work, nothing written, no temp file left
+    let wrote = 0;
+    assert.throws(() => mu.withSink(() => { wrote++; }, () => mu.compress(src, { dpi: 150, quality: 70 })), { message: 'This file is too big to reduce here (over 2 MB). Split it first (Organize › Split).' });
+    assert.equal(wrote, 0);
+    assert.throws(() => host.runToFile((w, r) => mu.withSink(w, r), true, () => mu.compress(src, { dpi: 150, quality: 70 })), /too big to reduce here/);
+    assert.deepEqual(left().filter((x) => !before.includes(x)), [], 'no temp file left');
+    // a protected source keeps MuPDF's save (the pieces would write its strings decrypted)
+    const enc = mupdf.Document.openDocument(src, 'application/pdf').asPDF()!;
+    const encBytes = enc.saveToBuffer('encrypt=aes-256,owner-password=o,permissions=-9').asUint8Array().slice();
+    const ep = run(() => mu.batchMark(encBytes, marks, ctx));
+    assert.ok(ep.saves >= 1, 'a protected file: MuPDF saves');
+  } finally {
+    proto.saveToBuffer = orig;
+    mu.setStreamSaveForTests(0);
+  }
+  // the real limit again: Compress works on it
+  assert.ok(mu.compress(src, { dpi: 150, quality: 70 }).report.before === src.length);
+});
+
+// ---- 10.15: bookmarks of a Combine / Extract written as objects
+
+/** a file of `pages` pages whose outline (t tops, m under each, l under those: three deep) is written as raw objects */
+function bookmarkedFile(tag: string, pages: number, t: number, m: number, l: number): Uint8Array {
+  const d = new mupdf.PDFDocument();
+  for (let i = 0; i < pages; i++) d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, ''));
+  type N = { title: string; page: number; kids: N[] };
+  let k = 0;
+  const tree: N[] = [];
+  for (let a = 0; a < t; a++) {
+    const top: N = { title: `${tag} ${a}`, page: k++ % pages, kids: [] };
+    for (let b = 0; b < m; b++) {
+      const mid: N = { title: `${tag} ${a}.${b}`, page: k++ % pages, kids: [] };
+      for (let c = 0; c < l; c++) mid.kids.push({ title: `${tag} ${a}.${b}.${c}`, page: k++ % pages, kids: [] });
+      top.kids.push(mid);
+    }
+    tree.push(top);
+  }
+  const root = d.getTrailer().get('Root');
+  const make = (list: N[], parent: mupdf.PDFObject) => {
+    const refs = list.map((x) => {
+      const o = d.newDictionary();
+      o.put('Title', d.newString(x.title));
+      o.put('Parent', parent);
+      o.put('Dest', [d.findPage(x.page), d.newName('Fit')]);
+      return d.addObject(o);
+    });
+    refs.forEach((r, i) => {
+      if (i > 0) r.resolve().put('Prev', refs[i - 1]);
+      if (i < refs.length - 1) r.resolve().put('Next', refs[i + 1]);
+      if (list[i].kids.length) { const kr = make(list[i].kids, r); r.resolve().put('First', kr[0]); r.resolve().put('Last', kr[kr.length - 1]); r.resolve().put('Count', list[i].kids.length); }
+    });
+    return refs;
+  };
+  const top = d.addObject(d.newDictionary());
+  top.resolve().put('Type', d.newName('Outlines'));
+  const refs = make(tree, top);
+  top.resolve().put('First', refs[0]); top.resolve().put('Last', refs[refs.length - 1]); top.resolve().put('Count', refs.length);
+  root.put('Outlines', top);
+  return d.saveToBuffer('compress').asUint8Array().slice();
+}
+/** an outline read back as [title, page, children] */
+function outlineTree(bytes: Uint8Array): unknown[] {
+  const d = mupdf.Document.openDocument(bytes, 'application/pdf');
+  const conv = (l: any[] | null): unknown[] => (l || []).map((x) => [x.title, x.page ?? d.resolveLink(x.uri), conv(x.down)]);
+  return conv(d.loadOutline() as any);
+}
+
+test('Combine and Extract write their bookmarks as objects: no outline iterator, the outline the iterator wrote, 6,000 under 2 s', () => {
+  const proto = mupdf.PDFDocument.prototype as unknown as { outlineIterator: () => unknown };
+  const orig = proto.outlineIterator;
+  let iters = 0;
+  proto.outlineIterator = function (this: unknown) { iters++; return orig.call(this); };
+  try {
+    // (the outline the old code, which wrote it through MuPDF's iterator, made of these four files and of an extract: kept as fixtures)
+    const files = [0, 1, 2, 3].map((f) => ({ name: `vol${f}.pdf`, bytes: bookmarkedFile('V' + f, 30, 2, 4, 5) }));
+    const merged = mu.merge(files);
+    assert.deepEqual(outlineTree(merged), JSON.parse(readFileSync('tests/data/outline-merge-200.json', 'utf8')), 'a merge: titles, pages, nesting');
+    assert.equal(iters, 0, 'the outline iterator was never called (merge)');
+
+    // each is one object with its own Dest [page /Fit], Parent, Prev / Next / First / Last / Count
+    const md = mupdf.Document.openDocument(merged, 'application/pdf') as mupdf.PDFDocument;
+    const top = md.getTrailer().get('Root', 'Outlines');
+    assert.equal(top.get('Type').asName(), 'Outlines');
+    assert.equal(top.get('Count').asNumber(), 4, 'four files, closed: four showing');
+
+    const f0 = top.get('First');
+    assert.equal(f0.get('Dest').get(1).asName(), 'Fit');
+    assert.ok(f0.get('Count').asNumber() < 0, 'a closed group');
+    assert.equal(f0.get('Next').get('Prev').asIndirect(), f0.asIndirect());
+    assert.equal(f0.get('First').get('Parent').asIndirect(), f0.asIndirect());
+    assert.equal(top.get('Last').get('Title').asString(), 'vol3');
+    // an extract
+    mu.open('ob15', files[0].bytes, undefined, 'Tester');
+    const ext = mu.extract('ob15', [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    mu.close('ob15');
+    assert.deepEqual(outlineTree(ext), JSON.parse(readFileSync('tests/data/outline-extract.json', 'utf8')), 'an extract');
+    // the big one: four files of 1,505 bookmarks, three deep
+    const big = [0, 1, 2, 3].map((f) => ({ name: `big${f}.pdf`, bytes: bookmarkedFile('B' + f, 400, 5, 10, 29) }));
+    const t0 = Date.now();
+    const out = mu.merge(big);
+    const ms = Date.now() - t0;
+    console.log('10.15: Combine of 4 x 1,505 bookmarks (400 pages each): ' + ms + ' ms in all');
+    const tree = outlineTree(out) as [string, number, unknown[]][];
+    const count = (l: [string, number, unknown[]][]): number => l.reduce((c, x) => c + 1 + count(x[2] as never), 0);
+    assert.equal(count(tree), 4 * 1505 + 4);
+    assert.deepEqual(tree.map((x) => x[0]), ['vol0', 'vol1', 'vol2', 'vol3'].map((_, i) => 'big' + i));
+    assert.equal(iters, 0, 'the outline iterator was never called');
+    // the write alone (the part this row changes)
+    const sink = mupdf.PDFDocument.openDocument(out, 'application/pdf') as mupdf.PDFDocument;
+    sink.getTrailer().get('Root').delete('Outlines');
+    const marks = (tree as any[]).map(function conv(x: any): { title: string; page: number; children: any[] } { return { title: x[0], page: x[1], children: x[2].map(conv) }; });
+    const w0 = Date.now();
+    mu.writeOutline(sink, marks);
+    const wms = Date.now() - w0;
+    console.log('10.15: writeOutline of 6,024 bookmarks: ' + wms + ' ms');
+    assert.ok(wms < 2000, 'under 2 s: ' + wms);
+    assert.equal(iters, 0);
+  } finally { proto.outlineIterator = orig; }
+});
+
+test('writeOutline adds its bookmarks after the ones the file has (and a file with none gets an outline)', () => {
+  const src = bookmarkedFile('E', 10, 2, 2, 1);
+  const was = outlineTree(src);
+  const d = mupdf.Document.openDocument(src, 'application/pdf') as mupdf.PDFDocument;
+  mu.writeOutline(d, [{ title: 'Added', page: 3, children: [{ title: 'Under', page: 4, children: [] }] }, { title: 'Last', page: 9, children: [] }]);
+  const back = outlineTree(d.saveToBuffer('').asUint8Array().slice());
+  assert.deepEqual(back, [...was, ['Added', 3, [['Under', 4, []]]], ['Last', 9, []]]);
+  const top = d.getTrailer().get('Root', 'Outlines');
+  assert.equal(top.get('Count').asNumber(), 2 + 2, 'the file\'s two and the two new, closed groups not counted');
+  assert.equal(top.get('Last').get('Title').asString(), 'Last');
+  // none yet
+  const e = new mupdf.PDFDocument();
+  for (let i = 0; i < 3; i++) e.insertPage(-1, e.addPage([0, 0, 595, 842], 0, {}, ''));
+  mu.writeOutline(e, []);
+  assert.ok(e.getTrailer().get('Root').get('Outlines').isNull(), 'no bookmarks, no outline');
+  mu.writeOutline(e, [{ title: 'One', page: 2, children: [] }]);
+  assert.deepEqual(outlineTree(e.saveToBuffer('').asUint8Array().slice()), [['One', 2, []]]);
+});
+
+// ---- 10.16: a markup is found without listing its page each time; cached pages are freed
+
+/** counts of MuPDF.js calls: a page's markup list read, a page loaded, a page destroyed */
+function countCalls() {
+  const pp = mupdf.PDFPage.prototype as unknown as { getAnnotations: () => unknown; destroy: () => void };
+  const dp = mupdf.PDFDocument.prototype as unknown as { loadPage: (i: number) => unknown };
+  const real = { list: pp.getAnnotations, destroy: pp.destroy, load: dp.loadPage };
+  const n = { lists: 0, destroys: 0, loads: 0 };
+  pp.getAnnotations = function (this: unknown) { n.lists++; return real.list.call(this); };
+  pp.destroy = function (this: unknown) { n.destroys++; return real.destroy.call(this); };
+  dp.loadPage = function (this: unknown, i: number) { n.loads++; return real.load.call(this, i); };
+  return { n, restore() { pp.getAnnotations = real.list; pp.destroy = real.destroy; dp.loadPage = real.load; }, reset() { n.lists = n.destroys = n.loads = 0; } };
+}
+function plainPages(n: number): Uint8Array {
+  const d = new mupdf.PDFDocument();
+  for (let i = 0; i < n; i++) d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, ''));
+  return d.saveToBuffer('').asUint8Array().slice();
+}
+const sq16 = (k: number): mu.AnnotSpec => ({ type: 'Square', rect: [10 + (k % 30) * 18, 10 + Math.floor(k / 30) * 18, 24 + (k % 30) * 18, 24 + Math.floor(k / 30) * 18], color: [1, 0, 0], bw: 1 } as mu.AnnotSpec);
+
+test('Delete and Move of 600 markups on one page read the page\'s markup list a few times, not once for each', () => {
+  const c = countCalls();
+  try {
+    mu.open('f16', plainPages(2), undefined, 'Tester');
+    const made = mu.createAnnots('f16', Array.from({ length: 600 }, (_, k) => ({ page: 0, spec: sq16(k) })));
+    assert.equal(made.length, 600);
+    const items = made.map((a) => ({ page: a.page, id: a.id }));
+    // Move: all 600 to one place
+    c.reset();
+    const t0 = Date.now();
+    const moved = mu.updateAnnots('f16', items.map((it) => ({ ...it, patch: { rect: [100, 100, 120, 120] } as Partial<mu.AnnotSpec> })));
+    const moveMs = Date.now() - t0;
+    console.log(`10.16: Move of 600 markups on one page: ${moveMs} ms, ${c.n.lists} markup list reads`);
+    assert.ok(c.n.lists <= 12, 'Move: markup list reads ' + c.n.lists);
+    assert.deepEqual(moved.map((a) => a.id), items.map((i) => i.id), 'every markup, in the order given');
+    assert.ok(moved.every((a) => Math.abs(a.rect[0] - 100) < 1 && Math.abs(a.rect[1] - 100) < 1), 'all moved');
+    // Delete: all 600, then they are gone
+    c.reset();
+    const t1 = Date.now();
+    const n = mu.deleteAnnots('f16', items);
+    const delMs = Date.now() - t1;
+    console.log(`10.16: Delete of 600 markups on one page: ${delMs} ms, ${c.n.lists} markup list reads`);
+    assert.equal(n, 600);
+    assert.ok(c.n.lists <= 12, 'Delete: markup list reads ' + c.n.lists);
+    assert.equal(mu.annots('f16', 0).length, 0);
+    // (deleting them again finds nothing: they are not in the index any more)
+    assert.equal(mu.deleteAnnots('f16', items), 0);
+    mu.undo('f16');
+    assert.equal(mu.annots('f16', 0).length, 600, 'undo brings them all back (and they are found again)');
+    assert.equal(mu.deleteAnnots('f16', items), 600);
+    mu.close('f16');
+  } finally { c.restore(); }
+});
+
+test('markups made after one was looked for are found; a reply thread goes with its parent; after undo too', () => {
+  mu.open('f16b', plainPages(1), undefined, 'Tester');
+  const a = mu.createAnnot('f16b', 0, sq16(0));
+  mu.updateAnnots('f16b', [{ page: 0, id: a.id, patch: { rect: [50, 50, 80, 80] } as Partial<mu.AnnotSpec> }]);
+  // (the index of the page exists now; markups made later must still be found)
+  const b = mu.createAnnot('f16b', 0, sq16(1));
+  const r1 = mu.createAnnot('f16b', 0, { type: 'Text', irt: b.id, contents: 'one' });
+  const r3 = mu.createAnnot('f16b', 0, { type: 'Text', irt: b.id, contents: 'two' });
+  const keep = mu.createAnnot('f16b', 0, { type: 'Text', irt: a.id, contents: 'on the other' });
+  // (the last one made is an answer to an answer: it must be in the index with its answer link)
+  const r2 = mu.createAnnot('f16b', 0, { type: 'Text', irt: r1.id, contents: 'answer to one' });
+  assert.equal(mu.annots('f16b', 0).length, 6);
+  assert.equal(mu.deleteAnnots('f16b', [{ page: 0, id: b.id }]), 1);
+  assert.deepEqual(mu.annots('f16b', 0).map((x) => x.id).sort(), [a.id, keep.id].sort(), 'the parent and its whole thread are gone, the rest stays');
+  mu.undo('f16b');
+  assert.equal(mu.annots('f16b', 0).length, 6, 'undo');
+  // a reply deleted alone keeps its parent; its own replies go
+  assert.equal(mu.deleteAnnots('f16b', [{ page: 0, id: r1.id }]), 1);
+  assert.deepEqual(mu.annots('f16b', 0).map((x) => x.id).sort(), [a.id, b.id, r3.id, keep.id].sort());
+  void r2;
+  mu.close('f16b');
+});
+
+test('the thread of a markup comes in the order the page lists it, as before (a reply listed before the one it answers)', () => {
+  const d = new mupdf.PDFDocument();
+  const pageObj = d.addPage([0, 0, 595, 842], 0, {}, '');
+  d.insertPage(-1, pageObj);
+  const p = d.loadPage(0) as mupdf.PDFPage;
+  // markups in a page order of the test's choosing, each answering one of the others (by number in the list)
+  const rnd = (() => { let s = 12345; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; })();
+  const N = 40;
+  const made = Array.from({ length: N }, () => p.createAnnotation('Text'));
+  // (a tree in a shuffled order: a markup answers one that comes earlier in it, and the page's list is
+  // in another order, so a reply can be listed before the markup it answers)
+  const rank = Array.from({ length: N }, (_, i) => i).sort(() => rnd() - 0.5);
+  for (let r = 1; r < N; r++) if (rnd() < 0.85) made[rank[r]].getObject().put('IRT', made[rank[Math.floor(rnd() * r)]].getObject());
+  // the old way: through the page's list, round after round
+  const old = (aid: number) => {
+    const all = [...p.getAnnotations()];
+    const ids = new Set([aid]);
+    const out: mupdf.PDFAnnotation[] = [];
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const r of all) {
+        if (out.includes(r)) continue;
+        const irt = r.getObject().get('IRT');
+        if (!irt.isNull() && ids.has(irt.asIndirect())) { out.push(r); ids.add(r.getObject().asIndirect()); grew = true; }
+      }
+    }
+    return out.map((x) => x.getObject().asIndirect());
+  };
+  let withReplies = 0;
+  for (const a of made) {
+    const aid = a.getObject().asIndirect();
+    const want = old(aid);
+    if (want.length > 1) withReplies++;
+    assert.deepEqual(mu.threadOf(p, aid).map((x) => x.getObject().asIndirect()), want, 'markup ' + aid);
+  }
+  assert.ok(withReplies >= 5, 'the generated page has threads: ' + withReplies);
+});
+
+test('a walk over every page frees the pages it passes: at most 64 stay loaded; the markups are the same', () => {
+  const c = countCalls();
+  try {
+    mu.open('f16c', plainPages(300), undefined, 'Tester');
+    mu.createAnnots('f16c', Array.from({ length: 300 }, (_, k) => ({ page: k, spec: sq16(k) })));
+    // (the file saved and opened again: no page cached when the walk starts)
+    const saved = mu.save('f16c', {});
+    mu.close('f16c');
+    mu.open('f16c', saved, undefined, 'Tester');
+    c.reset();
+    const t0 = Date.now();
+    const all = mu.allAnnots('f16c');
+    console.log(`10.16: allAnnots over 300 pages: ${Date.now() - t0} ms, pages loaded ${c.n.loads}, destroyed ${c.n.destroys}`);
+    assert.equal(all.length, 300);
+    assert.deepEqual(all.map((a) => a.page), Array.from({ length: 300 }, (_, k) => k), 'every page, in order');
+    assert.ok(c.n.loads - c.n.destroys <= 64, 'pages still loaded after the call: ' + (c.n.loads - c.n.destroys));
+    assert.ok(c.n.destroys >= 236, 'pages let go during it: ' + c.n.destroys);
+    // (a page asked for again after it was let go is loaded again, and works)
+    assert.equal(mu.annots('f16c', 0).length, 1);
+    // closing lets the cached pages go too
+    c.reset();
+    mu.close('f16c');
+    assert.ok(c.n.destroys >= 1 && c.n.destroys <= 64, 'close freed the cached pages: ' + c.n.destroys);
+  } finally { c.restore(); }
+});
+
+test('markups copied from over 64 pages onto one page: the page being copied to stays usable', () => {
+  mu.open('f16d', plainPages(80), undefined, 'Tester');
+  const made = mu.createAnnots('f16d', Array.from({ length: 70 }, (_, k) => ({ page: k + 1, spec: sq16(k) })));
+  mu.annots('f16d', 0);
+  const out = mu.copyAnnots('f16d', made.map((a) => ({ page: a.page, id: a.id })), 'f16d', 0, 5, 5);
+  assert.equal(out.length, 70);
+  assert.equal(mu.annots('f16d', 0).length, 70);
+  mu.close('f16d');
+});
+
+// Pictures to PDF: the size is counted before any picture is opened, and a memory failure at the end says so in plain words (PLAN 10.21)
+function pictureBytes(kind: 'jpg' | 'png', w = 300, h = 220): Uint8Array {
+  const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, w, h], false);
+  const px = pix.getPixels();
+  for (let i = 0; i < px.length; i++) px[i] = (i * 2654435761) >>> 24;
+  try { return kind === 'jpg' ? pix.asJPEG(95, false) : pix.asPNG(); } finally { pix.destroy?.(); }
+}
+/** how many pictures were opened while fn ran */
+function countPictureOpens<T>(fn: () => T): { r?: T; err?: Error; opens: number } {
+  const real = mupdf.Document.openDocument;
+  let opens = 0;
+  (mupdf.Document as unknown as { openDocument: unknown }).openDocument = (...a: unknown[]) => { opens++; return (real as (...x: unknown[]) => unknown).apply(mupdf.Document, a); };
+  try { return { r: fn(), opens }; } catch (e) { return { err: e as Error, opens }; } finally { (mupdf.Document as unknown as { openDocument: unknown }).openDocument = real; }
+}
+const tooManyText = /^These pictures are too big for one PDF \(about [\d.]+ GB\)\. Make two or more PDFs, then merge them \(Organize › Merge files\)\.$/;
+
+test('pictures to PDF: over the limit refused before any picture is opened; a set under it gives the same bytes', () => {
+  const jpg = pictureBytes('jpg');
+  const two = [{ bytes: jpg, name: 'a.jpg' }, { bytes: jpg, name: 'b.jpg' }];
+  const normal = mu.picturesToPdf(two, { size: 'a4' });
+  mu.setPicturesLimitForTests(jpg.length * 2 - 1);
+  try {
+    const r = countPictureOpens(() => mu.picturesToPdf(two, { size: 'a4' }));
+    assert.match(String(r.err?.message), tooManyText);
+    assert.equal(r.opens, 0, 'no picture opened');
+  } finally { mu.setPicturesLimitForTests(0); }
+  mu.setPicturesLimitForTests(jpg.length * 2);
+  try {
+    const same = mu.picturesToPdf(two, { size: 'a4' });
+    assert.equal(Buffer.compare(Buffer.from(same.bytes), Buffer.from(normal.bytes)), 0, 'same bytes as before');
+  } finally { mu.setPicturesLimitForTests(0); }
+});
+
+test('pictures to PDF: a picture that is not a JPG counts at 1.5 times its size', () => {
+  const png = pictureBytes('png');
+  const files = [{ bytes: png, name: 'sketch.png' }];
+  mu.setPicturesLimitForTests(Math.floor(png.length * 1.5) - 1);
+  try {
+    const r = countPictureOpens(() => mu.picturesToPdf(files, { size: 'picture' }));
+    assert.match(String(r.err?.message), tooManyText);
+    assert.equal(r.opens, 0);
+  } finally { mu.setPicturesLimitForTests(0); }
+  mu.setPicturesLimitForTests(Math.ceil(png.length * 1.5));
+  try {
+    const r = countPictureOpens(() => mu.picturesToPdf(files, { size: 'picture' }));
+    assert.equal(r.err, undefined, 'at 1.5 times it is let through');
+    assert.ok(r.opens >= 1);
+  } finally { mu.setPicturesLimitForTests(0); }
+});
+
+test('pictures to PDF: a memory failure at close, or at the final buffer, gives the plain message', () => {
+  const jpg = pictureBytes('jpg');
+  const files = [{ bytes: jpg, name: 'a.jpg' }];
+  const proto = mupdf.DocumentWriter.prototype as unknown as { close: () => void };
+  const realClose = proto.close;
+  proto.close = () => { throw new Error('realloc failed'); };
+  try {
+    const r = countPictureOpens(() => mu.picturesToPdf(files, { size: 'picture' }));
+    assert.match(String(r.err?.message), tooManyText);
+    assert.doesNotMatch(String(r.err?.message), /realloc/);
+  } finally { proto.close = realClose; }
+  const bproto = mupdf.Buffer.prototype as unknown as { asUint8Array: () => Uint8Array };
+  const realAsU8 = bproto.asUint8Array;
+  bproto.asUint8Array = () => { throw new Error('memory allocation failed'); };
+  try {
+    const r = countPictureOpens(() => mu.picturesToPdf(files, { size: 'picture' }));
+    assert.match(String(r.err?.message), tooManyText);
+  } finally { bproto.asUint8Array = realAsU8; }
 });

@@ -8,6 +8,7 @@ import type { AnnotData, AnnotSpec, RGB } from '../engine/mu';
 import { ColorPick } from './Ribbon';
 import { TOOLS, NO_STYLE, HOW_HINT, BIG_SHEET_TEXT, type ToolId, type Style, type MeasureHow } from './tools';
 import { markupName } from './Side';
+import { EndsPicker } from './lineends';
 import { Ico } from './icons';
 import { measureValue, FMT_DEFAULTS, LEGACY_FMT, type MeasureFmt } from './geom';
 
@@ -382,10 +383,7 @@ function StyleEditor(s: { type: string; color: number[] | null; fill: number[] |
         <select className="input xs" value={s.cloudy ? String(s.cloudy) : '0'} onChange={(e) => s.set({ cloudy: Number(e.target.value) })}><option value="0">Straight</option><option value="1">Cloud</option><option value="2">Big cloud</option></select>
       </div>}
       {line && <div className="prow"><span className="plab">Ends</span>
-        <select className="input xs" value={(s.le || ['None', 'None']).join('|')} onChange={(e) => s.set({ le: e.target.value.split('|') as [string, string] })}>
-          <option value="None|None">— none</option><option value="None|ClosedArrow">→ arrow</option><option value="None|OpenArrow">⇾ open arrow</option>
-          <option value="ClosedArrow|ClosedArrow">↔ both</option><option value="OpenArrow|OpenArrow">⇿ open both</option><option value="Circle|ClosedArrow">●→</option><option value="Slash|Slash">/ ticks /</option><option value="Butt|Butt">| dimension |</option>
-        </select>
+        <EndsPicker value={s.le} onChange={(le) => s.set({ le })} />
       </div>}
     </div>
   );

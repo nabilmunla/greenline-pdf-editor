@@ -72,4 +72,10 @@ export function Modal({ title, sub, onClose, children, wide, actions, className,
   );
 }
 
-export interface Toast { id: number; text: string; kind?: 'ok' | 'err' | 'busy' | 'info'; action?: { label: string; run(): void }; progress?: number }
+export interface Toast {
+  id: number; text: string; kind?: 'ok' | 'err' | 'busy' | 'info'; action?: { label: string; run(): void }; progress?: number;
+  /** a question with buttons that work with a dialog open too (an engine that stopped answering) */
+  actions?: { label: string; run(): void }[];
+  /** what the question is about: it goes when that is over */
+  key?: string;
+}

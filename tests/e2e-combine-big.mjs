@@ -5,6 +5,8 @@
 //  1. all 40 (2.7 GB) merged into a new tab - over 2 GB, which the editing engine opens since 0.12 (its .wasm
 //     patched at start, PLAN 7.17; up to 4 GB): pages of the first / middle / last file drawn, Link the sheets on
 //     the result, saved, every page there, qpdf clean.
+//     The batch engine (which did the merge) gives its memory back afterwards (PLAN 10.5): 10 s after the
+//     merge it is under 400 MB, its peak during the merge is recorded, and the next batch job works.
 //  2. a merge cancelled half-way: no temp file left, the open files as they were.
 // Memory over all of it: every process together under the 0.11.0 release check's 4.2 GB, no engine stopped.
 // Generated files only.
@@ -66,6 +68,9 @@ const watch = setInterval(async () => {
     peak = Math.max(peak, m);
   } catch { /* closing */ }
 }, 1000);
+// (the batch engine's memory during the merge: the figure each of its answers carries - PLAN 10.5; none on older code)
+let batchPeak = 0;
+const batchWatch = setInterval(async () => { try { batchPeak = Math.max(batchPeak, await E(() => window.__gcc.engines.batcher.heap || 0)); } catch { /* closing */ } }, 1000);
 app.process().stdout?.on('data', (b) => { if (/exited 70|restarted \(exit 70\)/.test(String(b))) exits++; });
 const combine = (list) => Promise.all(list.map((f) => new Promise((res) => { const c = spawn(ELECTRON, [resolve('.'), '--no-sandbox', '--profile=combbig', '--combine', f], { stdio: 'ignore' }); c.on('exit', res); c.on('error', res); })));
 
@@ -78,6 +83,13 @@ await win.locator('.modal .btn.primary:not([disabled])').click({ timeout: 120000
 const merged = await until(() => E((n) => window.__gcc.active()?.pages.length === n, expect), 30 * 60000);
 ok(!!merged, `40 files (${(total / GB).toFixed(2)} GB) merged and opened in a new tab: ${expect} pages, ${Math.round((Date.now() - t0) / 1000)} s`);
 const counts2 = counts, expect2 = expect;
+// ---- the batch engine did the merge: 10 s later it has given its memory back, and still works
+clearInterval(batchWatch);
+await sleep(10000);
+const batchRss = await E(() => window.__gcc.engines.batcher.call('memory'));
+console.log(`  batch engine: peak MuPDF memory ${Math.round(batchPeak / 2 ** 20)} MB during the merge, ${Math.round(batchRss / 2 ** 20)} MB (process) 10 s after it`);
+ok(batchRss < 400 * 2 ** 20, `the batch engine is under 400 MB 10 s after the Combine (${Math.round(batchRss / 2 ** 20)} MB)`);
+ok((await E((f) => window.__gcc.engines.muBatch('pageCountOf', { $file: { path: f } }), files[1])) > 0, 'the next batch job works');
 // ---- pages of the first, a middle and the last file drawn
 const firstOf = (k) => counts2.slice(0, k).reduce((a, b) => a + b, 0);
 for (const [what, pg] of [['first file', 0], ['a scan in the middle', firstOf(14) + 7], ['the last file', expect2 - 1]]) {

@@ -9,6 +9,7 @@ import type { SelItem } from './Viewer';
 import { FMT_DEFAULTS } from './geom';
 import type { RGB, AnnotData, AnnotSpec } from '../engine/mu';
 import { markupName } from './Side';
+import { EndsPicker } from './lineends';
 
 export type RibbonTab = 'file' | 'home' | 'comment' | 'measure' | 'edit' | 'organize' | 'protect' | 'ocr' | 'ai' | 'batch';
 
@@ -487,10 +488,7 @@ function StyleGroup({ style, kind, label, set, disabled, title }: { style: Style
           {!kind.markup && !kind.picture && <label className="rchk"><input type="checkbox" checked={style.dash} onChange={(e) => set({ dash: e.target.checked })} /> Dashed</label>}
           {kind.cloud && !textish && <label className="rchk"><input type="checkbox" checked={style.cloudy > 0} onChange={(e) => set({ cloudy: e.target.checked ? 1 : 0 })} /> Cloud edge</label>}
           {lineish && <span className="srow"><span className="rlab">Ends</span>
-            <select className="input xs" value={style.le.join('|')} onChange={(e) => set({ le: e.target.value.split('|') as [string, string] })}>
-              <option value="None|None">— none</option><option value="None|ClosedArrow">→ arrow</option><option value="None|OpenArrow">⇾ open arrow</option>
-              <option value="ClosedArrow|ClosedArrow">↔ both</option><option value="OpenArrow|OpenArrow">⇿ open both</option><option value="Circle|ClosedArrow">●→</option><option value="Slash|Slash">/ ticks /</option><option value="Butt|Butt">| dimension |</option>
-            </select>
+            <EndsPicker value={style.le} onChange={(le) => set({ le })} />
           </span>}
         </div>
       </div>

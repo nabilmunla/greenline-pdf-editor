@@ -46,7 +46,9 @@ How: pages are read from disk only as they're needed, never the whole file at on
 
 ## Private by design
 
-Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, the AI assistant only when you use it, problem reports only when you send them (see below), and the anonymous user count (see below; you can turn it off).
+Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, the AI assistant only when you use it, problem reports only when you send them (see below), the anonymous user count (see below; you can turn it off), and, on Linux, the spelling check's dictionary.
+
+**Spelling check on Linux.** The first time it is needed, the app downloads the dictionary for your language from Google's servers. This is how the browser engine inside the app gets its dictionaries, and Google sees your internet address and the language asked for, as with any download. The words you type are checked on your PC and are not sent anywhere. On Windows the app uses Windows' own spelling checker; a dictionary is downloaded the same way only if Windows has none for your language.
 
 ## Counting users
 

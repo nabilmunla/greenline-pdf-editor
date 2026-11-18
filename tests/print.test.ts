@@ -225,3 +225,92 @@ test('print file: a long job of pictures is written in pieces (each picture out 
   assert.ok(spilled > 40 * 100_000, '40 sheets of pictures went out: ' + spilled);
   assert.equal(biggestKept, 0, 'no picture kept in the engine');
 });
+
+// ---------------------------------------------------------------- a big print outside the editing engine (PLAN 10.12)
+
+/** six A3 sheets, each with a word on layer A and one on layer B (both on in the file) */
+function layeredSet(): Uint8Array {
+  const d = new mupdf.PDFDocument();
+  const f = d.addSimpleFont(new mupdf.Font('Helvetica'));
+  const mk = (name: string) => { const g = d.newDictionary(); g.put('Type', d.newName('OCG')); g.put('Name', d.newString(name)); return d.addObject(g); };
+  const la = mk('Layer A'), lb = mk('Layer B');
+  for (let i = 0; i < 6; i++) {
+    const props = d.newDictionary(); props.put('LA', la); props.put('LB', lb);
+    const fonts = d.newDictionary(); fonts.put('F1', f);
+    const res = d.newDictionary(); res.put('Font', fonts); res.put('Properties', props);
+    d.insertPage(-1, d.addPage([0, 0, 1191, 842], i === 3 ? 90 : 0, res, `2 w 20 20 1151 802 re S BT /F1 30 Tf 80 700 Td (SHEET${i + 1}) Tj ET /OC /LA BDC BT /F1 30 Tf 80 600 Td (ALAYERWORD) Tj ET EMC /OC /LB BDC 1 0 0 rg 400 200 300 200 re f BT /F1 30 Tf 80 500 Td (BLAYERWORD) Tj ET EMC`));
+  }
+  const ocp = d.newDictionary(); const ocgs = d.newArray(); ocgs.push(la); ocgs.push(lb); ocp.put('OCGs', ocgs);
+  const D = d.newDictionary(); D.put('Order', ocgs); ocp.put('D', D);
+  d.getTrailer().get('Root').put('OCProperties', ocp);
+  return d.saveToBuffer('').asUint8Array().slice();
+}
+/** each sheet's box and its content (the streams of /Contents, decoded and joined) */
+function sheets(bytes: Uint8Array): { box: string; content: string; text: string }[] {
+  const d = mupdf.Document.openDocument(bytes, 'application/pdf') as mupdf.PDFDocument;
+  const out: { box: string; content: string; text: string }[] = [];
+  for (let i = 0; i < d.countPages(); i++) {
+    const po = d.findPage(i);
+    const c = po.get('Contents');
+    const parts: string[] = [];
+    const one = (s: mupdf.PDFObject) => parts.push(s.readStream().asString());
+    if (c.isArray()) for (let k = 0; k < c.length; k++) one(c.get(k)); else one(c);
+    out.push({ box: po.get('MediaBox').toString(), content: parts.join('\n'), text: d.loadPage(i).toStructuredText('').asText() });
+  }
+  d.destroy?.();
+  return out;
+}
+
+test('print file (10.12): made from the open document or from its copy in steps, page for page the same; a big one written in pieces', () => {
+  mu.open('big', layeredSet());
+  // unsaved changes (markups) and a layer turned off in the window
+  mu.createAnnot('big', 0, { type: 'FreeText', rect: [600, 600, 1000, 660], contents: 'MARKUPONE', font: { size: 24, color: [1, 0, 0] }, kind: 'textbox' });
+  mu.createAnnot('big', 3, { type: 'FreeText', rect: [100, 100, 500, 160], contents: 'MARKUPTWO', font: { size: 24, color: [0, 0, 1] }, kind: 'textbox' });
+  const lb = mu.layers('big').find((l) => l.name === 'Layer B')!;
+  assert.ok(mu.setLayersShown('big', { [lb.num]: false }), 'layer B off in the window');
+  const opts = { pages: [0, 2, 3, 5, 0], paper: A4, orient: 'auto' as const, scale: 'fit' as const, margin: 14, markups: true };
+  const open = sheets(mu.printFile('big', opts));
+  // the window's copy (as drawSnapshot writes it: unsaved changes in it) and the layers it shows
+  let copy = new Uint8Array(0);
+  mu.snapshotTo('big', (v) => { copy = v.slice(); }, true);
+  const layers = mu.layerOverlay('big');
+  assert.deepEqual(layers, { [lb.num]: false });
+  const run = () => {
+    const it = mu.printFrom(copy, opts, layers);
+    let steps = 0, pieces = 0;
+    const parts: Uint8Array[] = [];
+    const put = (v: Uint8Array) => { pieces++; parts.push(v.slice()); };
+    let r = mu.withSink(put, () => it.next());
+    while (!r.done) { steps++; r = mu.withSink(put, () => it.next()); }
+    assert.ok(r.value instanceof Uint8Array && r.value.length === 0, 'the file went to the sink');
+    return { bytes: new Uint8Array(Buffer.concat(parts)), steps, pieces };
+  };
+  const fromCopy = run();
+  assert.ok(fromCopy.steps >= 1, 'made in steps: ' + fromCopy.steps);
+  assert.equal(fromCopy.pieces, 1, 'a small one: MuPDF\'s save, as before');
+  const copied = sheets(fromCopy.bytes);
+  assert.equal(copied.length, 5);
+  for (let i = 0; i < open.length; i++) {
+    assert.equal(copied[i].box, open[i].box, 'sheet ' + (i + 1) + ': the same box');
+    assert.equal(copied[i].content, open[i].content, 'sheet ' + (i + 1) + ': the same content');
+  }
+  assert.ok(open[0].text.includes('MARKUPONE') && open[2].text.includes('MARKUPTWO'), 'the markups printed');
+  assert.ok(open.every((s) => s.text.includes('ALAYERWORD') && !s.text.includes('BLAYERWORD')), 'layer B off, layer A on');
+  assert.ok(copied.every((s, i) => s.text === open[i].text), 'the copy prints the same words');
+  // past the piece-wise limit (lowered here): written object by object, the same sheets
+  mu.setStreamSaveForTests(1000);
+  try {
+    const big = run();
+    assert.ok(big.pieces > 10, 'written in pieces: ' + big.pieces);
+    const s2 = sheets(big.bytes);
+    assert.equal(s2.length, 5);
+    for (let i = 0; i < open.length; i++) assert.ok(s2[i].box === open[i].box && s2[i].content === open[i].content && s2[i].text === open[i].text, 'sheet ' + (i + 1) + ' written in pieces: the same');
+  } finally { mu.setStreamSaveForTests(0); }
+  // stopped half-way (the window's Cancel): everything let go, no file
+  const it = mu.printFrom(copy, opts, layers);
+  let wrote = 0;
+  mu.withSink(() => { wrote++; }, () => it.next());
+  it.return(new Uint8Array(0));
+  assert.equal(wrote, 0, 'nothing written');
+  mu.close('big');
+});

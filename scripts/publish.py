@@ -2,6 +2,14 @@
 #   publish-v<version>/  latest.json, app-v<version>.zip, PDF Editor Setup <version>.exe,
 #                        source-v<version>.zip, HOW-TO-PUBLISH.txt
 #   python3 scripts/publish.py <outdir>
+#   python3 scripts/publish.py <outdir> --bridge <new folder> --from-runtime <electron version>
+#        (Greenline build only, PLAN 11.3) after the normal publish also writes <new folder>: the same
+#        app package, the Greenline setup and a latest.json signed as build "company" - the last release
+#        on the company's share, which moves the company copies to Greenline. Refused unless Electron here
+#        is the version the share's copies run (--from-runtime): another runtime is not installed by an
+#        app package alone.
+#   python3 scripts/publish.py <outdir> --bridge-only --bridge <new folder> --from-runtime <v>
+#        only the bridge folder, from the publish-v<version> already in <outdir> (nothing is built)
 # Needs a built dist/ (npm run build). Downloads the Windows Electron runtime once (checked
 # against Electron's published SHA-256 list) into ~/.cache/pdfed.
 import hashlib, json, os, re, shutil, subprocess, sys, urllib.request, datetime
@@ -13,6 +21,112 @@ out_root = os.path.abspath(sys.argv[1])
 pkg = json.load(open(os.path.join(ROOT, 'package.json')))
 ver = pkg['version']
 evr = json.load(open(os.path.join(ROOT, 'node_modules', 'electron', 'package.json')))['version']
+def opt(name):
+    return next((sys.argv[i + 1] for i, a in enumerate(sys.argv[:-1]) if a == name), None)
+
+def die(msg):
+    print('publish.py: ' + msg, file=sys.stderr)
+    sys.exit(1)
+
+BRIDGE = opt('--bridge')
+BRIDGE_ONLY = '--bridge-only' in sys.argv
+if BRIDGE is not None or BRIDGE_ONLY or '--from-runtime' in sys.argv:
+    # (PLAN 11.0, before anything is built or written)
+    if not BRIDGE:
+        die('--bridge needs the folder to write the bridge into')
+    if not pkg.get('brand'):
+        die('--bridge is only for the Greenline build (run it in the Greenline export)')
+    FROM_RT = opt('--from-runtime')
+    if not FROM_RT:
+        die('--bridge needs --from-runtime <the Electron version the company copies run, e.g. 44.10.2>')
+    if FROM_RT != evr:
+        die(f'this build runs Electron {evr} but the company copies run {FROM_RT}: an app package alone cannot change the runtime, '
+            'so the bridge would not move anyone by itself. Keep Electron ' + FROM_RT + ' for this release (PLAN 11.0).')
+
+def make_bridge(pub, bdir):
+    """PLAN 11.3: the last release on the company's share. The Greenline release's own app package, byte for byte, and
+    the Greenline setup, under a latest.json equal to the GitHub one but signed as build "company" (0.12.1 reads only
+    that label, never the package's own brand), without the Linux entries, the notice's sentence first in the notes."""
+    bdir = os.path.abspath(bdir)
+    if os.path.exists(bdir) and os.listdir(bdir):
+        die(f'{bdir} is not empty - give a new folder (nothing is ever written over a share or an older bridge)')
+    name = pkg.get('displayName') or pkg.get('productName') or 'PDF Editor'
+    appz, setupx = f'app-v{ver}.zip', f'{name} Setup {ver}.exe'
+    for f in ('latest.json', appz, setupx):
+        if not os.path.isfile(os.path.join(pub, f)):
+            die(f'{os.path.join(pub, f)} is missing - run the normal publish first')
+    base = json.loads(json.load(open(os.path.join(pub, 'latest.json'), encoding='utf-8'))['signed'])
+    if base.get('build') != 'greenline' or base.get('version') != ver:
+        die(f'{pub}/latest.json is not the Greenline release of {ver}')
+    # the sentence is the notice's own (src/ui/movedtext.ts - ONE place for both, so the two cannot differ)
+    mt = open(os.path.join(ROOT, 'src', 'ui', 'movedtext.ts'), encoding='utf-8').read()
+    m = re.search(r"export const MOVED_BODY = '((?:[^'\\]|\\.)*)'", mt)
+    if not m:
+        die('src/ui/movedtext.ts has no MOVED_BODY')
+    line = m.group(1).replace("\\'", "'")
+    head = {'About this update': [line]}
+    groups = {**head, **(base.get('groups') or {"What's new": base.get('notes') or []})}
+    history = {v: ({**head, **g} if v == ver and isinstance(g, dict) else g) for v, g in (base.get('history') or {}).items()}
+    latest = {**{k: v for k, v in base.items() if k not in ('linux', 'groups', 'history', 'notes', 'build')},
+              'notes': ([line] + [x for x in (base.get('notes') or []) if x != line])[:6], 'groups': groups, 'history': history, 'build': 'company'}
+    os.makedirs(bdir, exist_ok=True)
+    shutil.copyfile(os.path.join(pub, appz), os.path.join(bdir, appz))
+    shutil.copyfile(os.path.join(pub, setupx), os.path.join(bdir, setupx))
+    unsigned = os.path.join(bdir, 'latest.json.unsigned')
+    with open(unsigned, 'w') as f:
+        json.dump(latest, f, indent=2)
+    try:
+        subprocess.run(['node', os.path.join(ROOT, 'scripts', 'sign-latest.mjs'), unsigned], cwd=ROOT, check=True)
+    except BaseException:
+        os.remove(unsigned)
+        raise
+    os.replace(unsigned, os.path.join(bdir, 'latest.json'))
+    open(os.path.join(bdir, 'README.txt'), 'w', encoding='utf-8').write(f'''{name} {ver} - the last release for the company's updates folder (the bridge)
+
+What this does: the company copies (0.12.1) find this release on the share at their next check and take it as an
+ordinary update. They come back as {name} and from then on get their updates from the internet, not from the
+share. Files, settings and the way PDFs open stay as they are. The shortcut and its icon keep the old name
+(PDF Editor) until someone runs a {name} setup on that PC; nobody has to.
+
+The order (don't change it):
+1. {name} {ver} is published on GitHub and marked as the latest release (HOW-TO-PUBLISH.txt of the publish folder).
+2. It has been tried on a test folder with a company copy, and every line of tests/BRIDGE-CHECK.md passed.
+   Nothing goes on the share before that.
+3. On the share, make a folder named "previous" inside the updates folder and copy into it the 0.12.1 setup
+   and the latest.json that are there now. They are two of the ways back below. This script does not do it for you.
+4. Copy into the updates folder on the share:
+     {appz}
+     {setupx}
+   and LAST:
+     latest.json
+   Until latest.json is replaced, no PC moves.
+5. Leave latest.json there for good: a PC that is switched on only next year still moves.
+6. New PCs install from the GitHub page, not from the share.
+
+Three ways back:
+A. Stop the rest. Put the latest.json from "previous" back in the updates folder. PCs that have not moved yet stay
+   on 0.12.1. PCs that have already moved no longer read the share: a fault on those is fixed by a new release on
+   GitHub, not from here.
+B. One PC, by its user. For 30 days after the move: Settings > Updates > Go back to 0.12.1. The PC reads the share
+   again, so do A first, or it will be offered {ver} again. After 30 days the app forgets the share and this
+   button is gone.
+C. One PC, by hand, at any time. Run the 0.12.1 setup from "previous". It installs over the {name} copy;
+   files, settings and the way PDFs open stay. Afterwards look at Settings > Updates: the update location should
+   be the share if that PC is to keep reading it. Do A first here too, or it will be offered {ver} again.
+
+If the update does not finish on a PC, there is nothing to undo: the PC stays on 0.12.1 and says the update did not
+finish. Nothing was moved.
+
+latest.json is signed: don't edit it by hand - an edited one is refused. The signing key stays with the developer copy.
+''')
+    print('bridge folder written:', bdir)
+    print('\n'.join(f'  {f}  {os.path.getsize(os.path.join(bdir, f)) // 1024} KB' for f in sorted(os.listdir(bdir))))
+
+if BRIDGE_ONLY:
+    subprocess.run(['node', os.path.join(ROOT, 'scripts', 'sign-latest.mjs'), '--check'], cwd=ROOT, check=True)
+    make_bridge(os.path.join(out_root, f'publish-v{ver}'), BRIDGE)
+    sys.exit(0)
+
 # the signing key first (there, and the one the app trusts): found missing only after the whole
 # build, it left a complete-looking folder with an unsigned latest.json
 subprocess.run(['node', os.path.join(ROOT, 'scripts', 'sign-latest.mjs'), '--check'], cwd=ROOT, check=True)
@@ -141,6 +255,8 @@ except BaseException:
     os.remove(unsigned)
     raise
 os.replace(unsigned, os.path.join(out, 'latest.json'))
+if BRIDGE:
+    make_bridge(out, BRIDGE)
 FEED = pkg.get('updateFeed') or ''
 if FEED:
     # (the public build: a GitHub release, not a shared folder)

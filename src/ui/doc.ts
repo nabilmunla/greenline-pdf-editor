@@ -1,12 +1,13 @@
 // One open PDF (one tab). MuPDF (editing worker) holds the document of record; the
 // PDFium workers hold a copy for drawing, refreshed when page content changes.
 import { gcc, baseName, dirName, joinPath } from './api';
-import { mu, muFile, muBatch, renderers, editor, onEngineRestart, pinHeavyPage, clearPins } from './engines';
+import { mu, muFile, muBatch, renderers, editor, onEngineRestart, pinHeavyPage, clearPins, wasStuckKill, killEngine } from './engines';
 import type { EngineClient } from '../engine/rpc';
 import { tiles } from './tiles';
 import { offOf } from '../engine/off';
 import { forgetDragged } from './pagedrag';
 import { fileArg, isEngineDown, engineDown, type FileRef } from '../engine/rpc';
+import type { LockedBig } from '../engine/mu';
 import type { AnnotData, PageInfo, AnnotSpec, Rect, Pt, TBlock, TextStyle, PageMark, MarkContext, SaveOpts, OutNode, LayerInfo } from '../engine/mu';
 
 export type { AnnotData, PageInfo, AnnotSpec, Rect, Pt };
@@ -20,6 +21,8 @@ const tempsOf = (f: FileSpec | null | undefined) => (f ? [f.delta, f.path, ...(f
 /** open documents (so they can be reopened when an engine had to restart) */
 const openDocs = new Set<PdfDoc>();
 onEngineRestart(async (c, kind) => {
+  // (the person restarted an editing engine that had stopped answering: the message says what it cost)
+  if (wasStuckKill(c) && kind === 'edit') stuckRestart = true;
   if (kind === 'batch') return;
   for (const d of openDocs) {
     try {
@@ -48,6 +51,30 @@ editor.onNotice = (n) => {
     await editor.call('exitNow').catch(() => {});
   })();
 };
+/** the person restarted the editing engine because it stopped answering (PLAN 10.4) */
+let stuckRestart = false;
+/** true once after such a restart (its own message: what was lost) */
+export const wasStuckRestart = () => { const s = stuckRestart; stuckRestart = false; return s; };
+/**
+ * The person agreed to restart the editing engine (PLAN 10.5: its memory is nearly used up): a recovery
+ * copy of every changed file first (as every minute), then the engine is ended and the files reopen
+ * from those copies through the path a crash uses - still marked changed, nothing of the person's
+ * overwritten, the undo history gone. A copy that cannot be written: nothing is restarted, and the
+ * error says which file and why.
+ */
+export async function restartEditingEngine(): Promise<void> {
+  // (every changed file in the first round; in the second only what changed while a big file's copy took seconds)
+  for (const again of [false, true]) {
+    for (const d of [...openDocs]) {
+      if (!d.dirty || (again && !d.changedSince())) continue;
+      try { await d.writeRecoveryNow(); } catch (e) { throw new Error(`The automatic copy of ${d.name} could not be written (${String((e as Error)?.message || e).slice(0, 120)}), so the engine was not restarted. Save your files, then try again.`); }
+    }
+  }
+  planned = true;
+  gcc.log('editing engine: restarted by request');
+  await killEngine(editor);
+}
+
 /** true once after a planned restart (no "ran out of memory" message) */
 export const wasPlannedRestart = () => { const p = planned; planned = false; return p; };
 /** after a planned restart: true once if some unsaved work could not be kept for it */
@@ -120,6 +147,11 @@ import { orientScale, inViewport } from './geom';
 /** a file this big is always written in full by the editing engine (mu.ts STREAM_SAVE), even
  *  when only changes were asked for */
 const FULL_REWRITE = 350e6;
+/** calls that bring pages in from another file (after them the engine may look at pages: mu.lookFrom) */
+const INSERTS = new Set(['insertFrom', 'insertFromOpen', 'replacePages']);
+/** Extract from a file this big, or of pages with this many markup objects, goes in steps to disk
+ *  (mu.extractSteps; PLAN 10.3b) */
+const EXTRACT_BIG = 64 * 2 ** 20, EXTRACT_MARKUPS = 20000;
 
 export class PdfDoc {
   id = 'd' + seq++ + '-' + Math.random().toString(36).slice(2, 7);
@@ -150,6 +182,8 @@ export class PdfDoc {
   repaired = false;
   /** repaired, and something was missing (see OpenResult.lossy): the user is told */
   lossy = false;
+  /** a protected and / or signed file over 1.2 GB: saving into it may run out of memory (PLAN 10.7b) - the window says so on open */
+  lockedBig: LockedBig | '' = '';
   hasForms = false;
   /** carries a digital signature (saves append to it where they can, so it stays valid) */
   signed = false;
@@ -211,7 +245,7 @@ export class PdfDoc {
    */
   async load(src: FileSpec | Uint8Array, password?: string, temp = false): Promise<'ok' | 'password'> {
     const user = await gcc.user(); // (the author's name, else the Windows user - not the whole settings file)
-    const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; look?: boolean; hasForms: boolean; size?: number }>('open', this.id, toArg(src), password, user);
+    const r = await mu<{ pages: PageInfo[]; needsPassword: boolean; repaired: boolean; lossy?: boolean; fixedTurn?: boolean; heavy?: number; look?: boolean; hasForms: boolean; size?: number; lockedBig?: LockedBig }>('open', this.id, toArg(src), password, user);
     if (r.needsPassword) return 'password';
     if (temp && !(src instanceof Uint8Array)) for (const t of tempsOf(src)) this.temps.add(t);
     this.src = src;
@@ -219,15 +253,14 @@ export class PdfDoc {
     this.pages = r.pages;
     this.repaired = r.repaired;
     this.lossy = !!r.lossy;
+    this.lockedBig = r.lockedBig ?? '';
     this.heavy = r.heavy || 0;
     this.hasForms = r.hasForms;
     this.signed = !!(r as { signed?: boolean }).signed;
     this.annRev = r.pages.map(() => 0);
     // (3.2: heavy pages are looked at before the drawing engines read them)
-    this.look = !!r.look;
-    // (PLAN 5.4: PDFED_OFF=prelook - known before the first save, which can't wait to ask)
-    if (this.look) void Promise.resolve(gcc.off?.()).then((v) => { this.noPrelook = offOf(v).has('prelook'); }, () => {});
-    if (this.look) tiles.setGate(this.id, { ready: (p) => { if (this.looked.has(p)) return true; this.askLook(p); return false; }, busy: (p) => this.preparing.has(p) });
+    this.look = false;
+    if (r.look) this.startLooking();
     this.crev = r.pages.map((_, k) => -(k + 1));
     this.size = src instanceof Uint8Array ? src.length : r.size ?? 0;
     // a repaired file: give PDFium MuPDF's clean copy (PDFium may choke on the broken one)
@@ -608,6 +641,9 @@ export class PdfDoc {
     if (shows) this.changing++;
     try {
       const r = await mu<T>(method, this.id, ...args);
+      // (pages from another file may be heavy sheets: the engine looks at them from now on, and so
+      // does the window - before the new copy below is drawn; PLAN 10.10b)
+      if (!this.look && INSERTS.has(method) && (await mu<boolean>('looking', this.id).catch(() => false))) this.startLooking();
       // (page scales and viewports are kept by page number: they moved with the pages)
       if ('order' in ch || 'insert' in ch || 'remove' in ch || 'all' in ch) this.data = await mu<DocData>('getData', this.id).catch(() => this.data);
       // kept with the undo step: undo/redo then redraw only what this changed
@@ -672,7 +708,7 @@ export class PdfDoc {
   private lookGen = 0;
   private lookRun: Promise<void> | null = null;
   /** heavy pages waiting for their merge (and the new drawing copy), in order */
-  private mergeQueue: { page: number; key: string; streams: number[]; size: number; gen: number; rev: number }[] = [];
+  private mergeQueue: { page: number; key: string; streams: number[]; size: number; local?: boolean; gen: number; rev: number }[] = [];
   private shownQueue = new Map<number, { gen: number; rev: number }>();
   /** per page, bumped when its content changes in place (a 'pages' change: an edit, a rotation):
    *  a look or merge started before it is for the old content - that page is looked at again
@@ -687,6 +723,14 @@ export class PdfDoc {
    *  by a full save - can't match another content): attached again after the editing engine
    *  restarted; emptied when the file is opened again from a new copy */
   private merges = new Map<string, { streams: number[]; file: { path: string; size: number } }>();
+  /** pages are looked at before the drawing engines read them: from opening a file big enough, or
+   *  (PLAN 10.10b) from an insert that may have brought a heavy sheet into a light one */
+  private startLooking() {
+    this.look = true;
+    // (PLAN 5.4: PDFED_OFF=prelook - known before the first save, which can't wait to ask)
+    void Promise.resolve(gcc.off?.()).then((v) => { this.noPrelook = offOf(v).has('prelook'); }, () => {});
+    tiles.setGate(this.id, { ready: (p) => { if (this.looked.has(p)) return true; this.askLook(p); return false; }, busy: (p) => this.preparing.has(p) });
+  }
   /** the editing engine restarted: every page is looked at again (its attachments are gone) */
   lookAgain() { this.looked.clear(); this.lookGen++; }
   /** pages changed (moved, added, removed, replaced): what's at those numbers is looked at again
@@ -778,7 +822,7 @@ export class PdfDoc {
   private releaseLookWaiters() { for (const p of [...this.lookWaiters.keys()]) this.markLooked(p); }
   /** which of these pages are heavy: the others are drawn at once; the heavy ones go to the merge run */
   private async lookAt(pages: number[]) {
-    type C = { page: number; key: string; streams: number[]; size: number };
+    type C = { page: number; key: string; streams: number[]; size: number; local?: boolean };
     const gen = this.lookGen, revs = new Map(pages.map((p) => [p, this.rev(p)]));
     const r = await mu<{ candidates: C[]; shown: number[] }>('heavyCandidates', this.id, pages).catch((e) => { gcc.log('heavy look: ' + e); return { candidates: [] as C[], shown: [] as number[] }; });
     if (gen !== this.lookGen) { this.lookAgainAt(pages); return; }
@@ -805,6 +849,20 @@ export class PdfDoc {
         let src: FileSpec | null | undefined;
         for (const c of batch) {
           if (this.closed) return;
+          if (c.local) {
+            // (PLAN 10.10: its line work is not in the file as opened - made or changed in this
+            // session - so the batch engine can't read it: merged in the editing engine, which
+            // attaches it itself. Not kept in `merges`: those numbers are this session's only)
+            const t0 = performance.now();
+            const f = await mu<{ path: string; size: number } | null>('mergeLocal', this.id, c.page).catch((e) => { gcc.log('heavy page ' + (c.page + 1) + ': ' + e); return null; });
+            if (f) {
+              this.temps.add(f.path);
+              gcc.log(`heavy page ${c.page + 1} merged for display in ${Math.round(performance.now() - t0)} ms (editing engine: changed in this session)`);
+              redraw = true;
+              await pinHeavyPage(this.id, c.page);
+            }
+            continue;
+          }
           const key = c.key + '@' + c.size;
           let m = this.merges.get(key);
           if (!m) {
@@ -912,8 +970,17 @@ export class PdfDoc {
     return this.content<number>('markPages', { pages }, marks, ctx);
   }
 
-  /** the pages as a new PDF in a temp file (path) */
-  async extract(pages: number[]): Promise<string> { return (await muFile<FileRef>('extract', this.id, pages)).$file.path; }
+  /**
+   * The pages as a new PDF in a temp file (path). From a big file, or pages with many markups
+   * (links: a CAD set has hundreds of thousands), in steps and to disk as Combine does (PLAN
+   * 10.3b): copied at once they could take the editing engine past its memory. `job`: a name
+   * editor.cancel(job) can stop it by (that way only).
+   */
+  async extract(pages: number[], job = 'extract:' + this.id + ':' + Date.now()): Promise<string> {
+    const big = this.size > EXTRACT_BIG || (await mu<number>('markupCount', this.id, pages)) > EXTRACT_MARKUPS;
+    if (big) return (await mu<FileRef>('extractBig', job, this.id, pages)).$file.path;
+    return (await muFile<FileRef>('extract', this.id, pages)).$file.path;
+  }
 
   async undo() { await this.step('undo'); }
   async redo() { await this.step('redo'); }
@@ -1050,6 +1117,10 @@ export class PdfDoc {
     catch (e) {
       void gcc.dropTemp([part]);
       if (/memory|Aborted/i.test(String(e))) throw e;
+      // (PLAN 10.6: too big to open again - the temp folder would only write it all a second time)
+      if (/could not be opened again/.test(String(e))) throw e;
+      // (PLAN 10.7b: a big protected or signed file ran out of memory - the temp folder would only do it again)
+      if (/too big to save here/.test(String(e))) throw e;
       // the editing engine went down while saving: trying again at once reached the new engine
       // before it had the file open again ("Document is not open" was all the person saw)
       if (isEngineDown(e)) throw engineDown(new Error('Saving was cut short: the editing engine had to start again. Nothing was written - save again in a moment.'));

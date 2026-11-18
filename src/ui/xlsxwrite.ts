@@ -12,12 +12,17 @@ export interface XSheet {
   widths?: number[];
   /** number of header rows to freeze (and filter on the last of them) */
   header?: number;
+  /** freeze the header rows but put no filter on them (a table with a totals row) */
+  noFilter?: boolean;
 }
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
 const col = (i: number) => { let s = ''; i++; while (i) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); } return s; };
 // style index in cellXfs below
 const STYLE: Record<XStyle, number> = { h: 1, b: 2, n2: 3, n3: 4, n0: 5, b2: 6, i: 7, pct: 8, n1: 9, n4: 10 };
+
+/** the most cells in a row (a loop: Math.max with one argument a row threw past ~125,000 rows - sweep 0.13) */
+function widest(rows: XCell[][]): number { let w = 0; for (const r of rows) if (r.length > w) w = r.length; return w; }
 
 export function writeXlsx(sheets: XSheet[]): Uint8Array {
   const files: Record<string, Uint8Array> = {};
@@ -40,7 +45,7 @@ export function writeXlsx(sheets: XSheet[]): Uint8Array {
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>` +
       names.map((n, i) => `<sheet name="${esc(n)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
       `</sheets>` +
-      (sheets.some((s) => s.header) ? `<definedNames>` + sheets.map((s, i) => (s.header && s.rows.length > s.header ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">'${esc(names[i].replace(/'/g, "''"))}'!$A$${s.header}:$${col(Math.max(0, ...s.rows.map((r) => r.length)) - 1 || 0)}$${s.rows.length}</definedName>` : '')).join('') + `</definedNames>` : '') +
+      (sheets.some((s) => s.header && !s.noFilter) ? `<definedNames>` + sheets.map((s, i) => (s.header && !s.noFilter && s.rows.length > s.header ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">'${esc(names[i].replace(/'/g, "''"))}'!$A$${s.header}:$${col(widest(s.rows) - 1 || 0)}$${s.rows.length}</definedName>` : '')).join('') + `</definedNames>` : '') +
       `</workbook>`,
   );
   files['xl/_rels/workbook.xml.rels'] = strToU8(
@@ -88,8 +93,8 @@ export function writeXlsx(sheets: XSheet[]): Uint8Array {
       out.push('</row>');
     });
     out.push('</sheetData>');
-    if (sh.header && sh.rows.length > sh.header) {
-      const w = Math.max(...sh.rows.map((r) => r.length));
+    if (sh.header && !sh.noFilter && sh.rows.length > sh.header) {
+      const w = widest(sh.rows);
       out.push(`<autoFilter ref="A${sh.header}:${col(w - 1)}${sh.rows.length}"/>`);
     }
     out.push('</worksheet>');

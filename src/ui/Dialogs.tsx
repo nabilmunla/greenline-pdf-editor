@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, type Toast } from './Modal';
 import { Ico } from './icons';
 import { gcc, baseName, dirName, joinPath, type AppInfo } from './api';
-import { mu, muBatch, muBatchFile, renderers, onEngineRestart } from './engines';
+import { mu, muBatch, muBatchCancel, muBatchFile, renderers, onEngineRestart } from './engines';
 import { fileArg, type FileRef } from '../engine/rpc';
 import { orientScale, type PdfDoc, type Scale, type Viewport } from './doc';
 import type { Dialog, Settings } from './App';
@@ -19,6 +19,7 @@ import { excelCell } from './table';
 import { ocrPages, ocrLangOf, type OcrLang } from './ocr';
 import { parseRanges, toRanges, planOutputs, uniqueNames, typedNumber, pdfDate, type OutMode, type OutPlan } from './dlgutil';
 import { CountDlg, PrivacyRow } from './Count';
+import { MovedDlg } from './Moved';
 import { UpdatesSection, ReportsRow, WhatsNew, notesOf, noteVersions } from './Updates';
 import { PrintDlg } from './PrintDlg';
 import { CountTagDlg } from './CountTag';
@@ -78,6 +79,7 @@ export function Dialogs(p: Props) {
     case 'print': return p.doc ? <PrintDlg doc={p.doc} page={d.page} area={d.area} pageSel={p.pageSel} settings={p.settings.print || {}} save={(s) => p.saveSettings({ print: s })} close={close} toast={p.toast} fail={p.fail} /> : null;
     case 'settings': return <SettingsDlg {...p} />;
     case 'count': return <CountDlg close={close} fail={p.fail} />;
+    case 'moved': return <MovedDlg close={close} />;
     case 'whatsnew': return <WhatsNewDlg {...p} back={!!d.back} />;
     case 'licences': return <LicencesDlg onClose={() => p.setDialog({ k: 'settings' })} />;
     case 'report': return <ReportDlg {...p} shot={d.shot} />;
@@ -765,11 +767,14 @@ function MergeDlg(p: Props & { files?: string[] }) {
   const [run, setRun] = useState<{ k: number; name: string; pages: number; phase: 'file' | 'write' | 'open' } | null>(null);
   const stop = useRef(false);
   const going = useRef(false);
+  /** the merge under way (Stop tells the engine at once - it is inside a file's call) */
+  const jobRef = useRef('');
   const go = async () => {
     if (going.current) return;
     going.current = true;
     stop.current = false;
     const job = 'merge-' + Date.now().toString(36);
+    jobRef.current = job;
     const temps: string[] = [];
     const list = files.slice();
     let done = 0;
@@ -786,7 +791,9 @@ function MergeDlg(p: Props & { files?: string[] }) {
         const open = p.docs.find((x) => x.path === f && (x.dirty || !!x.password));
         const src = open ? await open.fileForSave(open.password ? { decrypt: true } : {}) : f;
         if (open) temps.push(src);
-        const r = await muBatch<{ pages: number; total: number }>('mergeAdd', job, baseName(f), fileArg(src));
+        let r: { pages: number; total: number };
+        // (Stop made the engine give up inside this file: "The merge was stopped." - not an error)
+        try { r = await muBatch<{ pages: number; total: number }>('mergeAdd', job, baseName(f), fileArg(src)); } catch (e) { if (stop.current) break; throw e; }
         done = r.total;
       }
       if (stop.current) { void muBatch('mergeEnd', job).catch(() => {}); p.toast('Merge stopped – no file was made.', 'info'); return; }
@@ -818,6 +825,7 @@ function MergeDlg(p: Props & { files?: string[] }) {
     } finally {
       if (temps.length) void gcc.dropTemp(temps);
       going.current = false;
+      jobRef.current = '';
       setRun(null);
     }
   };
@@ -831,7 +839,7 @@ function MergeDlg(p: Props & { files?: string[] }) {
     <Modal title="Merge files" wide onClose={close} sub="In this order, into one new PDF (opens in a new tab). Markups come along."
       actions={<><label className="check" style={{ marginRight: 'auto' }}><input type="checkbox" checked={marks} disabled={!!run} onChange={(e) => setMarks(e.target.checked)} /> A bookmark for each file</label>
         {run
-          ? <button className="btn" onClick={() => { stop.current = true; }} disabled={run.phase !== 'file'}>Stop</button>
+          ? <button className="btn" onClick={() => { stop.current = true; if (jobRef.current) muBatchCancel(jobRef.current); }} disabled={run.phase !== 'file'}>Stop</button>
           : <button className="btn" onClick={close}>Cancel</button>}
         <button className="btn primary" disabled={!!run || files.length < 2 || bad.length > 0} onClick={() => void go()}>{run ? 'Merging…' : `Merge ${files.length} ${files.length === 1 ? 'file' : 'files'} (${total} pages)`}</button></>}>
       {bad.length > 0 && <p className="err">{bad.map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is too big for ' + APP_NAME + ' (4 GB or more)' : "can't be read as a PDF"}`).join('; ')}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}

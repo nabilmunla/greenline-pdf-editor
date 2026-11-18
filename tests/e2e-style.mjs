@@ -3,7 +3,8 @@
 // was; one undo step each. xvfb-run -a node tests/e2e-style.mjs
 import { _electron as electron } from 'playwright';
 import { resolve, join } from 'node:path';
-import { mkdirSync, rmSync, copyFileSync } from 'node:fs';
+import { mkdirSync, rmSync, copyFileSync, readFileSync } from 'node:fs';
+import * as mupdf from 'mupdf';
 
 const TMP = resolve('tests/tmp-style');
 rmSync(TMP, { recursive: true, force: true });
@@ -71,10 +72,38 @@ await win.locator('.ribbon [data-tool="arrow"]').first().click();
 await drag(120, 400, 380, 420);
 const arrow = await until(async () => (await annots()).find((a) => a.type === 'Line'), 5000, 'arrow');
 ok(await grp.locator('.rlabel', { hasText: /^Selected – / }).count() === 1, 'the arrow selected: the group edits it');
-const ends = grp.locator('select').filter({ has: win.locator('option[value="Slash|Slash"]') });
-await ends.selectOption('ClosedArrow|ClosedArrow');
-await until(async () => (await annots()).find((a) => a.id === arrow.id && a.le?.[0] === 'ClosedArrow' && a.le?.[1] === 'ClosedArrow'), 5000, 'ends');
-ok(true, 'Ends from the ribbon: arrow heads at both ends');
+// (each end on its own, 0.13: Start, swap, End - the old list could not make [Arrow, None])
+const eS = grp.locator('[data-end="start"]'), eE = grp.locator('[data-end="end"]'), eW = grp.locator('[data-end="swap"]');
+const leOf = async (id) => (await annots()).find((a) => a.id === id)?.le;
+const leIs = (id, s0, s1) => until(async () => { const l = await leOf(id); return l && l[0] === s0 && l[1] === s1; }, 5000, `le ${s0}/${s1}`);
+const savedLe = async () => {
+  await E(() => window.__gcc.active().save());
+  const doc = mupdf.Document.openDocument(readFileSync(F), 'application/pdf');
+  const an = doc.loadPage(0).getAnnotations().find((x) => x.getLineEndingStyles && x.hasLineEndingStyles() && x.getLineEndingStyles().end === 'None' && x.getLineEndingStyles().start !== 'None');
+  return an ? [an.getLineEndingStyles().start, an.getLineEndingStyles().end] : null;
+};
+const undo = async () => { await win.evaluate(() => document.activeElement?.blur()); await win.keyboard.press('Control+z'); await sleep(500); };
+ok(await eS.inputValue() === 'None' && await eE.inputValue() === 'ClosedArrow', 'a drawn arrow: Start None, End ClosedArrow');
+ok(await eS.locator('option').count() === 10 && await eE.locator('option').count() === 10, 'each select lists the ten styles');
+const rShows = (s0, s1) => until(async () => (await eS.inputValue()) === s0 && (await eE.inputValue()) === s1, 5000, `ribbon shows ${s0}/${s1}`);
+await eS.selectOption('ClosedArrow');
+await leIs(arrow.id, 'ClosedArrow', 'ClosedArrow'); await rShows('ClosedArrow', 'ClosedArrow');
+ok(true, 'Start -> ClosedArrow alone: [ClosedArrow, ClosedArrow]');
+await eE.selectOption('None');
+await leIs(arrow.id, 'ClosedArrow', 'None'); await rShows('ClosedArrow', 'None');
+ok(true, 'End -> None: [ClosedArrow, None] (the pair the old list could not make)');
+const sv = await savedLe();
+ok(!!sv && sv[0] === 'ClosedArrow' && sv[1] === 'None', 'the saved file holds [ClosedArrow, None]: ' + JSON.stringify(sv));
+await eW.click();
+await leIs(arrow.id, 'None', 'ClosedArrow');
+ok(true, 'Swap: [None, ClosedArrow]');
+await undo();
+await leIs(arrow.id, 'ClosedArrow', 'None');
+await undo();
+await leIs(arrow.id, 'ClosedArrow', 'ClosedArrow');
+await undo();
+await leIs(arrow.id, 'None', 'ClosedArrow');
+ok(true, 'one Ctrl+Z per change: swap, End, Start taken back in turn');
 
 // 5. several at once
 await win.keyboard.press('Escape');
@@ -135,6 +164,36 @@ await grp.locator('.cbtn').nth(1).click(); // (Box, then Text)
 await grp.locator('.cpop .sw').nth(4).click();
 const tx = await until(async () => { const l = await annots(); const a = l.find((x) => x.id === t1), b = l.find((x) => x.id === t2); return a.font.color.join() !== '0,0,0' && b.font.color.join() !== '0,0,0' ? [a, b] : null; }, 5000, 'text colour');
 ok(tx[0].font.size === 11 && tx[1].font.size === 18 && tx[1].font.bold && !tx[0].font.bold, `each keeps its own size and bold: ${JSON.stringify(tx[0].font)} / ${JSON.stringify(tx[1].font)}`);
+
+// 9. the side panel's picker: the same three steps on a polyline; a foreign file's pair shows in both selects
+const pl = await E(() => window.__gcc.active().create(0, { type: 'PolyLine', vertices: [[420, 300], [560, 300]], color: [0, 0, 1], bw: 2, kind: 'polyline' }));
+const gl = await E(() => window.__gcc.active().create(0, { type: 'Line', line: [[420, 340], [560, 340]], color: [0, 0, 1], bw: 2, kind: 'line', le: ['Diamond', 'Square'] }));
+await sleep(500);
+await win.keyboard.press('Escape');
+await win.keyboard.press('F4');
+await until(async () => (await win.locator('.props').count()) === 1, 5000, 'panel');
+await sleep(500);
+const box3 = await win.locator('.pg[data-page="0"]').boundingBox();
+const k3 = box3.width / (await E(() => window.__gcc.active().pages[0].w));
+const pS = win.locator('.props [data-end="start"]'), pE = win.locator('.props [data-end="end"]'), pW = win.locator('.props [data-end="swap"]');
+await win.mouse.click(box3.x + 490 * k3, box3.y + 300 * k3);
+await until(async () => (await pS.count()) === 1, 5000, 'polyline picked');
+// (each step waits for the panel to show the last change: it works from what it shows)
+const shows = (s0, s1) => until(async () => (await pS.inputValue()) === s0 && (await pE.inputValue()) === s1, 5000, `panel shows ${s0}/${s1}`);
+await pS.selectOption('ClosedArrow');
+await leIs(pl.id, 'ClosedArrow', 'None'); await shows('ClosedArrow', 'None');
+await pE.selectOption('Diamond');
+await leIs(pl.id, 'ClosedArrow', 'Diamond'); await shows('ClosedArrow', 'Diamond');
+await pW.click();
+await leIs(pl.id, 'Diamond', 'ClosedArrow'); await shows('Diamond', 'ClosedArrow');
+ok(true, 'polyline, side panel: Start alone, End alone, swap');
+await undo(); await undo(); await undo();
+await leIs(pl.id, 'None', 'None');
+ok(true, 'polyline: one Ctrl+Z per change');
+await win.keyboard.press('Escape');
+await win.mouse.click(box3.x + 490 * k3, box3.y + 340 * k3);
+await until(async () => (await pS.count()) === 1 && (await pS.inputValue()) === 'Diamond', 5000, 'generated line picked');
+ok(await pS.inputValue() === 'Diamond' && await pE.inputValue() === 'Square', 'a line with [Diamond, Square]: both selects filled');
 
 await app.close();
 console.log(fails ? `${fails} failed` : 'all passed');

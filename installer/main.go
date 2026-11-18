@@ -393,12 +393,7 @@ func main() {
 		// from Downloads, the setup finds none of its own - update.json was dropped and the copy
 		// stopped looking for new versions without a word)
 		if o.Source == "" {
-			if kept, said := keptSourceOf(orDefault(o.Dir, o.Scope)); said {
-				o.Source = kept
-			} else {
-				// (the public build: its download page - nobody should have to know what to type)
-				o.Source = defaultSource
-			}
+			o.Source = sourceWhenNoneGiven(orDefault(o.Dir, o.Scope))
 		}
 		if o.Scope == "user" && otherAdmin() {
 			// (started with another account's admin rights: "just me" would be that account)
@@ -458,7 +453,43 @@ func keptSourceOf(dir string) (string, bool) {
 	}
 	var uc UpdateConf
 	_ = readJSON(filepath.Join(dir, "update.json"), &uc)
-	return strings.TrimSpace(uc.Source), true
+	src := strings.TrimSpace(uc.Source)
+	// A Greenline setup (it has a web address of its own) over a copy that is still the company's - its
+	// package.json has no "brand" - whose updates come from a folder (the share it was installed from):
+	// the folder is not kept, the build's address is written (PLAN 11.2; the app does the same move
+	// by itself, electron/updater.cjs). A copy with a brand, a web address, "no updates" (empty) and a
+	// company-built setup (no address of its own) keep what they have.
+	if defaultSource != "" && src != "" && !isWebAddress(src) && isCompanyCopy(dir) {
+		return defaultSource, true
+	}
+	return src, true
+}
+
+// sourceWhenNoneGiven: the updates source a setup writes over the install in dir when --updates said
+// nothing: what the install has (keptSourceOf), else the build's own address - the public build's
+// download page: nobody should have to know what to type.
+func sourceWhenNoneGiven(dir string) string {
+	if kept, said := keptSourceOf(dir); said {
+		return kept
+	}
+	return defaultSource
+}
+
+func isWebAddress(s string) bool {
+	l := strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+}
+
+// isCompanyCopy: the app part installed in dir says no "brand" in its package.json - the company's
+// build (the public build's has "brand": "greenline"). Unreadable: not taken for the company's.
+func isCompanyCopy(dir string) bool {
+	var pk struct {
+		Brand string `json:"brand"`
+	}
+	if err := readJSON(filepath.Join(dir, "resources", "app", "package.json"), &pk); err != nil {
+		return false
+	}
+	return strings.TrimSpace(pk.Brand) == ""
 }
 
 // detectSource: started from the company's updates folder (it holds latest.json)? Then that's
@@ -589,9 +620,9 @@ func cmdUpdate(p *Payload, dir string, pid int, relaunch bool) int {
 		logf("update: PDF Editor is open again - left for later")
 		return 3
 	}
-	var uc UpdateConf
-	_ = readJSON(filepath.Join(dir, "update.json"), &uc)
-	o := Options{Scope: ii.Scope, Dir: dir, Desktop: ii.Desktop, OpenWith: ii.OpenWith, Source: uc.Source}
+	// (a Greenline setup over a company copy writes its own address, not the share: keptSourceOf)
+	kept, _ := keptSourceOf(dir)
+	o := Options{Scope: ii.Scope, Dir: dir, Desktop: ii.Desktop, OpenWith: ii.OpenWith, Source: kept}
 	err = runAs(p, Job{Kind: "install", Opts: o}, needsElevation(dir, ii.Scope), func(float64, string) {})
 	if err != nil {
 		logf("update failed: %v", err)
@@ -690,10 +721,7 @@ func installState(p *Payload, self string) UIState {
 		var uc UpdateConf
 		_ = readJSON(filepath.Join(dir, "update.json"), &uc)
 		st.Existing = &Existing{Version: ii.Version, Dir: dir, Scope: ii.Scope, Source: uc.Source}
-		kept, said := keptSourceOf(dir)
-		if !said {
-			kept = defaultSource
-		}
+		kept := sourceWhenNoneGiven(dir)
 		st.Opts = Options{Scope: ii.Scope, Dir: dir, Desktop: ii.Desktop, OpenWith: ii.OpenWith, Source: kept}
 		if st.Source != "" {
 			st.Opts.Source = st.Source

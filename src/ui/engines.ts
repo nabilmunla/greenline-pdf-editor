@@ -4,7 +4,7 @@
 //  - 1 MuPDF process holds the open documents (every edit) and draws the markup layer
 //  - 1 MuPDF process for long jobs (compress, merge, batch) so the open file stays responsive
 // Files are read by the engines straight from disk, on demand.
-import { EngineClient } from '../engine/rpc';
+import { EngineClient, hangLimit } from '../engine/rpc';
 import { gcc } from './api';
 import { APP_NAME } from './brand';
 import { offOf } from '../engine/off';
@@ -135,6 +135,82 @@ const idleCheck = globalThis.setInterval(() => {
 // (a test run in Node must be able to end with this module loaded)
 (idleCheck as unknown as { unref?: () => void }).unref?.();
 
+// ---- PLAN 10.4: an engine that stops answering is said, and can be restarted
+// Every 5 s the window looks at what each engine is running (rpc.ts `stuck`). One over its limit
+// (hangLimit: 20 s for short calls and tiles, 120 s for the rest, none for the long jobs):
+//  - a drawing engine is restarted at once (nothing of the person's is in it: the app reopens the
+//    files there);
+//  - the editing or batch engine is NEVER restarted unasked - the editing engine holds the undo
+//    history, the batch engine a running job. The window says so ('gcc-engine-stuck', once for that
+//    call) and the person decides: Keep waiting, or Restart it (killEngine).
+// (tests shorten the times: localStorage pdfed-hang-short-ms / -long-ms / -check-ms)
+export interface StuckNotice { engine: string; kind: 'edit' | 'batch'; ms: number; restart(): void }
+const nameOf = (c: EngineClient) => { for (const [n, v] of byName) if (v === c) return n; return ''; };
+/** end an engine's process: the app starts a new one and the window reopens its files */
+export function killEngine(c: EngineClient) { return gcc.killEngine(nameOf(c)); }
+const stuckKilled = new Set<EngineClient>();
+/** when each drawing engine was last restarted for not answering (at most twice in ten minutes) */
+const quietKills = new Map<EngineClient, number[]>();
+/** true once after the person restarted a stuck engine (the message says what it cost) */
+export const wasStuckKill = (c: EngineClient) => stuckKilled.delete(c);
+/** the call of each engine already dealt with (restarted, or "Keep waiting"), and the call a notice shows for */
+const dealt = new Map<EngineClient, number>();
+const noticeFor = new Map<EngineClient, number>();
+export function checkStuck(now = performance.now()) {
+  const short = stored('pdfed-hang-short-ms') || 20_000;
+  const long = stored('pdfed-hang-long-ms') || 120_000;
+  for (const c of byName.values()) {
+    const s = c.stuck(now);
+    // (a notice whose call has answered meanwhile goes away)
+    const shown = noticeFor.get(c);
+    if (shown !== undefined && s?.id !== shown) { noticeFor.delete(c); window.dispatchEvent(new CustomEvent('gcc-engine-stuck-over', { detail: c.name })); }
+    const drawing = c !== editor && c !== batcher;
+    // (a drawing engine's tile gets three times the short limit: the heaviest sheets on a slow PC
+    // with little memory free can take well over 20 s, and that engine is restarted unasked)
+    if (!s || dealt.get(c) === s.id || s.ms < hangLimit(s.method, drawing ? short * 3 : short, long)) continue;
+    dealt.set(c, s.id);
+    gcc.log(`${c.name}: ${s.method} has not answered for ${Math.round(s.ms / 1000)} s`);
+    if (drawing) {
+      // (no endless loop: a page that really takes this long would be asked for again after the
+      // restart and stop the new engine too - twice in ten minutes, and that engine is left alone)
+      const t = (quietKills.get(c) ?? []).filter((at) => now - at < 600_000);
+      if (t.length >= 2) { gcc.log(`${c.name}: not restarted again (twice in ten minutes)`); continue; }
+      quietKills.set(c, [...t, now]);
+      void killEngine(c);
+      continue;
+    }
+    noticeFor.set(c, s.id);
+    window.dispatchEvent(new CustomEvent<StuckNotice>('gcc-engine-stuck', { detail: { engine: c.name, kind: c === editor ? 'edit' : 'batch', ms: s.ms, restart: () => { stuckKilled.add(c); void killEngine(c); } } }));
+  }
+}
+// ---- PLAN 10.5: the editing engine asks before it runs out of memory
+// MuPDF's memory only grows and its ceiling is 2 GB. The engine cannot be restarted unasked (the undo
+// history would go): its size is logged at 1 GB and 1.5 GB, and at 1.6 GB - once nothing is running
+// in it - the window asks the person ('gcc-engine-memory'); "Not now" is asked once more at 1.8 GB,
+// then not again until the engine has restarted (the status bar keeps a line, which asks again).
+// (tests lower the limits: localStorage pdfed-edit-heap-ask / -ask2, in bytes)
+let memLogged = 0, memAsked = 0;
+onEngineRestart((c) => { if (c === editor) { memLogged = 0; memAsked = 0; } });
+export interface MemoryAsk { heap: number; last: boolean }
+export function checkEditorMemory() {
+  const h = editor.heap;
+  if (memLogged < 1 && h >= 1 * 2 ** 30) { memLogged = 1; gcc.log(`editing engine: ${Math.round(h / 2 ** 20)} MB of memory`); }
+  if (memLogged < 2 && h >= 1.5 * 2 ** 30) { memLogged = 2; gcc.log(`editing engine: ${Math.round(h / 2 ** 20)} MB of memory (limit 2048)`); }
+  if (editor.busy) return;
+  const ask1 = stored('pdfed-edit-heap-ask') || 1.6 * 2 ** 30, ask2 = stored('pdfed-edit-heap-ask2') || 1.8 * 2 ** 30;
+  const due = memAsked === 0 ? h >= ask1 : memAsked === 1 && h >= ask2;
+  if (!due) return;
+  memAsked++;
+  gcc.log(`editing engine: ${Math.round(h / 2 ** 20)} MB of memory - the person is asked`);
+  window.dispatchEvent(new CustomEvent<MemoryAsk>('gcc-engine-memory', { detail: { heap: h, last: memAsked === 2 } }));
+}
+const stuckTick = () => {
+  if (started) try { checkStuck(); checkEditorMemory(); } catch (e) { gcc.log('engine check: ' + e); }
+  const t = globalThis.setTimeout(stuckTick, stored('pdfed-hang-check-ms') || 5000);
+  (t as unknown as { unref?: () => void }).unref?.();
+};
+{ const t = globalThis.setTimeout(stuckTick, 5000); (t as unknown as { unref?: () => void }).unref?.(); }
+
 /** least busy drawing engine */
 export function renderer(): EngineClient {
   let best = renderers[0];
@@ -220,8 +296,12 @@ let restarting: Promise<void> | null = null;
 batcher.onNotice = (n) => { if (n === 'recycle') { batchRecycle = true; recycleBatch(); } };
 // (a new batch engine holds nothing: what the old one held went with it)
 onEngineRestart((c) => { if (c === batcher) { held.clear(); batchRecycle = false; } });
+/** PLAN 10.5: MuPDF's memory only grows - a batch engine that a big job has grown past this (600 MB)
+ *  gives it back at the next moment it holds nothing and nothing waits: the planned restart above */
+const batchTooBig = () => batcher.heap > (stored('pdfed-batch-heap') || 600 * 2 ** 20);
 function recycleBatch() {
-  if (!batchRecycle || held.size || batcher.busy || restarting) return;
+  if ((!batchRecycle && !batchTooBig()) || held.size || batcher.busy || restarting) return;
+  if (!batchRecycle) gcc.log(`batch engine: ${Math.round(batcher.heap / 2 ** 20)} MB of memory - planned restart`);
   batchRecycle = false;
   restarting = (async () => {
     const back = new Promise<void>((res) => {
@@ -248,6 +328,8 @@ async function batchCall<T>(method: string, args: unknown[], out?: boolean): Pro
     throw e;
   } finally { recycleBatch(); }
 }
+/** stop a job the batch engine is running (a merge): at once, not queued behind it */
+export const muBatchCancel = (job: string) => batcher.cancel(job);
 export const muBatch = <T,>(method: string, ...args: unknown[]) => batchCall<T>(method, args);
 /** a call whose finished file is written to a temp file by the engine */
 export const muFile = <T,>(method: string, ...args: unknown[]) => editor.call<T>(method, args, true);

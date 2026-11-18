@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -461,4 +462,191 @@ func TestReinstallKeepsSourceApplyRecordsVersionJobsOnlyOnInstalls(t *testing.T)
 	if err := runJob(nil, Job{Kind: "apply", Dir: dir, Zip: z2, Sha: sha2, Version: "0.5.2"}, func(float64, string) {}); err != nil || appVersionAt(dir, "app") != "0.5.2" {
 		t.Errorf("apply job on the install: %v %s", err, appVersionAt(dir, "app"))
 	}
+}
+
+// ---- PLAN 11.2: the Greenline setup over a company copy
+
+func greenlineFiles(ver string) map[string]string {
+	f := appFiles(ver)
+	f["resources/app/package.json"] = `{"version":"` + ver + `","brand":"greenline","displayName":"Greenline PDF Editor"}`
+	return f
+}
+
+// asGreenline: this test binary is "the Greenline setup" (build.py sets both with -X)
+func asGreenline(t *testing.T, feed string) {
+	t.Helper()
+	d, s := displayName, defaultSource
+	displayName, defaultSource = "Greenline PDF Editor", feed
+	t.Cleanup(func() { displayName, defaultSource = d, s })
+}
+
+func updateJSON(t *testing.T, dir string) (UpdateConf, bool) {
+	t.Helper()
+	var uc UpdateConf
+	if !fileExists(filepath.Join(dir, "update.json")) {
+		return uc, false
+	}
+	if err := readJSON(filepath.Join(dir, "update.json"), &uc); err != nil {
+		t.Fatal(err)
+	}
+	return uc, true
+}
+
+// installCompany: a company copy (no brand) installed from the share, by the company's own setup
+func installCompany(t *testing.T, root, share string) string {
+	t.Helper()
+	_ = os.MkdirAll(root, 0o755)
+	p, _ := openPayload(fakeSetup(t, root, "0.12.1", appFiles("0.12.1")))
+	dir := defaultDir("user")
+	if err := doInstall(p, Options{Scope: "user", Dir: dir, Desktop: true, OpenWith: true, Source: share}, func(float64, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+const feedURL = "https://github.com/example/greenline-pdf-editor"
+
+func TestGreenlineSetupOverCompanyCopyWritesItsOwnAddress(t *testing.T) {
+	root := setupTest(t)
+	share := `\\srv\apps\PDF Editor`
+	dir := installCompany(t, root, share)
+	asGreenline(t, feedURL)
+	// silent, no --updates: not the share kept for good
+	if got := sourceWhenNoneGiven(dir); got != feedURL {
+		t.Fatalf("silent setup over a company copy keeps %q, want the feed", got)
+	}
+	if kept, said := keptSourceOf(dir); kept != feedURL || !said {
+		t.Fatalf("keptSourceOf: %q %v", kept, said)
+	}
+	p, _ := openPayload(fakeSetup(t, root, "0.13.0", greenlineFiles("0.13.0")))
+	ii0, _ := readInstall(dir)
+	if err := doInstall(p, Options{Scope: ii0.Scope, Dir: dir, Desktop: ii0.Desktop, OpenWith: ii0.OpenWith, Source: sourceWhenNoneGiven(dir)}, func(float64, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if uc, ok := updateJSON(t, dir); !ok || uc.Source != feedURL {
+		t.Errorf("update.json after the Greenline setup: %+v", uc)
+	}
+	// scope, desktop shortcut and "open PDFs with" are the copy's own, as before
+	if ii, _ := readInstall(dir); ii == nil || ii.Version != "0.13.0" || ii.Scope != "user" || !ii.Desktop || !ii.OpenWith {
+		t.Errorf("install.json: %+v", ii)
+	}
+	// (the wizard's offer over an install, installState, takes the same sourceWhenNoneGiven; findInstalled is Windows-only)
+	// and now it is a Greenline copy on the web: a second setup keeps it
+	if sourceWhenNoneGiven(dir) != feedURL {
+		t.Errorf("second setup: %q", sourceWhenNoneGiven(dir))
+	}
+}
+
+func TestGreenlineSetupUpdateOverCompanyCopyAtARuntimeChange(t *testing.T) {
+	root := setupTest(t)
+	dir := installCompany(t, root, `\\srv\apps\PDF Editor`)
+	asGreenline(t, feedURL)
+	p, _ := openPayload(fakeSetup(t, root, "0.14.0", greenlineFiles("0.14.0")))
+	if code := cmdUpdate(p, dir, 0, false); code != 0 {
+		t.Fatalf("cmdUpdate: %d", code)
+	}
+	if uc, _ := updateJSON(t, dir); uc.Source != feedURL {
+		t.Errorf("update.json after cmdUpdate: %+v", uc)
+	}
+	if appVersionAt(dir, "app") != "0.14.0" {
+		t.Errorf("version %s", appVersionAt(dir, "app"))
+	}
+}
+
+func TestGreenlineSetupKeepsWhatIsNotTheCompanysShare(t *testing.T) {
+	root := setupTest(t)
+	// a Greenline copy on a folder of its own choice keeps its folder
+	p, _ := openPayload(fakeSetup(t, root, "0.13.0", greenlineFiles("0.13.0")))
+	dir := filepath.Join(root, "Programs", appName)
+	own := `D:\my updates`
+	if err := doInstall(p, Options{Scope: "user", Dir: dir, Source: own}, func(float64, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	asGreenline(t, feedURL)
+	if got := sourceWhenNoneGiven(dir); got != own {
+		t.Errorf("a Greenline copy on a folder: %q", got)
+	}
+	// a company copy with "no updates" chosen (empty), or already on a web address: left as it is
+	for _, src := range []string{"", "https://example.org/releases"} {
+		d := filepath.Join(root, "Other "+strings.ReplaceAll(src, "/", "_"))
+		p2, _ := openPayload(fakeSetup(t, root, "0.12.1", appFiles("0.12.1")))
+		displayName, defaultSource = appName, "" // (installed by the company's setup)
+		if err := doInstall(p2, Options{Scope: "user", Dir: d, Source: src}, func(float64, string) {}); err != nil {
+			t.Fatal(err)
+		}
+		displayName, defaultSource = "Greenline PDF Editor", feedURL
+		if src == "" {
+			// (no address of its own is written when none was given: the company setup's update.json is empty only if it said so)
+			_ = os.WriteFile(filepath.Join(d, "update.json"), []byte(`{"source":""}`), 0o644)
+		}
+		if got := sourceWhenNoneGiven(d); got != src {
+			t.Errorf("company copy with source %q: got %q", src, got)
+		}
+	}
+	// a copy whose package.json can't be read is not taken for the company's
+	d2 := installCompany(t, filepath.Join(root, "x"), `\\srv\apps\PDF Editor`) // (own setup folder; same default dir, own test root)
+	_ = os.Remove(filepath.Join(d2, "resources", "app", "package.json"))
+	if got := sourceWhenNoneGiven(d2); got != `\\srv\apps\PDF Editor` {
+		t.Errorf("unreadable package.json: %q", got)
+	}
+}
+
+func TestCompanyBuiltSetupKeepsTheFolderAsToday(t *testing.T) {
+	root := setupTest(t)
+	share := `\\srv\apps\PDF Editor`
+	dir := installCompany(t, root, share)
+	if defaultSource != "" {
+		t.Fatal("this test is the company-built setup")
+	}
+	if got := sourceWhenNoneGiven(dir); got != share {
+		t.Errorf("company setup over a company copy: %q", got)
+	}
+	if keptSource(dir) != share {
+		t.Errorf("keptSource: %q", keptSource(dir))
+	}
+}
+
+// What must stay equal between the editions, so that a Greenline copy IS the company copy to Windows: the
+// names and keys that decide where files, shortcuts, the Programs entry, "open with" and the settings are.
+// Read from the sources against a fixed list (passes on 0.12.1: a guard against a change, not a fix).
+func TestEditionsShareTheNamesWindowsKnows(t *testing.T) {
+	src := func(rel string) string {
+		b, err := os.ReadFile(rel)
+		if err != nil {
+			t.Skipf("%s is not in this checkout (%v)", rel, err)
+		}
+		return string(b)
+	}
+	has := func(text, re, file string) {
+		t.Helper()
+		if !regexp.MustCompile(re).MatchString(text) {
+			t.Errorf("%s: expected %s", file, re)
+		}
+	}
+	core := src("core.go")
+	has(core, `(?m)^\s*appName\s*=\s*"PDF Editor"\s*$`, "core.go appName")
+	has(core, `(?m)^\s*exeName\s*=\s*"PDF Editor\.exe"\s*$`, "core.go exeName")
+	has(core, `(?m)^\s*setupName\s*=\s*"PDF Editor Setup\.exe"\s*$`, "core.go setupName")
+	win := src("win_windows.go")
+	has(win, "(?m)^\\s*uninstallKey\\s*=\\s*`Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\PDFEditor`", "win_windows.go uninstallKey")
+	has(win, `(?m)^\s*progID\s*=\s*"PDFEditor\.Document"`, "win_windows.go progID")
+	has(win, "(?m)^\\s*capsKey\\s*=\\s*`Software\\\\PDF Editor\\\\Capabilities`", "win_windows.go capsKey")
+	has(win, "(?m)^\\s*combineKey\\s*=\\s*`\\\\SystemFileAssociations\\\\\\.pdf\\\\shell\\\\PDFEditor\\.Combine`", "win_windows.go combineKey")
+	has(win, `(?m)^const aumid = "pdfeditor\.app"`, "win_windows.go aumid")
+	// the name under HKCU\Software\RegisteredApplications is appName (not displayName), pointing at capsKey
+	has(win, `setStr\(root, `+"`Software\\\\RegisteredApplications`"+`, appName, capsKey\)`, "win_windows.go RegisteredApplications value name")
+	// the app: user data and local data folders are named by APP; the packed package.json keeps productName
+	has(src("../electron/main.cjs"), `(?m)^const APP = 'PDF Editor';`, "main.cjs APP")
+	var pk struct {
+		ProductName string `json:"productName"`
+	}
+	if err := json.Unmarshal([]byte(src("../package.json")), &pk); err != nil || pk.ProductName != "PDF Editor" {
+		t.Errorf("package.json productName: %q %v", pk.ProductName, err)
+	}
+	// and nothing that makes the public build's package differ in it: the export adds brand,
+	// displayName, updateFeed, reportEndpoint - never productName - and pack.py copies productName as it is
+	if exp := src("../scripts/export-public.py"); regexp.MustCompile(`pkg\[['"]productName['"]\]\s*=`).MatchString(exp) {
+		t.Error("export-public.py changes productName")
+	}
+	has(src("../scripts/pack.py"), `'productName': pkg\['productName'\]`, "pack.py productName")
 }

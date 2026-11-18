@@ -1,7 +1,7 @@
 // Sheet numbers, titles and references in drawing sets (PLAN 7.4) - invented numbers only
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tokensOf, sheetIndex, findRefs, type PageToks } from '../src/ui/sheets.ts';
+import { tokensOf, sheetIndex, findRefs, plainNumbersOk, repeatedNos, type PageToks } from '../src/ui/sheets.ts';
 
 type W = { s: string; x: number; y: number; h?: number };
 /** a page's text the way the drawing engine gives it: one box per character, lines by '\n' */
@@ -83,12 +83,14 @@ test('references: only sheets of the set, not rooms, levels or the project numbe
   assert.deepEqual(r, ['0->2:A-103', '1->4:A-105']);
 });
 
-test('a number on two pages links to the first; a sheet with no title block has no number', () => {
+test('a number on two pages is never linked (PLAN 9.3b); a sheet with no title block has no number', () => {
   const pages = setA(40, { dup: 7, none: 9 });
+  pages[5] = sheet(5, 'A-106', 'FLOOR PLAN LEVEL 5', [[{ s: 'SEE', x: 300, y: 300 }, { s: 'A-101', x: 330, y: 300 }]]);
   const idx = sheetIndex(pages);
   assert.equal(idx.sheets.find((s) => s.page === 9), undefined);
   assert.equal(idx.byKey.get('A-101'), 0);
   assert.equal(idx.sheets.length, 39);
+  assert.deepEqual(findRefs(pages, idx).map((r) => `${r.page}->${r.target}:${r.text}`).sort(), ['0->2:A-103', '1->4:A-105']);
 });
 
 test('long full numbers and their short form in callouts', () => {
@@ -184,4 +186,156 @@ test('title blocks along the bottom (A3 sets)', () => {
   assert.equal(idx.sheets[3].title, 'ELEVATION 4');
   // "ID-12" written without the zero is sheet ID-012
   assert.deepEqual(findRefs(pages, idx).map((r) => `${r.page}->${r.target}`), ['4->11']);
+});
+
+// PLAN 9: on the user's real sets (12 files, 1,684 pages) 44 false sheets came from one spot on 71 A4
+// pages of a bill of quantities - the page total at the foot of the amount column: 34 decimals, 8
+// whole numbers, 2 others; the plain numbers 2 to 8 digits long, never one length. Generated pages of
+// that pattern.
+
+/** a pseudo-random amount with 3 to 8 digits before the point (the measured spread of lengths) */
+const amount = (i: number, dec: boolean) => {
+  const digits = 3 + ((i * 7 + 3) % 6);
+  const v = String(Math.floor(10 ** (digits - 1) * (1 + ((i * 7919) % 8999) / 1000)));
+  const whole = v.slice(0, digits).replace(/\B(?=(\d{3})+$)/g, i % 2 ? ',' : '');
+  return dec ? `${whole}.${String((i * 37) % 100).padStart(2, '0')}` : whole.replace(/,/g, '');
+};
+/** a page of a bill of quantities (A4): item, description, quantity, unit, rate, amount; the page
+ *  total at the foot of the amount column, in the bottom strip */
+function boq(page: number, dec = true): PageToks {
+  const lines: W[][] = [];
+  for (let k = 0; k < 28; k++) {
+    const y = (25 + k * 8) * MM;
+    lines.push([
+      { s: String.fromCharCode(65 + (k % 8)), x: 12 * MM, y, h: 8 },
+      { s: 'Supply and install reinforced concrete to the', x: 22 * MM, y, h: 8 },
+      { s: String(10 + ((page + k) % 80)), x: 108 * MM, y, h: 8 },
+      { s: 'm3', x: 122 * MM, y, h: 8 },
+      { s: dec ? `${450 + k}.00` : String(450 + k), x: 140 * MM, y, h: 8 },
+      { s: amount(page * 31 + k, dec), x: 170 * MM, y, h: 8 },
+    ]);
+  }
+  lines.push([{ s: 'Carried to collection', x: 60 * MM, y: 262 * MM, h: 9 }, { s: amount(page, dec), x: 120 * MM, y: 262 * MM, h: 9 }]);
+  return tokensOf(page, chars(lines), A4.w, A4.h);
+}
+
+test('a bill of quantities finds no sheets: amounts with a decimal point are no sheet numbers', () => {
+  const pages = Array.from({ length: 40 }, (_, i) => boq(i));
+  // the collection page: the page totals again, at the left (outside the title band)
+  pages.push(tokensOf(40, chars(Array.from({ length: 20 }, (_, i) => [{ s: `Page ${i + 1}`, x: 20 * MM, y: (30 + i * 9) * MM, h: 8 }, { s: amount(i, true), x: 45 * MM, y: (30 + i * 9) * MM, h: 8 }])), A4.w, A4.h));
+  const idx = sheetIndex(pages);
+  assert.deepEqual(idx.sheets.map((s) => s.no), []);
+  assert.deepEqual(findRefs(pages, idx), []);
+});
+
+test('a schedule of whole quantities finds no sheets: plain numbers of many lengths are no sheet numbers', () => {
+  const pages = Array.from({ length: 40 }, (_, i) => boq(i, false));
+  assert.deepEqual(sheetIndex(pages).sheets.map((s) => s.no), []);
+});
+
+test('a set with a bill of quantities: the drawings only, links only between them', () => {
+  const A3 = { w: 420 * MM, h: 297 * MM };
+  const pages: PageToks[] = [];
+  for (let i = 0; i < 20; i++) {
+    const y = A3.h - 15 * MM;
+    pages.push(tokensOf(i, chars([
+      [{ s: 'CLIENT PRJ-2603', x: 20 * MM, y, h: 7 }],
+      [{ s: `PRJ-AB1-DWG-AR-${10140 + i}`, x: 330 * MM, y, h: 11 }],
+      ...(i === 4 ? [[{ s: 'SEE', x: 100, y: 200 }, { s: 'AR-10145', x: 130, y: 200 }]] : []),
+    ]), A3.w, A3.h));
+  }
+  for (let i = 0; i < 40; i++) pages.push(boq(20 + i));
+  pages.push(tokensOf(60, chars(Array.from({ length: 20 }, (_, i) => [{ s: 'Page', x: 20 * MM, y: (30 + i * 9) * MM, h: 8 }, { s: amount(20 + i, true), x: 45 * MM, y: (30 + i * 9) * MM, h: 8 }])), A4.w, A4.h));
+  const idx = sheetIndex(pages);
+  assert.deepEqual(idx.sheets.map((s) => s.page), Array.from({ length: 20 }, (_, i) => i));
+  assert.deepEqual(findRefs(pages, idx).map((r) => `${r.page}->${r.target}`), ['4->5']);
+});
+
+test('drawing numbers of digits only are still sheet numbers (one length, as written)', () => {
+  for (const no of [(i: number) => String(100101 + i), (i: number) => String(i + 1).padStart(4, '0')]) {
+    const pages = Array.from({ length: 24 }, (_, i) => sheet(i, no(i), `PLAN ${i}`));
+    assert.deepEqual(sheetIndex(pages).sheets.map((s) => s.no), pages.map((_, i) => no(i)));
+  }
+  assert.equal(plainNumbersOk(['100101', '100102', '100103', '100104', '7']), true);
+  assert.equal(plainNumbersOk(['0001', '0002', '0003']), true);
+  assert.equal(plainNumbersOk(['512', '1047', '23140', '9027', '880000', '1500']), false);
+  assert.equal(plainNumbersOk(['A-101', 'A-102', 'A-103', '512', '23140']), true);
+});
+
+// PLAN 9.2: titles on the user's real sets (483 sheets, A3 and A2): none was found. Measured there: the
+// title band holds 85 lines on the median sheet (162 at the 90th percentile) and the title's lines come
+// late in the text, past the 60 kept; the title sits 30 mm above the number and takes 1 to 3 lines, its
+// first line shared by many sheets; the number stands alone on its line, next to its spot. Generated
+// A3 sheets of that pattern.
+const A3L = { w: 420 * MM, h: 297 * MM };
+const LEVELS = ['LEVEL 01', 'LEVEL 02', 'TYPICAL FLOOR'];
+const TWORDS = ['FLOOR PLAN', 'REFLECTED CEILING', 'WALL SETTING OUT', 'FINISHES LAYOUT', 'DOOR SCHEDULE', 'SECTIONS', 'ELEVATIONS', 'TOILET DETAILS'];
+const realTitle = (i: number) => `${LEVELS[i % 3]} ${TWORDS[i % 8]} ZONE ${String.fromCharCode(65 + Math.floor(i / 8))}`;
+function a3(i: number, o: { legend?: number; alone?: boolean; notes?: boolean } = {}): PageToks {
+  const { w, h } = A3L;
+  const at = (dx: number, dy: number, s: string, hh = 8): W => ({ s, x: w - dx * MM, y: h - dy * MM, h: hh });
+  const lines: W[][] = [];
+  // a legend down the right strip, the same on every sheet, first in the text
+  for (let k = 0; k < (o.legend ?? 0); k++) lines.push([at(110, 280 - k * 2.6, `LEGEND ITEM ${String.fromCharCode(65 + (k % 26))}${String.fromCharCode(65 + Math.floor(k / 26))} FINISH TYPE`, 6)]);
+  // sheet notes, different on each sheet, far from the title block
+  if (o.notes) lines.push([at(110, 200, `NOTES FOR ${TWORDS[(i * 3) % 8]} ${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(66 + (i % 25))} ONLY`, 7)]);
+  lines.push([at(110, 70, 'PROJECT PRJ-2603 PALM TOWER', 8)]);
+  lines.push([at(110, 62, 'DRAWING TITLE', 6)]);
+  // the title: three lines, the first shared by a third of the sheets
+  const t = realTitle(i).split(/ (?=REFLECTED|FLOOR PLAN|WALL|FINISHES|DOOR|SECTIONS|ELEVATIONS|TOILET|ZONE)/);
+  t.forEach((s, k) => lines.push([at(45, 55 - k * 3.5, s, 8)]));
+  lines.push([at(110, 30, 'SCALE 1:100'), at(80, 30, 'DATE 16.11.2026')]);
+  const no = `PRJ-AB1-DWG-AR-${10140 + i}`;
+  lines.push(o.alone ? [at(38, 25, no, 10)] : [at(70, 25, 'DWG NO', 6), at(38, 25, no, 10)]);
+  return tokensOf(i, chars(lines), w, h);
+}
+
+test('a title after more than 60 lines of the title band is found', () => {
+  const pages = Array.from({ length: 24 }, (_, i) => a3(i, { legend: 80 }));
+  const idx = sheetIndex(pages);
+  assert.equal(idx.sheets.length, 24);
+  assert.deepEqual(idx.sheets.map((s) => s.title), pages.map((_, i) => realTitle(i)));
+});
+
+test('a title of several lines whose first line repeats is found whole', () => {
+  const pages = Array.from({ length: 24 }, (_, i) => a3(i));
+  assert.deepEqual(sheetIndex(pages).sheets.map((s) => s.title), pages.map((_, i) => realTitle(i)));
+});
+
+test('the number on its own line is no title; notes that differ per sheet are no title either', () => {
+  const pages = Array.from({ length: 24 }, (_, i) => a3(i, { alone: true, notes: true, legend: 70 }));
+  const idx = sheetIndex(pages);
+  assert.deepEqual(idx.sheets.map((s) => s.no), pages.map((_, i) => `PRJ-AB1-DWG-AR-${10140 + i}`));
+  assert.deepEqual(idx.sheets.map((s) => s.title), pages.map((_, i) => realTitle(i)));
+});
+
+// PLAN 9.3: the user's A1 set (228 pages) holds 112 sheet numbers, up to 8 times each, the copies far
+// apart (a tender set compiled from packages): no spot differed on 90 % of its pages and it got no
+// sheets. Generated sets of that pattern, and the spots that must still find nothing.
+/** 60 sheets: 40 numbers, the first 20 again at the end; page 3 refers to a repeated sheet, a sheet
+ *  there once, the end of a number bare and with DETAIL before it */
+const compiledNo = (i: number) => `PRJ-AB1-DWG-AR-${10101 + (i < 40 ? i : i - 40)}`;
+const compiled = (size = A1) => Array.from({ length: 60 }, (_, i) => sheet(i, compiledNo(i), `PLAN ${i}`, i === 3 ? [
+  [{ s: 'SEE', x: 300, y: 300 }, { s: 'PRJ-AB1-DWG-AR-10110', x: 330, y: 300 }],
+  [{ s: 'SEE', x: 300, y: 340 }, { s: 'PRJ-AB1-DWG-AR-10130', x: 330, y: 340 }],
+  [{ s: 'TYPE', x: 300, y: 380 }, { s: '10131', x: 350, y: 380 }],
+  [{ s: 'DETAIL', x: 300, y: 420 }, { s: '10132', x: 350, y: 420 }],
+] : [], size));
+
+test('a set holding some sheets twice: every page numbered; no link to a repeated number, bare digits need a word before them', () => {
+  const pages = compiled();
+  const idx = sheetIndex(pages);
+  assert.deepEqual(idx.sheets.map((s) => s.no), pages.map((_, i) => compiledNo(i)));
+  assert.deepEqual(findRefs(pages, idx).map((r) => `${r.page}->${r.target}:${r.text}`), ['3->29:PRJ-AB1-DWG-AR-10130', '3->31:10132']);
+});
+
+test('repeating numbers are not taken on A4 paper, nor codes that repeat more', () => {
+  assert.equal(sheetIndex(compiled(A4)).sheets.length, 0);
+  // a zone code (8 values on 60 pages) and plain numbers that repeat are no sheet numbers
+  const zone = Array.from({ length: 60 }, (_, i) => sheet(i, `ZONE-${i % 8}A`, `PLAN ${i}`));
+  assert.equal(sheetIndex(zone).sheets.length, 0);
+  assert.equal(repeatedNos(['A-1', 'A-2', 'A-1', 'A-2', 'A-3'], ['A-1', 'A-2', 'A-1', 'A-2', 'A-3']), false);
+  const ten = Array.from({ length: 20 }, (_, i) => `A-${i % 10}`);
+  assert.equal(repeatedNos(ten.map((x) => x.replace('A-', 'A')), ten), true);
+  assert.equal(repeatedNos(ten, ten.map((x) => x.replace('A-', ''))), false);
 });

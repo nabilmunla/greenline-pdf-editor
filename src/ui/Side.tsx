@@ -10,7 +10,7 @@ import { Ico } from './icons';
 import { css } from './tools';
 import { gcc } from './api';
 import { writeXlsx } from './xlsxwrite';
-import { measureNumber, perimeterNumber, commentRow, headRow, COMMENT_HEAD, COMMENT_WIDTHS } from './measurexl';
+import { measureNumber, perimeterNumber, KIND_NAME, KIND_ORDER, commentRow, headRow, COMMENT_HEAD, COMMENT_WIDTHS } from './measurexl';
 import { prepare, dragIcon, dropPages } from './pagedrag';
 import { pageRange } from './pagesel';
 
@@ -893,8 +893,6 @@ function Layers(p: Props) {
 type Sums = Map<string, { v: number; dec: number }>;
 const addTo = (m: Sums, unit: string, v: number, dec: number) => { const x = m.get(unit); if (x) { x.v += v; x.dec = Math.max(x.dec, dec); } else m.set(unit, { v, dec }); };
 const sumText = (m: Sums) => [...m].map(([u, x]) => `${x.v.toLocaleString('en-GB', { minimumFractionDigits: x.dec, maximumFractionDigits: x.dec })} ${u}`).join(' + ');
-const KIND_NAME: Record<string, string> = { 'measure-length': 'Lengths', 'measure-polylength': 'Polylengths', 'measure-perimeter': 'Perimeters', 'measure-area': 'Areas', 'area-perimeter': 'Areas: perimeters', 'measure-angle': 'Angles' };
-const KIND_ORDER = ['measure-length', 'measure-polylength', 'measure-perimeter', 'measure-area', 'area-perimeter', 'measure-angle'];
 
 /**
  * Counts & totals: every count name with how many (per page too), and the measurements added up

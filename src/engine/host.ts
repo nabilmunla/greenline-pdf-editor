@@ -120,10 +120,18 @@ const merges = new Map<string, { st: import('./mu').MergeState; spill: string; f
 /** print jobs whose sheets are being made into pictures (printPicBegin) */
 const pics = new Map<string, { st: import('./mu').PicState; spill: string; fd: number; size: number; src: VFile | null }>();
 let dropPic: (job: string) => void = () => {};
+/** jobs the window asked to stop ({ cancel: job } is taken at once, never queued - the engine is
+ *  inside the job's call when it arrives). A long job reads this between its steps. */
+const cancelled = new Set<string>();
+export const isCancelled = (job: string) => cancelled.has(job);
 let dropMerge: (job: string) => void = () => {};
+
+/** MuPDF's memory in use, sent with every answer of a MuPDF engine (PLAN 10.5; null: not one) */
+let heapNow: (() => number) | null = null;
 
 export async function editHandlers(): Promise<Record<string, Handler>> {
   const mu = await import('./mu');
+  heapNow = mu.heap;
   // (tests only - e2e-saveas-temp: PDFED_TEST_WHOLE_AT=1 gives the drawing engines a whole copy
   // after any change, as for a combined set over 600 MB)
   mu.setWholeAt(Number(process.env.PDFED_TEST_WHOLE_AT) || 0);
@@ -159,6 +167,28 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
   mu.setDisplayStore((bytes) => { const p = tempPath('merged.bin'); writeView(p, bytes, 0); return { path: p, size: bytes.length }; });
   const { lastXref } = await import('./overlay');
   const tailOf = (p: string, size: number) => { const n = Math.min(4096, size); const b = new Uint8Array(n); const fd = fs.openSync(p, 'r'); try { fs.readSync(fd, b, 0, n, size - n); } finally { fs.closeSync(fd); } return b; };
+  /** a merge's result (Combine, a big Extract) written to `target` from its spill file: {$file}.
+   *  The target goes if the writing fails */
+  const writeMerged = (st: import('./mu').MergeState, bookmarks: boolean, spill: string, target: string) => {
+    const fd = fs.openSync(target, 'w');
+    try {
+      const rd = fs.openSync(spill, 'r');
+      try {
+        const buf = Buffer.alloc(16 << 20);
+        const out = (b: Uint8Array) => { for (let w = 0; w < b.length;) w += fs.writeSync(fd, b, w, b.length - w); };
+        mu.mergeWrite(st, bookmarks, (b) => out(typeof b === 'string' ? Buffer.from(b, 'latin1') : b), (off, len) => {
+          for (let done = 0; done < len;) {
+            const k = fs.readSync(rd, buf, 0, Math.min(buf.length, len - done), off + done);
+            if (k <= 0) throw new Error('The merge\'s temp file was cut short.');
+            out(buf.subarray(0, k));
+            done += k;
+          }
+        });
+      } finally { fs.closeSync(rd); }
+    } catch (e) { try { fs.closeSync(fd); } catch { /* closed */ } removeTemp([target]); throw e; }
+    fs.closeSync(fd);
+    return { $file: { path: target, size: fs.statSync(target).size } };
+  };
   const h: Record<string, Handler> = {};
   for (const [k, v] of Object.entries(mu)) if (typeof v === 'function') h[k] = v as Handler;
   Object.assign(h, {
@@ -201,7 +231,12 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       const plain = mu.drawPlain(id) && (s?.stat.size ?? 0) <= PLAIN_MAX;
       const canDelta = !full && !!s && !plain;
       const out = tempPath(canDelta ? 'changes.bin' : 'snapshot.pdf');
-      const r = mu.snapshotTo(id, (v, from) => writeView(out, v, canDelta ? from : 0), !canDelta, (fill) => writePieces(out, fill), plain);
+      let r: { base: number };
+      try { r = mu.snapshotTo(id, (v, from) => writeView(out, v, canDelta ? from : 0), !canDelta, (fill) => writePieces(out, fill), plain); } catch (e) {
+        // (a throw leaves the temp folder made above with nothing in it: it goes)
+        removeTemp([out]);
+        throw e;
+      }
       const delta = canDelta && r.base > 0;
       const src: FileSrc = delta ? { path: s!.src.path, size: r.base, delta: out, mtime: s!.stat.mtime } : { path: out };
       // heavy pages drawn from merged line work: one more update on top of the copy (display only)
@@ -238,8 +273,15 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
         } catch { base = null; } // no room for it: a whole copy instead
       }
       const tmp = file + '.tmp';
-      const r = mu.snapshotTo(id, (v, from) => writeView(tmp, v, base ? from : 0), !base, (fill) => writePieces(tmp, fill));
-      fs.renameSync(tmp, file);
+      let r: { base: number };
+      try {
+        r = mu.snapshotTo(id, (v, from) => writeView(tmp, v, base ? from : 0), !base, (fill) => writePieces(tmp, fill));
+        fs.renameSync(tmp, file);
+      } catch (e) {
+        // (a half-written copy is not left next to the file)
+        try { fs.rmSync(tmp, { force: true }); } catch { /* gone */ }
+        throw e;
+      }
       return base && r.base > 0 ? { base: { path: base.path, size: r.base, mtime: base.mtime } } : { base: null };
     },
     /** how the source file looked when opened (save over it changes that) */
@@ -259,6 +301,7 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
     // ---- merge a big set a file at a time, straight to disk (see mu.mergeStart)
     mergeBegin(job: string) {
       dropMerge(job);
+      cancelled.delete(job);
       const spill = tempPath('merge-streams.bin');
       merges.set(job, { st: mu.mergeStart(), spill, fd: fs.openSync(spill, 'w'), size: 0, pages: 0 });
       return true;
@@ -266,6 +309,8 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
     async mergeAdd(job: string, name: string, src: VFile | Uint8Array, pages?: number[]) {
       const m = merges.get(job);
       if (!m) throw new Error('The merge was stopped.');
+      // (a stop that came while the engine was between two files)
+      if (isCancelled(job)) { dropMerge(job); throw new Error('The merge was stopped.'); }
       // (in steps, with a moment between them: what a step let go of is freed then - see
       // mu.mergeFileSteps)
       const it = mu.mergeFileSteps(m.st, name, src, (raw) => {
@@ -277,7 +322,9 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       let r = it.next();
       while (!r.done) {
         await new Promise((res) => setImmediate(res));
-        if (merges.get(job) !== m) { it.return?.(0); throw new Error('The merge was stopped.'); }
+        // (the window's Stop arrives here, between two steps: the generator is closed, the spill
+        // file and the result so far are let go)
+        if (isCancelled(job)) { it.return?.(0); dropMerge(job); throw new Error('The merge was stopped.'); }
         r = it.next();
       }
       const n = r.value;
@@ -288,30 +335,92 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
     mergeFinish(job: string, bookmarks: boolean) {
       const m = merges.get(job);
       if (!m) throw new Error('The merge was stopped.');
-      const target = tempPath('merged.pdf');
-      const fd = fs.openSync(target, 'w');
       try {
         fs.closeSync(m.fd);
         m.fd = -1;
-        const rd = fs.openSync(m.spill, 'r');
+        return writeMerged(m.st, bookmarks, m.spill, tempPath('merged.pdf'));
+      } finally { dropMerge(job); }
+    },
+    /**
+     * Extract pages of a big file (PLAN 10.3b), in steps like Combine's and straight to disk: the
+     * new file in a temp file, {$file}. The window's { cancel: job } is read between the steps.
+     */
+    async extractBig(job: string, id: string, pages: number[]) {
+      const spill = tempPath('extract-streams.bin');
+      let fd = -1, size = 0;
+      let st: import('./mu').MergeState | null = null;
+      // (opened inside the try: a new document MuPDF has no memory for left the spill file and its
+      // handle behind - sweep 0.13)
+      try {
+        fd = fs.openSync(spill, 'w');
+        st = mu.mergeStart();
+        const it = mu.extractSteps(st, id, pages, (raw) => {
+          const off = size;
+          for (let w = 0; w < raw.length;) w += fs.writeSync(fd, raw, w, Math.min(16 << 20, raw.length - w));
+          size += raw.length;
+          return off;
+        });
         try {
-          const buf = Buffer.alloc(16 << 20);
-          const out = (b: Uint8Array) => { for (let w = 0; w < b.length;) w += fs.writeSync(fd, b, w, b.length - w); };
-          mu.mergeWrite(m.st, bookmarks, (b) => out(typeof b === 'string' ? Buffer.from(b, 'latin1') : b), (off, len) => {
-            for (let done = 0; done < len;) {
-              const k = fs.readSync(rd, buf, 0, Math.min(buf.length, len - done), off + done);
-              if (k <= 0) throw new Error('The merge\'s temp file was cut short.');
-              out(buf.subarray(0, k));
-              done += k;
-            }
-          });
-        } finally { fs.closeSync(rd); }
-      } catch (e) { try { fs.closeSync(fd); } catch { /* closed */ } removeTemp([target]); dropMerge(job); throw e; }
-      fs.closeSync(fd);
-      dropMerge(job);
-      return { $file: { path: target, size: fs.statSync(target).size } };
+          for (let r = it.next(); !r.done; r = it.next()) {
+            // (a moment between the steps: what the garbage collector found let go of is freed then -
+            // see mu.mergeFileSteps; most of it the steps let go of themselves, PLAN 10.3b)
+            await new Promise((res) => setImmediate(res));
+            if (isCancelled(job)) throw new Error('The extract was stopped.');
+          }
+        } finally { it.return?.(0); }
+        fs.closeSync(fd);
+        fd = -1;
+        return writeMerged(st, false, spill, tempPath('extracted.pdf'));
+      } finally {
+        if (fd >= 0) try { fs.closeSync(fd); } catch { /* closed */ }
+        removeTemp([spill]);
+        if (st) mu.mergeDrop(st);
+        cancelled.delete(job);
+      }
     },
     mergeEnd(job: string) { dropMerge(job); return true; },
+    /**
+     * Print a big selection (PLAN 10.12): the print file made here, in the batch engine, from the
+     * window's copy of the document (drawSnapshot - unsaved changes included) with the layers the
+     * window shows, in steps like Extract's (the window's { cancel: job } is read between them),
+     * written to a temp file - in pieces past the piece-wise limit. Answers as printFile does:
+     * {$file}, or { bytes: {$file}, pictures }.
+     */
+    async printBig(job: string, src: VFile | Uint8Array, opts: import('./printlayout').PrintOpts, layers: Record<number, boolean> | null) {
+      const t0 = Date.now();
+      const target = tempPath('print.pdf');
+      let fd = -1, size = 0;
+      const put = (v: Uint8Array) => {
+        if (fd < 0) fd = fs.openSync(target, 'w');
+        for (let w = 0; w < v.length;) w += fs.writeSync(fd, v, w, Math.min(16 << 20, v.length - w));
+        size += v.length;
+      };
+      const it = mu.printFrom(src, opts, layers);
+      try {
+        if (isCancelled(job)) throw new Error('The print was stopped.');
+        // (the file is written by the last step: every step runs with the temp file as the sink)
+        let r = mu.withSink(put, () => it.next());
+        while (!r.done) {
+          // (a moment between the steps: what a step let go of is freed then - see mu.mergeFileSteps)
+          await new Promise((res) => setImmediate(res));
+          if (isCancelled(job)) throw new Error('The print was stopped.');
+          r = mu.withSink(put, () => it.next());
+        }
+        const v = r.value as Uint8Array | { bytes: Uint8Array; pictures: number[] };
+        const rest = v instanceof Uint8Array ? v : v.bytes;
+        if (rest.length) put(rest);
+        if (fd >= 0) fs.closeSync(fd);
+        fd = -1;
+        const file = { $file: { path: target, size } };
+        console.error(`print: ${opts.pages.length} sheets made in the batch engine (pid ${process.pid}) in ${Date.now() - t0} ms, ${Math.round(size / 2 ** 20)} MB`);
+        return v instanceof Uint8Array ? file : { bytes: file, pictures: v.pictures };
+      } catch (e) {
+        it.return?.(new Uint8Array(0));
+        if (fd >= 0) try { fs.closeSync(fd); } catch { /* closed */ }
+        removeTemp([target]);
+        throw e;
+      } finally { cancelled.delete(job); }
+    },
     // ---- print sheets made into pictures a sheet at a time, straight to disk (see mu.picStart)
     printPicBegin(job: string, src: VFile | Uint8Array) {
       dropPic(job);
@@ -359,6 +468,13 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
     },
     printPicEnd(job: string) { dropPic(job); return true; },
   });
+  // (tests only - e2e-editmem: PDFED_TEST_HEAP gives the engine a call that takes some of MuPDF's
+  // memory and keeps it, so its heap passes the window's limits without a file that big)
+  if (process.env.PDFED_TEST_HEAP) {
+    const mupdf = await import('mupdf');
+    const eaten: unknown[] = [];
+    h.eatHeap = (mb: number) => { eaten.push(new mupdf.Buffer(new Uint8Array(mb << 20))); return mu.heap(); };
+  }
   /**
    * The file the document's changes can be written against: the file it was opened from,
    * as long as that is unchanged. Saved over (or changed by someone): its old content -
@@ -429,6 +545,9 @@ const common: Record<string, Handler> = {
   memory() { return process.memoryUsage().rss; },
   /** the app has saved what it needs: this engine ends after answering, a fresh one starts */
   exitNow() { exiting = true; setTimeout(() => process.exit(75), 20); return true; },
+  // (tests only - e2e-hang: PDFED_TEST_HANG makes a call that never answers, a busy loop like a
+  // damaged file that loops inside the engine)
+  ...(process.env.PDFED_TEST_HANG ? { hang() { for (;;) { /* never ends */ } } } : {}),
 };
 
 type Sink = <T>(write: (v: Uint8Array) => void, run: () => T) => T;
@@ -510,7 +629,11 @@ function serve(port: PortMain) {
   ports.push(port);
   port.on('close', () => { const k = ports.indexOf(port); if (k >= 0) ports.splice(k, 1); });
   port.on('message', (e) => {
-    const d = e.data as { id: number; method: string; args: unknown[]; out?: boolean | string; want?: { doc: string; scales: number[] | null } };
+    const d = e.data as { id: number; method: string; args: unknown[]; out?: boolean | string; want?: { doc: string; scales: number[] | null }; cancel?: string };
+    // (a job to stop: taken at once like `want` - the engine is inside that job's call)
+    // (the most recent 64 kept: a Stop that comes after its job ended is never removed by the job -
+    // sweep 0.13)
+    if (d.cancel !== undefined) { cancelled.delete(d.cancel); cancelled.add(d.cancel); while (cancelled.size > 64) cancelled.delete(cancelled.values().next().value!); return; }
     // (the scales the window still wants for a document: taken at once, not queued)
     if (d.want) { queue.wantScales(d.want.doc, d.want.scales); return; }
     queue.push({ port, id: d.id, method: d.method, args: d.args, out: d.out, seq: arrived++ });
@@ -572,7 +695,7 @@ async function runOne({ port, id, method, args, out }: Call) {
     let value: unknown;
     if (out) value = runToFile(withSink, out, () => h(...a));
     else value = await h(...a);
-    port.postMessage({ id, ok: true, value });
+    port.postMessage({ id, ok: true, value, ...(heapNow ? { heap: heapNow() } : {}) });
   } catch (err) {
     failed = true;
     fatal = isFatal(err);
@@ -580,7 +703,7 @@ async function runOne({ port, id, method, args, out }: Call) {
     // (a tile that gave way - no longer wanted - is "stale": not drawn, nothing went wrong)
     const stale = !!(err as { stale?: boolean })?.stale;
     if (stale) { failed = false; queue.stale++; }
-    try { port.postMessage({ id, ok: false, error: err instanceof Error ? err.message : String(err), fatal, ...(stale ? { stale: true } : {}) }); } catch { /* gone */ }
+    try { port.postMessage({ id, ok: false, error: err instanceof Error ? err.message : String(err), fatal, ...(stale ? { stale: true } : {}), ...(heapNow && !fatal ? { heap: heapNow() } : {}) }); } catch { /* gone */ }
   } finally {
     if (failed || !KEEPS.has(method)) for (const f of files) f.close();
     else if (files.length > 1) for (const f of files.slice(1)) f.close();

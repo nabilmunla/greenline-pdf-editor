@@ -11,6 +11,10 @@
 // waiting, no errors, no popups. A new version is announced and only downloaded when the person
 // says so; the copy is checked (SHA-256) before anything uses it; the installed files are swapped
 // by the setup helper after the app has closed (the old app part is kept for going back).
+//
+// The bridge (PLAN 11): a Greenline copy that was the company's until this update (the helper's copy
+// for Go back has no "brand", or the signed latest.json it finds in a folder says build "company")
+// moves itself to the build's web address - adopt(), moveToFeed().
 'use strict';
 const { app, utilityProcess, powerMonitor } = require('electron');
 const path = require('path');
@@ -24,8 +28,9 @@ const CHECK_TIMEOUT = Number(process.env.PDFED_UPDATE_TIMEOUT) || 15000;
 const STALL_TIMEOUT = Number(process.env.PDFED_UPDATE_STALL) || 60000;
 const EVERY = 4 * 3600 * 1000;
 const FIRST = Number(process.env.PDFED_UPDATE_FIRST) || 20000;
+const GO_BACK_MS = 30 * 86400000; // how long a moved copy may go back to the folder it came from (PLAN 11.1)
 
-function create({ version, readSettings, writeSettings, log, send, appName, defaultSource = '', build = 'company' }) {
+function create({ version, readSettings, writeSettings, log, send, appName, defaultSource = '', build = 'company', onMoved = () => {}, now = Date.now, writeFile = fs.writeFileSync }) {
   const installDir = () => process.env.PDFED_INSTALL_DIR || path.dirname(process.execPath);
   const workDir = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), process.env.LOCALAPPDATA ? appName : '', 'updates');
   const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8').replace(/^﻿/, '')); } catch (_) { return null; } };
@@ -39,7 +44,18 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
   // the company build = the folder its setup named (even an empty one: "no updates" was chosen there),
   // else the build's own address if it has one, else nothing ("" - nobody to restore from).
   const defaultFor = () => (build === 'greenline' ? defaultSource : setupSaid() ? setupSource() : defaultSource);
-  const previous = () => { const p = readJson(path.join(installDir(), 'resources', 'app.old', 'package.json')); return (p && p.version) || ''; };
+  // The helper's copy for Go back. On a Greenline copy whose copy for Go back is the company's (no
+  // "brand"), going back is offered only while the move's `cameFrom` lives (30 days): it is what
+  // points the old version at its folder again (PLAN 11.1).
+  const appOld = () => readJson(path.join(installDir(), 'resources', 'app.old', 'package.json'));
+  const bridgeOn = () => build === 'greenline' && feed.isWeb(defaultSource);
+  const cameFromAlive = () => { const c = readSettings().cameFrom; return !!(c && typeof c.source === 'string' && c.source && Number(c.until) > now()); };
+  const previous = () => {
+    const p = appOld();
+    if (!p || !p.version) return '';
+    if (build === 'greenline' && !p.brand && !cameFromAlive()) return '';
+    return p.version;
+  };
   const runtime = process.versions.electron;
   // Linux (Greenline): the whole program is one package - an AppImage (one file, swapped for the
   // new one by the app itself: a running AppImage keeps going from the old file) or a .deb (handed
@@ -206,7 +222,15 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     const bad = validate(j);
     if (bad) return unusable(bad, { state: 'error', err: bad });
     // (the other edition's release - the public build's in the company folder, say: same key, not ours)
-    if (j.build && j.build !== build) return unusable('update refused: a release of another edition (' + j.build + ')', { state: 'error', err: 'The update in that place is for another edition of the app - not installed.' });
+    if (j.build && j.build !== build) {
+      // (trigger B of the bridge: a Greenline copy reading a folder whose signed release is the company's
+      // - the last release on the share - moves to its web address and checks there)
+      if (bridgeOn() && j.build === 'company' && !feed.isWeb(src) && moveToFeed(src)) {
+        set({ state: 'idle', err: '', available: '', show: false });
+        return await check(manual);
+      }
+      return unusable('update refused: a release of another edition (' + j.build + ')', { state: 'error', err: 'The update in that place is for another edition of the app - not installed.' });
+    }
     if (!newer(j.version, version)) { latest = null; set({ state: 'none', err: '', available: '' }); return snapshot(); }
     const lk = linuxKind();
     // (Linux: the package for this kind of copy, whatever the runtime - it carries its own)
@@ -340,6 +364,10 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     if (!previous()) return false;
     if (onlyAsk) return true;
     pending = { kind: 'rollback', relaunch: true, skip: version };
+    // (back to the company's copy: 0.12.1 reads its folder again - a setting wins over update.json)
+    const p = appOld();
+    const c = readSettings().cameFrom;
+    if (build === 'greenline' && p && !p.brand && c && c.source) pending.back = String(c.source);
     return true;
   }
   /** the close was cancelled (unsaved work): a "Restart now" is dropped (the card comes back);
@@ -451,7 +479,14 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
         : ['--apply', p.file, '--sha256', p.sha, '--version', p.version, '--dir', dir, '--wait', String(process.pid)];
       if (p.relaunch) args.push('--relaunch');
       // (a settings file held by the antivirus must not stop going back either)
-      if (p.skip) { try { writeSettings({ ...readSettings(), skipUpdate: p.skip }); } catch (e) { log('update: ' + e); } }
+      if (p.skip || p.back) {
+        try {
+          const w = { ...readSettings() };
+          if (p.skip) w.skipUpdate = p.skip;
+          if (p.back) w.updateSource = p.back;
+          writeSettings(w);
+        } catch (e) { log('update: ' + e); }
+      }
       // checked at the next start: still this version -> the update didn't finish (blocked partway)
       // (a settings file held by the antivirus must not stop the update itself)
       if (p.kind !== 'rollback') { try { writeSettings({ ...readSettings(), updateTry: { from: version, to: p.version, at: Date.now() } }); } catch (e) { log('update: ' + e); } }
@@ -556,6 +591,78 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     return updated;
   }
 
+  /**
+   * The move (PLAN 11.1), once: update.json in the install folder names the feed (as setSource does),
+   * the setting that pointed at the folder goes; an install for everyone can't write update.json -
+   * then `updateSource` = the feed stays as the only trace (cleaned at a later start, adopt()).
+   * Reports still queued were written under the company's terms: dropped, never sent to the receiver.
+   * Settings gain `moved` (the notice shows once) and `cameFrom` (Go back, 30 days). false = nothing moved.
+   */
+  function moveToFeed(from) {
+    if (!bridgeOn() || !install()) return false;
+    let written = false;
+    try {
+      const f = path.join(installDir(), 'update.json'), u = readJson(f);
+      writeFile(f, JSON.stringify({ ...(u && typeof u === 'object' && !Array.isArray(u) ? u : {}), source: defaultSource }));
+      written = true;
+    } catch (e) { log('update: update.json not writable (' + (e.code || e) + '): the setting carries the move'); }
+    const t = now();
+    const prev = (appOld() || {}).version || String(readSettings().lastRunVersion || '');
+    try {
+      const w = { ...readSettings() };
+      if (written) delete w.updateSource; else w.updateSource = defaultSource;
+      w.moved = { at: t, from: prev, shown: false };
+      w.cameFrom = { source: from, until: t + GO_BACK_MS, version };
+      writeSettings(w);
+    } catch (e) { log('update: could not write the move: ' + e); return false; }
+    try { onMoved(); } catch (e) { log('update: ' + e); }
+    log('update: moved from ' + from + ' to ' + defaultSource + (written ? '' : ' (update.json not writable: the setting)'));
+    latest = null;
+    return true;
+  }
+  /**
+   * At start, no network: a Greenline copy whose copy for Go back is the company's (no brand) was
+   * the company's until this update (trigger A) - it moves. Also what the move left behind is
+   * cleaned: a `cameFrom` that ran out or belongs to an older version, and an `updateSource` that
+   * only repeats the feed once update.json says so itself. true = moved.
+   */
+  function adopt() {
+    if (!bridgeOn() || !install() || !linuxInstalled()) return false;
+    const s = readSettings();
+    const clean = {};
+    if (s.cameFrom && (!(Number(s.cameFrom.until) > now()) || newer(version, String(s.cameFrom.version || version)))) clean.cameFrom = null;
+    if (s.moved && s.updateSource === defaultSource) {
+      const u = readJson(path.join(installDir(), 'update.json'));
+      if (!u || (typeof u.source === 'string' && feed.isWeb(u.source))) clean.updateSource = null;
+    }
+    if (Object.keys(clean).length) {
+      try {
+        const w = { ...readSettings() };
+        for (const k of Object.keys(clean)) delete w[k];
+        writeSettings(w);
+      } catch (e) { log('update: ' + e); }
+    }
+    const old = appOld();
+    const from = source();
+    if (s.moved || !old || old.brand || !from || feed.isWeb(from)) return false;
+    if (!moveToFeed(from)) return false;
+    // (the check against the feed at once)
+    setTimeout(() => void check(false).catch((e) => log('update check: ' + e)), Number(process.env.PDFED_UPDATE_MOVED) || 1500);
+    return true;
+  }
+  /** the notice of the move: true once per start while it has not been seen (the window asks) */
+  let movedClaimed = false;
+  function movedClaim() {
+    const m = readSettings().moved;
+    if (movedClaimed || !m || m.shown) return false;
+    movedClaimed = true;
+    return true;
+  }
+  function movedDone() {
+    try { const w = { ...readSettings() }; if (w.moved) { w.moved = { ...w.moved, shown: true }; writeSettings(w); } } catch (e) { log('update: ' + e); }
+    return true;
+  }
+
   function start() {
     if (!install() || !linuxInstalled()) { st = { state: 'portable' }; return; }
     setTimeout(() => void check(false).catch((e) => log('update check: ' + e)), FIRST);
@@ -583,7 +690,7 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     return snapshot();
   }
 
-  return { snapshot, check, download, cancel, choose, chooseRollback, closeCancelled, later, applyAtQuit, afterStart, start, stop, setSource, preflight, kind: () => (latest ? latest.kind : 'app'), hasPending: () => !!pending, pendingRelaunch: () => !!(pending && pending.relaunch) };
+  return { snapshot, check, download, cancel, choose, chooseRollback, closeCancelled, later, applyAtQuit, afterStart, adopt, movedClaim, movedDone, start, stop, setSource, preflight, kind: () => (latest ? latest.kind : 'app'), hasPending: () => !!pending, pendingRelaunch: () => !!(pending && pending.relaunch) };
 }
 
 module.exports = { create };

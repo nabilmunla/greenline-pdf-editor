@@ -1,4 +1,30 @@
 {
+  "0.13.0": {
+    "New features": [
+      "Lines and arrows: each end now has its own arrowhead setting, so an arrow can point both ways, or carry a different head at each end. A button swaps the two ends.",
+      "Spelling: right-click a word underlined in red in a text box or comment for suggestions and \"Add to dictionary\". The same menu has Cut, Copy, Paste and Select all.",
+      "Excel export of counts and measurements: a new \"By sheet\" sheet shows each item against each drawing sheet, with totals. Only sheets that carry marks are listed.",
+      "Link the sheets finds more drawing sets: large drawings whose number box also holds numbers that repeat from sheet to sheet are now recognised. In such sets a reference is linked only where it clearly points to one sheet; the others are left alone.",
+      "Link the sheets: the \"Sheets\" bookmarks now carry each sheet's title next to its number."
+    ],
+    "General polishing": [
+      "Combine, Extract, Insert and printing of big sets need far less memory. A 300-sheet set with 300,000 links took about a seventh of the memory to combine in testing.",
+      "Inserting a big set is much faster: 1,500 sheets with 60,000 links went in in under 4 seconds in testing (79 seconds before). One Undo still removes them all.",
+      "Stop during Combine now stops at once and leaves nothing behind.",
+      "Printing a big file can be cancelled while it is prepared. A cancelled print says \"The print was stopped.\"",
+      "Deleting or flattening many markups at once, and numbering the pages of a long file, are several times faster. Flattening 1,500 markups took under a second in testing (11 seconds before).",
+      "A sheet of millions of lines is prepared about twice as fast. It also keeps its fast drawing after page numbers or redaction are added to it, or after it is inserted into another file.",
+      "If part of the app stops answering, a notice asks: \"Keep waiting\" or \"Restart it\". If it is running out of memory, the app asks before it restarts; your changes are kept, but Undo starts again from there.",
+      "Mark, flatten and repair in Batch now work on very big files (over 1 GB) that used to fail."
+    ],
+    "Fixes": [
+      "Link the sheets no longer takes numbers on bill of quantities pages for sheet numbers, so no links point to them.",
+      "A save that would pass 4 GB is refused with a plain message that suggests splitting the file. The file on disk is left as it was.",
+      "Protected or signed files over about 1.2 GB: the app says on opening that such a file cannot be saved here. Markups, printing and extracting pages still work.",
+      "Pictures to PDF: more than about 1 GB of pictures is refused before it starts, with the advice to make two or more PDFs and merge them.",
+      "A print too big to prepare gets a message asking you to print it in parts, instead of an error."
+    ]
+  },
   "0.12.1": {
     "Fixes": [
       "Combining no longer runs out of memory when one of the files holds a very large number of links or markups (hundreds of thousands, as some big drawing sets do). Such a combine used to fail; it now finishes."

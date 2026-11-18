@@ -1,11 +1,12 @@
 // PDF Editor: frame, ribbon, document tabs, panels, and every action.
 import { exportRunning, type ExportFormat } from './ExportDlg';
 import { loadFonts } from './fontlist';
+import { lockedBigNotice } from './bigLocked';
 import { UpdateCard, useUpdates } from './Updates';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { gcc, baseName, dirName, joinPath, type AppInfo, type Recovery, type TabMove, type UpdatedInfo } from './api';
-import { startEngines, rendererFor, renderers, mu, editor as editWorker, pinCount, pinLog } from './engines';
-import { PdfDoc, onCrash, wasPlannedRestart, plannedRestartLostWork, type Scale } from './doc';
+import { startEngines, rendererFor, renderers, mu, editor as editWorker, batcher, muBatch, pinCount, pinLog, type StuckNotice, type MemoryAsk } from './engines';
+import { PdfDoc, onCrash, wasPlannedRestart, wasStuckRestart, plannedRestartLostWork, restartEditingEngine, type Scale } from './doc';
 import { previewCache, tiles } from './tiles';
 import type { PrintSettings } from './PrintDlg';
 import { Viewer, markClip, type ViewerApi, type ViewerEvent, type SelItem, type Hit, type PlaceItem } from './Viewer';
@@ -20,7 +21,7 @@ import { TOOLS, toolStyle, MEASURE_TOOLS, HOW_HINT, type ToolId, type Style, typ
 import { BUILTIN_STAMPS, fillFields, designSize, dataUrlToBytes, type StampDef } from './stamps';
 import type { ScanSource } from './StampScan';
 import { STANDARD_SCALES, PT_M, dist, fmtLen, scaleText, type MeasureFmt } from './geom';
-import { measureNumber, perimeterNumber, measureRow, headRow, MEASURE_HEAD, MEASURE_WIDTHS } from './measurexl';
+import { measureNumber, perimeterNumber, bySheetTable, measureRow, headRow, MEASURE_HEAD, MEASURE_WIDTHS } from './measurexl';
 import { charsToWords, wordsToTable, toTsv, toHtml } from './table';
 import { ocrPage, type OcrLang } from './ocr';
 import { writeXlsx } from './xlsxwrite';
@@ -95,6 +96,7 @@ export type Dialog =
   | { k: 'counttag'; page: number }
   | { k: 'settings' }
   | { k: 'count' }
+  | { k: 'moved' }
   | { k: 'whatsnew'; back?: boolean }
   | { k: 'licences' }
   | { k: 'report'; shot: string | null }
@@ -212,7 +214,10 @@ export function App() {
   // handle for the automated tests (and for support: F12 console)
   // an engine had to be restarted (out of memory on a monster file): the window carried on
   useEffect(() => onCrash((kind) => {
-    if (kind === 'edit' && wasPlannedRestart()) {
+    if (kind === 'edit' && wasStuckRestart()) {
+      if (docsRef.current.length) toast('The editing engine was restarted. Your files were reopened from the last automatic copy – changes from the last minute or two may need redoing; undo starts again.', 'err', undefined, 15000);
+    }
+    else if (kind === 'edit' && wasPlannedRestart()) {
       // ("all there" only when every file's unsaved work was copied first)
       if (plannedRestartLostWork()) toast('The editing engine was refreshed, but the latest changes of a file could not be kept for it (no room for the automatic copy?) – check your last changes; undo starts again from here.', 'err', undefined, 12000);
       else if (docsRef.current.length) toast('The editing engine was refreshed. Your work is all there; undo starts again from here.', 'info', undefined, 8000);
@@ -223,18 +228,28 @@ export function App() {
   // (tests: a tab dropped at a screen point, as a drag out of the strip ends)
   const moveRef = useRef<(id: string, x: number, y: number) => Promise<void>>(async () => {});
   moveRef.current = async (id, x, y) => { const d = docsRef.current.find((k) => k.id === id); if (d) await moveTab(d, await gcc.tabTarget(x, y), x, y); };
-  useEffect(() => { (window as unknown as { __gcc: unknown }).__gcc = { moveTo: (id: string, x: number, y: number) => moveRef.current(id, x, y), docs: () => docsRef.current, active: () => docsRef.current.find((d) => d.id === activeRef.current) || null, viewer: () => viewer.current, tiles, pinCount, pinLog, engines: { mu, renderers, editor: editWorker }, ocr: (lang: OcrLang) => { const d = docsRef.current.find((x) => x.id === activeRef.current)!; return ocrPage(d.id, 0, d.pages[0].w, d.pages[0].h, { lang }); } }; }, []);
+  useEffect(() => { (window as unknown as { __gcc: unknown }).__gcc = { moveTo: (id: string, x: number, y: number) => moveRef.current(id, x, y), docs: () => docsRef.current, active: () => docsRef.current.find((d) => d.id === activeRef.current) || null, viewer: () => viewer.current, tiles, pinCount, pinLog, engines: { mu, renderers, editor: editWorker, batcher, muBatch }, ocr: (lang: OcrLang) => { const d = docsRef.current.find((x) => x.id === activeRef.current)!; return ocrPage(d.id, 0, d.pages[0].w, d.pages[0].h, { lang }); } }; }, []);
 
   // ---------------------------------------------------------------- start-up
 
   // Greenline's user counter: the first-start pop-up, once per start, when nothing else is open
   // (nothing is sent until it is answered; the company build has no counter: active is false)
+  // (first, once, the notice of a company copy that moved to Greenline - the pop-up follows it, never under it)
   const countAsked = useRef(false);
+  const movedAsked = useRef<'no' | 'asking' | 'done'>('no');
+  const [movedStep, setMovedStep] = useState(0); // (changes when the notice question is answered: the effect runs again)
   useEffect(() => {
-    if (!ready || dialog || countAsked.current) return;
+    if (!ready || dialog) return;
+    if (movedAsked.current === 'no') {
+      movedAsked.current = 'asking';
+      const next = () => { movedAsked.current = 'done'; setMovedStep((v) => v + 1); };
+      void gcc.updateMovedClaim().then((show) => { if (show) setDialog((cur) => cur || { k: 'moved' }); next(); }).catch(next);
+      return;
+    }
+    if (movedAsked.current !== 'done' || countAsked.current) return;
     countAsked.current = true;
     void gcc.countClaim().then((ask) => { if (ask) setDialog((cur) => cur || { k: 'count' }); }).catch(() => {});
-  }, [ready, dialog]);
+  }, [ready, dialog, movedStep]);
 
   useEffect(() => {
     void (async () => {
@@ -343,6 +358,44 @@ export function App() {
     window.addEventListener('gcc-engine-gaveup', f);
     return () => window.removeEventListener('gcc-engine-gaveup', f);
   }, [toast]);
+
+  // an engine that has stopped answering (PLAN 10.4): the person decides - the editing engine holds
+  // the undo history and the batch engine a running job, so neither is restarted unasked
+  useEffect(() => {
+    const over = (e: Event) => setToasts((t) => t.filter((x) => x.key !== String((e as CustomEvent).detail)));
+    const f = (e: Event) => {
+      const { engine, kind, ms, restart } = (e as CustomEvent<StuckNotice>).detail;
+      const for_ = ms >= 90_000 ? Math.round(ms / 60_000) + ' minutes' : Math.round(ms / 1000) + ' seconds';
+      const text = `The ${engine.toLowerCase()} has not answered for ${for_}. ` + (kind === 'edit'
+        ? 'Restarting it reopens your files from the last automatic copy: changes from the last minute or two and the undo history will be lost.'
+        : 'Restarting it stops the job it is running.');
+      setToasts((t) => [...t.filter((x) => x.key !== engine), { id: toastSeq++, text, kind: 'err', key: engine, actions: [{ label: 'Keep waiting', run: () => {} }, { label: 'Restart it', run: restart }] }]);
+    };
+    window.addEventListener('gcc-engine-stuck', f);
+    window.addEventListener('gcc-engine-stuck-over', over);
+    return () => { window.removeEventListener('gcc-engine-stuck', f); window.removeEventListener('gcc-engine-stuck-over', over); };
+  }, []);
+
+  // the editing engine's memory is nearly used up (PLAN 10.5): asked, never restarted unasked - the
+  // undo history would go. "Not now" leaves a line in the status bar, which asks again when clicked.
+  const [memLow, setMemLow] = useState(false);
+  const askMemory = useCallback(() => {
+    setToasts((t) => [...t.filter((x) => x.key !== 'memory'), {
+      id: toastSeq++, kind: 'err', key: 'memory',
+      text: 'The editing engine is nearly out of memory. Restart it now? Your changes are kept; undo starts again.',
+      actions: [
+        { label: 'Restart now', run: () => { restartEditingEngine().then(() => setMemLow(false), (e: unknown) => toast(String((e as Error)?.message || e), 'err', undefined, 12000)); } },
+        { label: 'Not now', run: () => {} },
+      ],
+    }]);
+  }, [toast]);
+  useEffect(() => {
+    const f = () => { setMemLow(true); askMemory(); };
+    window.addEventListener('gcc-engine-memory', f);
+    return () => window.removeEventListener('gcc-engine-memory', f);
+  }, [askMemory]);
+  // (a new editing engine has all its memory again)
+  useEffect(() => onCrash((kind) => { if (kind === 'edit') setMemLow(false); }), []);
 
   // ---------------------------------------------------------------- the selection's style (ribbon)
 
@@ -525,6 +578,7 @@ export function App() {
       setPageSel([]);
     }
     if (d.lossy) toast(`${d.name} was damaged; it was repaired while opening. Save to keep the repaired copy.`, 'info', undefined, 8000);
+    if (d.lockedBig) toast(lockedBigNotice(d.name, d.lockedBig), 'info', undefined, 14000);
     if (d.heavy) toast(`${d.name} is an extremely heavy drawing (millions of separate line pieces). They were joined into fewer lines so it can be drawn at all - same drawing, very dense hatching may look a touch darker. The first picture can take half a minute.`, 'info', undefined, 12000);
     if (d.readOnly) toast(`${d.name} is read-only here – use Save as to keep changes.`, 'info');
   }
@@ -1078,6 +1132,11 @@ export function App() {
       try { await gcc.write(target, writeXlsx([
         { name: 'Measurements', rows, header: 1, widths: MEASURE_WIDTHS },
         { name: 'Counts', rows: [[{ v: 'Count', s: 'h' }, { v: 'Number', s: 'h' }], ...[...counts].map(([k, v]) => [k, v])] as never, header: 1, widths: [24, 10] },
+        // items down, sheets across (the page label, else the PDF page), totals at the right and bottom
+        bySheetTable(all.map((a) => ({
+          page: a.page, label: doc.pages[a.page]?.label, kind: a.kind!, group: a.group,
+          num: a.kind === 'measure-count' ? null : measureNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y)), perimeter: perimeterNumber(a, (pg, x, y) => doc.scaleAt(pg, x, y)),
+        }))),
       ]), { noBackup: true }); } catch (e) { fail(e); return; }
       toast('Saved ' + baseName(target), 'ok', { label: 'Open', run: () => void gcc.openExternal(target).catch(fail) });
     },
@@ -1684,6 +1743,7 @@ export function App() {
             <span className="s"><button className={'sb-btn' + (snapOn ? ' set' : '')} title="Snap to line ends, middles and markup corners (F9). Hold Ctrl to skip snapping for one click." onClick={() => A.toggleSnap()}><Ico n="magnet" size={14} /> Snap {snapOn ? 'on' : 'off'}</button></span>
             <span className="s"><button className={'sb-btn' + (settings.ortho ? ' set' : '')} title="Ortho (F8): lines and corners go straight - 0, 45 or 90° - without holding Shift" onClick={() => A.toggleOrtho()}><Ico n="ortho" size={14} /> Ortho {settings.ortho ? 'on' : 'off'}</button></span>
             <span className="s grow st">{status}</span>
+            {memLow && <span className="s"><button className="sb-btn" title="Click to restart the editing engine. Your changes are kept; undo starts again." onClick={askMemory}>Editing engine nearly out of memory</button></span>}
             <span className="s">{doc.dirty ? 'Unsaved changes' : doc.path ? 'Saved' : ''}</span>
           </>
         ) : (
@@ -1697,6 +1757,7 @@ export function App() {
             {t.kind === 'busy' && <span className="dot busy" />}
             <span className="grow">{t.text}</span>
             {/* (not while a dialog is open: "Set scale", "Open"… would replace it and what was typed in it) */}
+            {t.actions?.map((a) => <button key={a.label} className="tbtn" onClick={() => { a.run(); setToasts((x) => x.filter((y) => y.id !== t.id)); }}>{a.label}</button>)}
             {t.action && <button className="tbtn" disabled={!!dialog} title={dialog ? 'Close the dialog first' : undefined} onClick={() => { t.action!.run(); setToasts((x) => x.filter((y) => y.id !== t.id)); }}>{t.action.label}</button>}
             {t.kind !== 'busy' && <button className="tbtn" onClick={() => setToasts((x) => x.filter((y) => y.id !== t.id))}>×</button>}
           </div>

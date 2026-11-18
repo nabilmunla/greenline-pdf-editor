@@ -7,13 +7,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, type Toast } from './Modal';
 import { Ico } from './icons';
 import { gcc } from './api';
-import { editor, muFile, muBatch } from './engines';
-import type { FileRef } from '../engine/rpc';
-import type { PdfDoc } from './doc';
+import { editor, mu, muFile, muBatch, muBatchCancel } from './engines';
+import { fileArg, type FileRef } from '../engine/rpc';
+import type { FileSpec, PdfDoc } from './doc';
 
 /** the printer driver's own preferences window exists only on Windows */
 const WINDOWS = /Windows/i.test(navigator.userAgent);
-import { PAPERS, paperName, sheetLayout, type PrintOpts } from '../engine/printlayout';
+import { PAPERS, paperName, sheetLayout, PRINT_BIG, printShare, type PrintOpts } from '../engine/printlayout';
 import { parseRanges, toRanges, paperSheets } from './dlgutil';
 
 export interface PrintSettings {
@@ -49,6 +49,9 @@ type Which = 'all' | 'current' | 'view' | 'area' | 'selected' | 'range';
 interface Printer { name: string; displayName: string; description: string; isDefault: boolean; status: number }
 
 const MM = 72 / 25.4;
+/** a print past this share of the file is made by the batch engine (PLAN 10.12; tests lower it:
+ *  localStorage pdfed-print-big, bytes) */
+const printBigFrom = () => { try { return Number(localStorage.getItem('pdfed-print-big')) || PRINT_BIG; } catch { return PRINT_BIG; } };
 /** 0:42 */
 const secs = (ms: number) => { const t = Math.round(ms / 1000); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
@@ -73,8 +76,10 @@ export function PrintDlg(p: Props) {
   const [color, setColor] = useState(S.color ?? true);
   const [duplex, setDuplex] = useState<NonNullable<PrintSettings['duplex']>>(S.duplex || 'simplex');
   const [send, setSend] = useState<NonNullable<PrintSettings['send']>>(S.send || 'auto');
-  /** Cancel pressed while the pictures are being made */
+  /** Cancel pressed while the pictures are being made (or a big print file is) */
   const stop = useRef(false);
+  /** the batch engine's print job under way (a big selection): Cancel stops it there */
+  const bigJob = useRef<string | null>(null);
   /** when the current step started (the busy note counts the seconds: a long hand-over to the
    *  printer looked like nothing was happening) */
   const [since, setSince] = useState(0);
@@ -178,6 +183,45 @@ export function PrintDlg(p: Props) {
 
   const step = (t: string) => { setBusy(t); setSince(Date.now()); };
   /**
+   * The print file: made by the editing engine from the open document - or, when the pages'
+   * share of the file is big, by the batch engine from a copy of it (PLAN 10.12: the print file
+   * is a second copy of those pages, and the editing engine would keep the memory it grew to).
+   * The copy (drawSnapshot: unsaved changes included) goes when the job ends. A file that needs
+   * its password stays in the editing engine (no copy of it on disk) at any size, as before;
+   * told to print in parts only if that runs out of memory. null: cancelled.
+   */
+  const build = async (o: PrintOpts): Promise<FileRef | { bytes: FileRef; pictures: number[] } | null> => {
+    const share = printShare(o.pages.length, n, doc.size);
+    const limit = printBigFrom();
+    // (a password file has no copy on disk, so it stays in the editing engine as before 10.12 at
+    // any size - big ones printed before and still do; only if memory really runs out is the
+    // person told to print it in parts)
+    if (share <= limit || doc.password) {
+      try { return await muFile<FileRef | { bytes: FileRef; pictures: number[] }>('printFile', doc.id, o); }
+      catch (e) {
+        if (!doc.password || !/malloc|realloc|out of memory|memory/i.test(String(e))) throw e;
+        const most = Math.max(1, Math.floor((limit / Math.max(1, doc.size)) * n));
+        throw new Error(`This file is protected with a password, and ${o.pages.length} of its pages are too much to print at once. Print it in parts of up to ${most} page${most === 1 ? '' : 's'}.`);
+      }
+    }
+    const job = 'print-' + Math.random().toString(36).slice(2);
+    step(`Making ${o.pages.length} sheet${o.pages.length === 1 ? '' : 's'} for a big print…`);
+    const src = await mu<FileSpec>('drawSnapshot', doc.id, false);
+    const snap = src.delta || src.path;
+    bigJob.current = job;
+    try {
+      if (stop.current) return null;
+      // (the layers the window shows other than the file says: the copy knows nothing of them - PLAN 7.8)
+      return await muBatch<FileRef | { bytes: FileRef; pictures: number[] }>('printBig', job, fileArg(src.path, { size: src.size, delta: src.delta, mtime: src.mtime }), o, await doc.layerOverlay());
+    } catch (e) {
+      if (stop.current) return null;
+      throw e;
+    } finally {
+      bigJob.current = null;
+      void gcc.dropTemp([snap]).catch(() => {});
+    }
+  };
+  /**
    * The file for the printer (each page on its sheet). Sheets that are heavy for a printer
    * (big scans, dense line work - or all of them, "Pictures") are then made into one picture
    * each by the batch engine, one by one: progress shown, Cancel stops it, the open file stays
@@ -188,7 +232,10 @@ export function PrintDlg(p: Props) {
     // (Save as PDF: sheets as they are unless "Pictures" was chosen - a saved PDF of pictures
     // loses its text and its lines; Auto is about what printers chew on)
     const o = forFile && send === 'auto' ? { ...opts, send: 'vector' as const } : opts;
-    const r = await muFile<FileRef | { bytes: FileRef; pictures: number[] }>('printFile', doc.id, o);
+    const r = await build(o);
+    if (!r) return null;
+    // (Cancel as the big print's file was finished: nothing goes to the printer)
+    if (stop.current) { void gcc.dropTemp(['$file' in r ? r.$file.path : r.bytes.$file.path]).catch(() => {}); return null; }
     if ('$file' in r) { gcc.log(`print: ${pages.length} sheets made in ${Date.now() - t0} ms (${Math.round((r.$file.size ?? 0) / 1024)} KB, as they are)`); return { path: r.$file.path, pictures: 0 }; }
     const vec = r.bytes.$file;
     if (!r.pictures.length) { gcc.log(`print: ${pages.length} sheets made in ${Date.now() - t0} ms (${Math.round((vec.size ?? 0) / 1024)} KB, none heavy)`); return { path: vec.path, pictures: 0 }; }
@@ -222,7 +269,7 @@ export function PrintDlg(p: Props) {
     try {
       step(`Preparing ${pages.length} page${pages.length === 1 ? '' : 's'}…`);
       const m = await make();
-      if (!m) { setBusy(null); return; }
+      if (!m) { setBusy(null); if (stop.current) p.toast('The print was stopped.', 'info'); return; }
       const f = m.path;
       step(dialog ? 'Opening the Windows print dialog…' : 'Sending to the printer…');
       const t0 = Date.now();
@@ -264,7 +311,7 @@ export function PrintDlg(p: Props) {
     try {
       step('Making the PDF…');
       const m = await make(true);
-      if (!m) { setBusy(null); return; }
+      if (!m) { setBusy(null); if (stop.current) p.toast('The print was stopped.', 'info'); return; }
       await gcc.commit(m.path, to);
       p.close();
       p.toast('Saved.', 'ok', { label: 'Show', run: () => void gcc.showInFolder(to).catch(p.fail) });
@@ -283,7 +330,7 @@ export function PrintDlg(p: Props) {
         {/* (Windows only: the driver's own window - on Linux CUPS has none to open from here) */}
         {WINDOWS && <button className="btn" disabled={!!busy || !printers?.length || !printer} onClick={() => void prefs()} title={`The preferences of ${pr?.displayName || 'the printer picked'}: tray, quality, stapling… (kept for that printer). Paper, copies, sides and colour are set here.`}>Printer preferences…</button>}
         <span className="grow" />
-        <button className="btn" disabled={!!busy && !/into a picture|Putting the sheets/.test(busy)} onClick={() => { if (busy) { stop.current = true; setBusy('Stopping…'); return; } p.close(); }}>Cancel</button>
+        <button className="btn" disabled={!!busy && !/into a picture|Putting the sheets|for a big print/.test(busy)} onClick={() => { if (busy) { stop.current = true; setBusy('Stopping…'); if (bigJob.current) muBatchCancel(bigJob.current); return; } p.close(); }}>Cancel</button>
         <button className="btn primary" disabled={!!busy || !pages.length || !printers?.length} onClick={() => void go(false)}><Ico n="print" size={14} /> Print</button>
       </>}>
       <div className="pd">

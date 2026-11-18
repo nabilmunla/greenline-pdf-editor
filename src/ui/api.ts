@@ -114,6 +114,8 @@ export interface GccApi {
   /** HTML (a translation...) made into a PDF by Chromium; returns a temp file */
   htmlToPdf(html: string, name: string, opts?: { landscape?: boolean }): Promise<string>;
   enginesStart(list: { name: string; role: string }[]): Promise<boolean>;
+  /** end one engine's process (it stopped answering, or its memory is nearly gone): the app starts a new one */
+  killEngine(name: string): Promise<boolean>;
   /** move an engine temp file to `file` (backup + safe swap) */
   commit(src: string, file: string, opts?: { noBackup?: boolean }): Promise<{ size: number; mtime: number; inPlace: boolean }>;
   dropTemp(paths: string[]): Promise<boolean>;
@@ -153,6 +155,9 @@ export interface GccApi {
   /** Greenline's anonymous user counter (active: false in the company build); claim: true once per start while unanswered */
   countState(): Promise<CountState>;
   countClaim(): Promise<boolean>;
+  /** a copy that moved from the company's updates folder to the web: true once per start until the notice has been seen */
+  updateMovedClaim(): Promise<boolean>;
+  updateMovedDone(): Promise<boolean>;
   countAnswer(keep: boolean): Promise<CountState>;
   countSet(on: boolean): Promise<CountState>;
   reportPreview(): Promise<string>;

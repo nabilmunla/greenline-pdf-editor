@@ -4,8 +4,9 @@
 // A page's number is read from its title block: the strip along the right / bottom edge where title
 // blocks sit. Across the pages of one size, the number sits in the same spot on most pages and is
 // different on each (a project number or a date repeats on every sheet; a scale or a revision code
-// is no drawing number). Nothing rigid: a file that is not a drawing set - a specification, a scan,
-// prose - has no spot like that, and nothing is found (the user, 16 Nov: "it should not break").
+// is no drawing number, nor is an amount or a quantity). Nothing rigid: a file that is not a drawing
+// set - a specification, a scan, prose, a bill of quantities - has no spot like that, and nothing
+// is found (the user, 16 Nov: "it should not break").
 import { drawingNo, drawingNoBare, noZeros, sheetNo, cleanTitle, rightStrip, bottomStrip, sizeKey } from './sheetno';
 
 const MM = 72 / 25.4;
@@ -13,8 +14,10 @@ const MM = 72 / 25.4;
 const CELL = 10 * MM;
 /** candidates kept per page (title band first) - a page of a spec or a schedule holds thousands */
 export const MAX_TOKENS = 400;
-/** text lines of the title band kept per page (for titles) */
-const MAX_LINES = 60;
+/** text lines of the title band kept per page (for titles) - in text order, where a title block's lines
+ *  can come late: 60 cut the title off 441 of the user's 483 real sheets (PLAN 9.2; 85 lines on the
+ *  median sheet there, 162 at the 90th percentile) */
+const MAX_LINES = 400;
 
 export type Box = [number, number, number, number];
 /** a word that can be a drawing number */
@@ -48,6 +51,8 @@ const WS = /[\s  -​　]/;
  *  margins - a left margin holds a spec's clause numbers, a top one its running heads) */
 const inStrip = (b: Box, w: number, h: number) => (b[0] + b[2]) / 2 > rightStrip(w) || (b[1] + b[3]) / 2 > bottomStrip(h);
 const hasLetter = /\p{L}/u;
+/** digits with a decimal point or comma, thousands separators allowed, a sign or brackets around */
+const AMOUNT = /^[(+-]?\d[\d,]*[.,]\d+[.,;:)%]*$/;
 
 /**
  * A page's text (one character per box, page space as shown: y down) reduced to what the sheet
@@ -100,6 +105,10 @@ export function tokensOf(page: number, chars: { text: string; box: ArrayLike<num
       // (numbers and dots only - "3.6.3", "1.4", "2.01.5" - are clause, item or version numbers:
       //  a specification's margins are full of them, different on every page)
       if (/^\(?\d{1,3}(\.\d{1,3})+\.?\)?[.,;:]?$/.test(s)) continue;
+      // (nor is any other number with a decimal point or comma - "0.5", "1234.56", "1,047.50": the
+      //  quantities and amounts of a bill of quantities, different on every page; 34 of the 44 false
+      //  sheets on the user's real sets, PLAN 9)
+      if (AMOUNT.test(s)) continue;
       const raw = (() => { try { return sheetNo(l[k].s) || drawingNo(l[k].s, true) || key; } catch { return key; } })();
       const cmp = noZeros(drawingNoBare(key));
       if (!cmp) continue;
@@ -116,7 +125,11 @@ export function tokensOf(page: number, chars: { text: string; box: ArrayLike<num
   return out;
 }
 
-export interface Sheet { page: number; no: string; key: string; title: string }
+export interface Sheet {
+  page: number; no: string; key: string; title: string;
+  /** read at a spot whose numbers repeat (repeatedNos): its references need more proof (findRefs) */
+  repeats?: boolean;
+}
 export interface SheetIndex {
   /** the numbered pages, in page order */
   sheets: Sheet[];
@@ -135,7 +148,9 @@ const looksLikeNo = (s: string) => /\p{L}/u.test(s) && /\d/.test(s) && s.replace
 /**
  * Which page carries which sheet number. Per page size: the spot (a 10 mm cell, a cell either side
  * allowed for numbers of different lengths) where a title band candidate sits on at least 60 % of
- * the pages with text and differs on at least 90 % of them; groups of fewer than 3 pages, or with no such
+ * the pages with text and differs on at least 90 % of them (plain numbers there: of one length -
+ * plainNumbersOk; on drawing paper, failing that, a spot of drawing numbers some of which repeat -
+ * repeatedNos); groups of fewer than 3 pages, or with no such
  * spot, have no numbers (the pages of a spec in a mixed set fall out here). Page labels that look
  * like drawing numbers count when there is no spot.
  */
@@ -154,7 +169,7 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
     // 2,000 pages took 10 s and more (sweep S4)
     const cells = new Map<number, [number, number]>();
     for (const p of g) for (const t of p.toks) if (t.band) { const c = cellOf(t.box, p.w, p.h); cells.set(cellKey(c[0], c[1]), c); }
-    const picked = new Map<number, { vals: string[]; tall: number }>();
+    const picked = new Map<number, { vals: string[]; raws: string[]; tall: number }>();
     for (const p of g) {
       const bi = new Map<number, number>(), bd = new Map<number, number>();
       p.toks.forEach((t, i) => {
@@ -169,25 +184,34 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
       });
       for (const [k, i] of bi) {
         let e = picked.get(k);
-        if (!e) picked.set(k, (e = { vals: [], tall: 0 }));
+        if (!e) picked.set(k, (e = { vals: [], raws: [], tall: 0 }));
         const t = p.toks[i];
-        e.vals.push(t.key); e.tall += t.box[3] - t.box[1];
+        e.vals.push(t.key); e.raws.push(t.raw); e.tall += t.box[3] - t.box[1];
       }
     }
-    let best: { c: [number, number]; cover: number; tall: number; dist: number } | null = null;
+    type Spot = { c: [number, number]; cover: number; tall: number; dist: number };
+    const better = (a: Spot | null, b: Spot) => !a || b.cover > a.cover || (b.cover === a.cover && (b.tall > a.tall + 0.5 || (Math.abs(b.tall - a.tall) <= 0.5 && b.dist < a.dist)));
+    // (a spot whose numbers repeat is taken only when no spot differs on every page: repeatedNos)
+    let best: Spot | null = null, again: Spot | null = null;
+    const big = Math.min(g[0].w, g[0].h) >= 270 * MM;
     for (const [k, c] of cells) {
-      const vals = picked.get(k)?.vals ?? [];
-      const tall = picked.get(k)?.tall ?? 0;
-      if (vals.length < Math.max(3, Math.ceil(0.6 * g.length))) continue;
-      if (new Set(vals).size < 0.9 * vals.length) continue;
-      const cand = { c, cover: vals.length, tall: tall / vals.length, dist: c[0] + c[1] };
-      if (!best || cand.cover > best.cover || (cand.cover === best.cover && (cand.tall > best.tall + 0.5 || (Math.abs(cand.tall - best.tall) <= 0.5 && cand.dist < best.dist)))) best = cand;
+      const e = picked.get(k);
+      if (!e || e.vals.length < Math.max(3, Math.ceil(0.6 * g.length))) continue;
+      if (!plainNumbersOk(e.raws)) continue;
+      const cand = { c, cover: e.vals.length, tall: e.tall / e.vals.length, dist: c[0] + c[1] };
+      if (new Set(e.vals).size >= 0.9 * e.vals.length) { if (better(best, cand)) best = cand; }
+      else if (big && repeatedNos(e.vals, e.raws) && better(again, cand)) again = cand;
     }
+    const repeats = !best && !!again;
+    best = best || again;
     if (!best) continue;
-    const titleSpot = best ? titleCell(g, best.c) : null;
+    // (each page's titles made once: the title's spot and the page's title both need them)
+    const heads = new Map<PageToks, Head[]>();
+    const headsOf = (p: PageToks) => { let h = heads.get(p); if (!h) heads.set(p, (h = titleHeads(p))); return h; };
+    const titleSpot = best ? titleCell(g, best.c, headsOf) : null;
     for (const p of g) {
       const t = pick(p, best.c);
-      if (t) found.set(p.page, { page: p.page, no: t.raw, key: t.key, title: titleSpot ? titleOf(p, titleSpot, t) : '' });
+      if (t) found.set(p.page, { page: p.page, no: t.raw, key: t.key, title: titleSpot ? titleOf(p, titleSpot, t, headsOf(p)) : '', ...(repeats ? { repeats } : {}) });
       else if (p.label && looksLikeNo(p.label)) found.set(p.page, labelSheet(p));
     }
   }
@@ -203,6 +227,42 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
     if (!byKey.has(s.key)) byKey.set(s.key, s.page);
   }
   return { sheets, byKey, noText };
+}
+
+/**
+ * A spot where most values are plain numbers (no letter: "100101", "9027") is a sheet-number spot
+ * only when they are written to one length: digits-only drawing numbers are ("100101", "100102" -
+ * "0007" as written), a column of quantities or amounts is not ("512", "1047", "23140"). On the
+ * user's real sets (PLAN 9) the false spot's plain numbers had 2 to 8 digits, the commonest length
+ * on 60 % of them; the real sheets there are numbered with letters, untouched by this.
+ */
+export function plainNumbersOk(raws: string[]): boolean {
+  const lens = new Map<number, number>();
+  let plain = 0;
+  for (const r of raws) {
+    if (hasLetter.test(r)) continue;
+    plain++;
+    const n = r.replace(/\D/g, '').length;
+    lens.set(n, (lens.get(n) || 0) + 1);
+  }
+  if (plain < 0.5 * raws.length) return true;
+  // (80 %: a page or two whose pick there is another word does not undo a real set)
+  return Math.max(...lens.values()) >= 0.8 * plain;
+}
+
+/**
+ * A set that holds some sheets more than once (a tender set compiled from packages: the user's A1 set
+ * of 228 pages holds 112 numbers, up to 8 times each, the copies far apart - PLAN 9.3) has no spot
+ * that differs on 90 % of its pages. Its spot is still taken when the numbers there are written like
+ * drawing numbers (a letter and a digit, 90 % of them), differ on 40 % of the pages at least and no
+ * number is on more than a tenth of them - a project number, a revision or a zone code repeats far
+ * more - and only on drawing paper (A3 and up, decided by the caller): the one other spot like that
+ * on the user's sets was on 70 A4 pages of photos and running text.
+ */
+export function repeatedNos(vals: string[], raws: string[]): boolean {
+  const n = vals.length, count = new Map<string, number>();
+  for (const v of vals) count.set(v, (count.get(v) || 0) + 1);
+  return count.size >= 0.4 * n && Math.max(...count.values()) <= 0.1 * n && raws.filter((r) => hasLetter.test(r) && /\d/.test(r)).length >= 0.9 * n;
 }
 
 function labelSheet(p: PageToks): Sheet {
@@ -228,21 +288,22 @@ function pick(p: PageToks, c: [number, number]): Tok | null {
 const REVISH = /^(REV(ISION)?|ISSUE|STATUS|DATE|SCALE|DRAWN|CHECKED|APPROVED|PROJECT|CLIENT|CONSULTANT|CONTRACTOR|SIZE|PURPOSE|SUITABILITY)\b|^(DRAWING|DWG|DRG|SHEET|TITLE)\.?\s*(NO\b|NUMBER|TITLE|NAME|:|$)|^(NO|NUMBER)\b/i;
 const DATEISH = /\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})\b/;
 
-/** where the title sits: the band line spot (10 mm cell of the line's top-left) nearest the number's
- *  spot whose text differs across pages and is words (letters), present on half the pages at least */
-function titleCell(g: PageToks[], noCell: [number, number]): [number, number] | null {
+/** where the title sits: the spot (10 mm cell of its first line's top-left) of the title nearest the
+ *  number's spot whose text differs across pages and is words (letters), present on half the pages at
+ *  least - a whole title (titleHeads), not its first line: "LEVEL 02" over "FLOOR PLAN" repeats from
+ *  sheet to sheet, the title does not (PLAN 9.2) */
+function titleCell(g: PageToks[], noCell: [number, number], headsOf: (p: PageToks) => Head[]): [number, number] | null {
   const spots = new Map<string, { c: [number, number]; texts: string[] }>();
   for (const p of g) {
     const seen = new Set<string>();
-    for (const l of p.lines) {
-      if (!titleish(l.text)) continue;
+    for (const { l, text } of headsOf(p)) {
       const c: [number, number] = [Math.floor((p.w - l.box[0]) / CELL), Math.floor((p.h - l.box[1]) / CELL)];
       const k = c.join(',');
       if (seen.has(k)) continue;
       seen.add(k);
       let s = spots.get(k);
       if (!s) spots.set(k, (s = { c, texts: [] }));
-      s.texts.push(l.text.toUpperCase());
+      s.texts.push(text.toUpperCase());
     }
   }
   let best: { c: [number, number]; d: number } | null = null;
@@ -256,18 +317,53 @@ function titleCell(g: PageToks[], noCell: [number, number]): [number, number] | 
 }
 function titleish(t: string) {
   const s = t.trim();
-  return hasLetter.test(s) && s.replace(/[^\p{L}]/gu, '').length >= 3 && !REVISH.test(s) && !DATEISH.test(s);
+  // (letters of words without digits: a drawing number "PRJ-AB1-DWG-AR-10140" has letters, and its own
+  //  line, different on every sheet and next to the number's spot, was taken for the title - PLAN 9.2)
+  const words = s.split(/\s+/).filter((w) => !/\d/.test(w)).join('');
+  return hasLetter.test(s) && words.replace(/[^\p{L}]/gu, '').length >= 3 && !REVISH.test(s) && !DATEISH.test(s);
 }
 
-/** the page's title: the line at the title spot, and the line right under it when it goes on */
-function titleOf(p: PageToks, c: [number, number], no: Tok): string {
+/** lines a title may take (the user's real titles: 1 to 3) */
+const TITLE_LINES = 3;
+/**
+ * The titles of a page as written: a title-like band line with none above it that it goes on from
+ * (the head), and the lines under it that go on - same left edge (3 mm), a gap under 0.8 of a line,
+ * text of the same size (within a fifth: the project name over the title is another field).
+ */
+type Head = { l: BandLine; text: string };
+function titleHeads(p: PageToks): Head[] {
+  const tl = p.lines.filter((l) => titleish(l.text)).sort((a, b) => a.box[1] - b.box[1]);
+  // the first line (top down) that goes on from a: only the lines from a's top to 0.8 of a line under
+  // it are looked at - they are in top-down order (every line was tried for every line: 400 band lines
+  // a page, sweep 0.13)
+  const under = (j: number) => {
+    const a = tl[j], ah = a.box[3] - a.box[1];
+    for (let k = j + 1; k < tl.length; k++) {
+      const l = tl[k], lh = l.box[3] - l.box[1];
+      if (l.box[1] - a.box[3] >= 0.8 * ah) return undefined;
+      if (Math.abs(l.box[0] - a.box[0]) < 3 * MM && l.box[1] > a.box[1] && lh > 0.8 * ah && lh < 1.25 * ah) return l;
+    }
+    return undefined;
+  };
+  const below = new Map<BandLine, BandLine>();
+  tl.forEach((l, j) => { const u = under(j); if (u) below.set(l, u); });
+  const cont = new Set(below.values());
+  const out: Head[] = [];
+  for (const l of tl) {
+    if (cont.has(l)) continue;
+    const parts = [l.text];
+    for (let cur = below.get(l); cur && parts.length < TITLE_LINES; cur = below.get(cur)) parts.push(cur.text);
+    out.push({ l, text: parts.join(' ') });
+  }
+  return out;
+}
+
+/** the page's title: the title (its lines) at the title spot */
+function titleOf(p: PageToks, c: [number, number], no: Tok, heads: Head[]): string {
   const at = (l: BandLine) => [Math.floor((p.w - l.box[0]) / CELL), Math.floor((p.h - l.box[1]) / CELL)] as [number, number];
-  const first = p.lines.find((l) => { const lc = at(l); return lc[0] === c[0] && lc[1] === c[1] && titleish(l.text); })
-    || p.lines.find((l) => near(at(l), c) && titleish(l.text));
-  if (!first) return '';
-  const lh = first.box[3] - first.box[1];
-  const next = p.lines.find((l) => l !== first && titleish(l.text) && Math.abs(l.box[0] - first.box[0]) < 3 * MM && l.box[1] > first.box[1] && l.box[1] - first.box[3] < 0.8 * lh);
-  let t = next ? first.text + ' ' + next.text : first.text;
+  const h = heads.find((x) => { const lc = at(x.l); return lc[0] === c[0] && lc[1] === c[1]; }) || heads.find((x) => near(at(x.l), c));
+  if (!h) return '';
+  let t = h.text;
   // (never the number itself)
   t = t.replace(no.raw, '').trim();
   try { t = cleanTitle(t); } catch { /* as it is */ }
@@ -282,8 +378,10 @@ const KEYWORD = /\b(SEE|REFER|REF|DWG|DWGS|DRG|DRAWING|DRAWINGS|SHEET|SHT|DETAIL
  * The references between sheets: a candidate outside the title band whose compared form is a known
  * sheet's - or the end of exactly one sheet's number at a "-" ("AR-10140" for "PRJ-AB1-DWG-AR-10140")
  * - and not the page's own. Numbers of digits only need 5 digits or a word like SEE / DWG / DETAIL
- * before them (room numbers, levels and quantities are digits too). Only sheets of this file are
- * ever linked.
+ * before them (room numbers, levels and quantities are digits too); to a sheet read at a spot whose
+ * numbers repeat, always that word. A number on more than one sheet is never linked: which of them
+ * is meant cannot be told, and a wrong link is worse than none (PLAN 9.3b: the user's A1 set holds
+ * 112 numbers several times). Only sheets of this file are ever linked.
  */
 export function findRefs(pages: PageToks[], idx: SheetIndex): Ref[] {
   if (!idx.sheets.length) return [];
@@ -299,16 +397,18 @@ export function findRefs(pages: PageToks[], idx: SheetIndex): Ref[] {
       tails.set(tail, had === undefined || had === s.page ? s.page : -1);
     }
   }
-  const own = new Map(idx.sheets.map((s) => [s.page, s.key]));
+  const own = new Map(idx.sheets.map((s) => [s.page, s]));
+  const count = new Map<string, number>();
+  for (const s of idx.sheets) count.set(s.key, (count.get(s.key) || 0) + 1);
   const out: Ref[] = [];
   for (const p of pages) {
     if (!p) continue;
     for (const t of p.toks) {
       if (t.band) continue;
-      let target = idx.byKey.get(t.key);
-      if (target === undefined) { const tl = tails.get(t.key); target = tl !== undefined && tl >= 0 ? tl : undefined; }
-      if (target === undefined || target === p.page || own.get(p.page) === t.key) continue;
-      if (/^\d+$/.test(t.key) && t.key.length < 5 && !KEYWORD.test(t.pre)) continue;
+      let target = (count.get(t.key) ?? 0) > 1 ? undefined : idx.byKey.get(t.key);
+      if (target === undefined && !count.has(t.key)) { const tl = tails.get(t.key); target = tl !== undefined && tl >= 0 ? tl : undefined; }
+      if (target === undefined || target === p.page || own.get(p.page)?.key === t.key) continue;
+      if (/^\d+$/.test(t.key) && (t.key.length < 5 || own.get(target)?.repeats) && !KEYWORD.test(t.pre)) continue;
       out.push({ page: p.page, box: t.box, target, text: t.raw });
     }
   }

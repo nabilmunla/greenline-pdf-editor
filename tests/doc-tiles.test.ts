@@ -32,7 +32,7 @@ g.gcc = {
 };
 
 const { renderers, editor, batcher, startEngines } = await import('../src/ui/engines');
-const { PdfDoc } = await import('../src/ui/doc');
+const { PdfDoc, restartEditingEngine, wasPlannedRestart } = await import('../src/ui/doc');
 const { tiles } = await import('../src/ui/tiles');
 const { EngineClient, engineDown } = await import('../src/engine/rpc');
 
@@ -297,4 +297,30 @@ test('BUG-13: a failed start is not kept; an engine that fails to load once is a
   logs.length = 0;
   await startEngines(); // waits ~2.5 s for the engine to come back
   assert.ok(logs.some((l) => /failed to start \(try 1\)/.test(l)));
+});
+
+test('restart asked, a changed file cannot get its recovery copy: named, not restarted, still open and changed, undo works (PLAN 10.23)', async () => {
+  const d = await opened();
+  await d.rotate([1], 90);
+  assert.ok(d.dirty && d.changedSince());
+  const gccObj = g.gcc as Record<string, unknown>;
+  const realKill = gccObj.killEngine;
+  const kills: string[] = [];
+  gccObj.killEngine = async (name: string) => { kills.push(name); };
+  mu.writeRecovery = () => { throw new Error('disk full'); };
+  mu.undo = () => ({ ok: true, kind: 'a', pages: null });
+  try {
+    await assert.rejects(restartEditingEngine(), (e: Error) => e.message === 'The automatic copy of doc.pdf could not be written (disk full), so the engine was not restarted. Save your files, then try again.');
+    assert.deepEqual(kills, [], 'the engine process is not ended');
+    assert.equal(wasPlannedRestart(), false, 'not a planned restart');
+    assert.equal((d as unknown as { closed: boolean }).closed, false, 'the file is still open');
+    assert.ok(d.dirty, 'still changed');
+    assert.equal(d.pages[1].rot, 90, 'the change is still in');
+    await d.undo();
+    assert.ok(calls.includes('edit:undo'), 'undo still works');
+  } finally {
+    gccObj.killEngine = realKill;
+    d.dirty = false;
+    await d.close();
+  }
 });
