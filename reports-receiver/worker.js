@@ -4,8 +4,8 @@
 //   GET  /r/<id>          one report (its picture inline);  POST /r/<id>/delete
 //   POST /count           the anonymous user counter: one ping per install per day (id, version, OS)
 //   GET  /counts          the numbers per app: today so far and the daily rows (same password; ?format=json)
-// It serves two apps, kept apart: the PDF Editor and Rev Radar. The app is the x-report-client header
-// ('pdf-editor' or 'rev-radar', nothing else is accepted). GET /?app=rev-radar filters the list.
+// It serves three apps, kept apart: the PDF Editor, Rev Radar and Goldline Takeoff. The app is the x-report-client
+// header ('pdf-editor', 'rev-radar' or 'goldline-takeoff', nothing else is accepted). GET /?app=rev-radar filters the list.
 // Setup (Cloudflare dashboard): a KV namespace bound as REPORTS, a secret ADMIN_KEY (the counter needs nothing more). Reports expire
 // after 180 days by themselves. Nothing here is secret - the password lives in Cloudflare, not here.
 
@@ -18,7 +18,7 @@ const ROWS_KEEP_DAYS = 400;       // the daily totals
 const COUNT_PER_HOUR = 60;        // count pings per address per hour (an office behind one address)
 const MAX_COUNT = 200;            // bytes of a count ping
 const DETAIL_ROWS = 25;           // daily rows shown with their version / OS split (a free Worker may make 50 store calls)
-const APPS = { 'pdf-editor': 'PDF Editor', 'rev-radar': 'Rev Radar' };   // header value -> name shown
+const APPS = { 'pdf-editor': 'PDF Editor', 'rev-radar': 'Rev Radar', 'goldline-takeoff': 'Goldline Takeoff' };   // header value -> name shown
 const DEFAULT_APP = 'pdf-editor';  // anything stored before the second app existed (no app on it) is the PDF Editor's
 const appOf = (req) => { const c = req.headers.get('x-report-client'); return Object.prototype.hasOwnProperty.call(APPS, c) ? c : null; };
 const MAX_FIELD = { where: 200, message: 2000, stack: 8000, text: 20000, log: 30000 };
@@ -104,12 +104,13 @@ async function overLimit(req, tag, perHour, perDay, t) {
 // One key per install per app, an EMPTY value, the facts in the key's metadata { last, prev, v, os }
 // (last / prev = UTC day numbers), gone 30 days after its last ping. The key is made from a SHA-256 of
 // the install's number (the number itself is not kept): the PDF Editor's is c:<24 hex> (as it always was),
-// Rev Radar's is c:rev-radar:<24 hex>. So a key with no app in it is the PDF Editor's, and the same number
-// in two apps gives two unrelated keys. A ping writes only when `last` is not today: one KV write per
+// Rev Radar's is c:rev-radar:<24 hex>, Goldline Takeoff's c:goldline-takeoff:<24 hex>. So a key with no app in it
+// is the PDF Editor's, and the same number in two apps gives two unrelated keys. A ping writes only when `last` is not today: one KV write per
 // install per day per app (free plan: 1,000 writes a day). The counts are read from the keys' metadata
-// (one list of all c: keys serves both apps: no extra reads). The first ping of a new UTC day (from either
-// app) closes yesterday: ONE n:<date> row holding both apps' totals (day / week / month, by version, by OS),
-// kept 400 days - at most one such write a day, never one per app.
+// (one list of all c: keys serves every app: no extra reads). The first ping of a new UTC day (from any
+// app) closes yesterday: ONE n:<date> row holding all the apps' totals (day / week / month, by version, by OS),
+// kept 400 days - at most one such write a day, never one per app. A row written before an app existed
+// has no entry for it: every reader below takes a missing app as zeros.
 const now = (env) => (typeof env.CLOCK === 'function' ? env.CLOCK() : Date.now()); // (CLOCK: a test hook only)
 const DAY_MS = 86400000;
 const dayDate = (d) => new Date(d * DAY_MS).toISOString().slice(0, 10);
@@ -135,7 +136,7 @@ async function ping(req, env) {
   return text('Thanks', 200);
 }
 
-// every install's metadata, with its app (list pages of up to 1,000 keys; both apps in the same pages)
+// every install's metadata, with its app (list pages of up to 1,000 keys; all apps in the same pages)
 async function installs(env) {
   const all = [];
   let cursor;
@@ -159,10 +160,11 @@ function totals(metas, d) {
     byVersion: by('v'), byOs: by('os'),
   };
 }
-// both apps' totals for day d: { apps: { 'pdf-editor': {...}, 'rev-radar': {...} } }
-const bothApps = (metas, d) => ({ apps: Object.fromEntries(Object.keys(APPS).map((a) => [a, totals(metas.filter((m) => m.app === a), d)])) });
-// a row's numbers only (day / week / month per app: short enough for the key's 1 KB of metadata, so
-// the daily list needs no reads). A row written before the second app (flat day / week / month) is the PDF Editor's.
+// every app's totals for day d: { apps: { 'pdf-editor': {...}, 'rev-radar': {...}, 'goldline-takeoff': {...} } }
+const allApps = (metas, d) => ({ apps: Object.fromEntries(Object.keys(APPS).map((a) => [a, totals(metas.filter((m) => m.app === a), d)])) });
+// a row's numbers only (day / week / month per app: short enough for the key's 1 KB of metadata - three apps
+// with 9-digit numbers are about 150 bytes - so the daily list needs no reads). A row written before the second
+// app (flat day / week / month) is the PDF Editor's; an app missing from a row (an older two-app row) is zeros.
 const rowNumbers = (r) => {
   const out = {};
   for (const a of Object.keys(APPS)) {
@@ -176,7 +178,7 @@ const sumApps = (n) => Object.values(n).reduce((o, x) => ({ day: o.day + x.day, 
 async function closeYesterday(env, today, metas) {
   const name = 'n:' + dayDate(today - 1);
   if ((await env.REPORTS.get(name)) !== null) return null;
-  const row = bothApps(metas || await installs(env), today - 1);
+  const row = allApps(metas || await installs(env), today - 1);
   const nums = rowNumbers(row);
   await env.REPORTS.put(name, JSON.stringify(row), { expirationTtl: ROWS_KEEP_DAYS * 86400, metadata: { a: Object.fromEntries(Object.entries(nums).map(([k, x]) => [k, [x.day, x.week, x.month]])) } });
   return { name, ...row };
@@ -195,7 +197,7 @@ function authorised(req, env) {
   return d === 0;
 }
 async function list(env, url) {
-  const want = Object.prototype.hasOwnProperty.call(APPS, url.searchParams.get('app')) ? url.searchParams.get('app') : '';   // '' = both apps
+  const want = Object.prototype.hasOwnProperty.call(APPS, url.searchParams.get('app')) ? url.searchParams.get('app') : '';   // '' = all apps
   // (one app: further pages are read until 200 of its reports are in hand, 5 lists at most - the
   // filter was applied to one page of 200, which could show none of them with "Older" under it)
   const ofApp = (k) => !want || ((k.metadata || {}).app || DEFAULT_APP) === want;
@@ -218,17 +220,17 @@ async function list(env, url) {
 }
 async function counts(env, url) {
   const t = now(env), today = Math.floor(t / DAY_MS);
-  const metas = await installs(env);                        // (1 list call per 1,000 installs, both apps together)
+  const metas = await installs(env);                        // (1 list call per 1,000 installs, all apps together)
   const closed = await closeYesterday(env, today, metas);   // (1 read, and at most 1 write a day)
-  const live = bothApps(metas, today);
+  const live = allApps(metas, today);
   const res = await env.REPORTS.list({ prefix: 'n:', limit: 1000 });   // (1 list call: the rows' numbers are in their metadata)
-  const rows = res.keys.map((k) => ({ date: k.name.slice(2), apps: rowNumbers(k.metadata && k.metadata.a ? { apps: Object.fromEntries(Object.entries(k.metadata.a).map(([a, x]) => [a, { day: x[0], week: x[1], month: x[2] }])) } : (k.metadata || {})) }));
+  const rows = res.keys.map((k) => ({ date: k.name.slice(2), apps: rowNumbers(k.metadata && k.metadata.a ? { apps: Object.fromEntries(Object.entries(k.metadata.a).map(([a, x]) => [a, Array.isArray(x) ? { day: x[0], week: x[1], month: x[2] } : {}])) } : (k.metadata || {})) }));
   if (closed && !rows.some((r) => r.date === closed.name.slice(2))) rows.push({ date: closed.name.slice(2), apps: rowNumbers(closed) });
   rows.sort((a, b) => (a.date < b.date ? 1 : -1));
-  // (the version / OS split lives in each row's value, both apps in the one value: 1 read per newest row)
+  // (the version / OS split lives in each row's value, all apps in the one value: 1 read per newest row)
   await Promise.all(rows.slice(0, DETAIL_ROWS).map(async (r) => {
     try {
-      const v = JSON.parse(await env.REPORTS.get('n:' + r.date));
+      const v = JSON.parse(await env.REPORTS.get('n:' + r.date)) || {};
       for (const a of Object.keys(APPS)) { const x = v.apps ? v.apps[a] : (a === DEFAULT_APP ? v : null); if (x) { r.apps[a].byVersion = x.byVersion; r.apps[a].byOs = x.byOs; } }
     } catch (_) { /* no split */ }
   }));
@@ -241,7 +243,7 @@ async function counts(env, url) {
   const perApp = Object.entries(APPS).map(([a, n]) => `<h2>${esc(n)}</h2><table><tr><th>UTC date</th><th>Day</th><th>Week</th><th>Month</th><th>By version</th><th>By OS</th></tr>${tr(todayRow, a, todayRow.date + ' (so far)')}${rows.map((r) => tr(r, a)).join('')}</table>`).join('');
   const trt = (r, label) => `<tr><td>${esc(label || r.date)}</td><td>${r.total.day}</td><td>${r.total.week}</td><td>${r.total.month}</td></tr>`;
   return html('User counts', `<p><a href="/">← Reports</a> · <a href="/counts?format=json">JSON</a></p><h1>User counts</h1><p class="dim">Installs, not people; one ping per install per day, each app counted apart. Day = seen that UTC day, week = the last 7 days, month = the last 30 days. Today is still counting.</p>
-    ${perApp}<h2>Both apps together</h2><table><tr><th>UTC date</th><th>Day</th><th>Week</th><th>Month</th></tr>${trt(todayRow, todayRow.date + ' (so far)')}${rows.map((r) => trt(r)).join('')}</table>`);
+    ${perApp}<h2>All apps together</h2><table><tr><th>UTC date</th><th>Day</th><th>Week</th><th>Month</th></tr>${trt(todayRow, todayRow.date + ' (so far)')}${rows.map((r) => trt(r)).join('')}</table>`);
 }
 async function one(env, id) {
   const v = await env.REPORTS.get('r:' + id);

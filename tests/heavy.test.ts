@@ -1,16 +1,19 @@
 // The merge of a heavy page's content (heavy.ts): the merger must not wait for ever for its deflate.
 // PLAN 10.10 (H1): a heavy sheet changed in this session is still merged for display.
+// PLAN 14.4: what an edit wrote anew counts as put in (the drawing copy and a save go in pieces).
+// PLAN 14.8: a save in pieces packs what was written unpacked.
 import '../src/engine/mupdf-pre.mjs';
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as mupdf from 'mupdf';
 import * as mu from '../src/engine/mu';
 import { makeMerger, countStrokes } from '../src/engine/heavy';
 import { lastXref } from '../src/engine/overlay';
+import { VFile } from '../src/engine/files';
 
 test('10.17: a deflate that fails while the merger waits for it makes the merger reject', async () => {
   // enough strokes that the merged output is written while the input is still being read
@@ -248,4 +251,345 @@ test('10.10b: a heavy sheet that comes into a light file is looked at from then 
     mu.insertFrom('b5', 1, heavy);
     assert.equal(mu.looking('b5'), false, 'a file opened with its password stays as at open');
   } finally { for (const id of ids) mu.close(id); }
+}));
+
+// ---------------------------------------------------------------- 14.1
+
+/** the merged-line-work files the drawing copy names now (as host.ts drawSnapshot gives them) */
+function named(id: string): string[] {
+  let snap = new Uint8Array(0);
+  mu.snapshotTo(id, (v) => { snap = v.slice(); }, true);
+  const extra = mu.displayOverlay(id, snap.length, lastXref(snap.subarray(Math.max(0, snap.length - 4096)))) ?? [];
+  return extra.flatMap((x) => ('path' in x ? [x.path] : []));
+}
+/** the sheet open as `id`, merged in the batch engine's way (file A) */
+async function mergedSheet(id: string) {
+  const bytes = sheet();
+  mu.open(id, bytes);
+  const c = mu.heavyCandidates(id, [0]).candidates[0];
+  assert.ok(c && !c.local, 'a candidate from the file as opened');
+  const A = await mu.mergeForDisplay(bytes, c.streams);
+  assert.ok(A, 'merged');
+  assert.equal(mu.attachDisplay(id, 0, c.key, c.streams, A!), true);
+  assert.deepEqual(named(id), [A!.path], 'the drawing copy names A');
+  return { bytes, c, A: A!.path };
+}
+/** a redaction across the line work, applied (two undo steps: the mark, its application) */
+function redact(id: string) {
+  mu.createAnnot(id, 0, { type: 'Redact', rect: [400, 250, 700, 450] });
+  assert.equal(mu.applyRedactions(id), 1);
+}
+
+test('14.1 (a): redaction applied on a merged sheet - its merged copy is let go; two Undos make the sheet a candidate again, with its first streams', () => lowered(async () => {
+  const { c, A } = await mergedSheet('ea');
+  redact('ea');
+  assert.deepEqual(named('ea'), [], 'the drawing copy no longer names A');
+  assert.deepEqual(mu.dropDisplay('ea', [A]), [A], 'A is let go');
+  assert.deepEqual(mu.displayFiles('ea'), [], 'no entry names it');
+  assert.ok(mu.undo('ea').ok && mu.undo('ea').ok);
+  // (0.13.0: no candidate - the entry still named A, a file the window had deleted)
+  const r = mu.heavyCandidates('ea', [0]);
+  assert.deepEqual(r.candidates.map((x) => [x.page, x.streams, !!x.local]), [[0, c.streams, false]], 'a candidate again, from the file as opened: ' + JSON.stringify(r));
+  mu.close('ea');
+}));
+
+test('14.1 (b): merged, nothing edited - dropDisplay keeps the entry, the drawing copy still swaps the line work', () => lowered(async () => {
+  const { c, A } = await mergedSheet('eb');
+  assert.deepEqual(mu.dropDisplay('eb', [A]), [], 'in use: not let go');
+  assert.deepEqual(mu.displayFiles('eb'), [A]);
+  assert.deepEqual(named('eb'), [A]);
+  const now = look(drawingCopy('eb'));
+  assert.ok(now.strokes < 60_000 / 50, 'drawn merged: ' + now.strokes);
+  assert.ok(!now.streams.includes(c.streams[0]), 'its line-work stream swapped for the merged one');
+  mu.close('eb');
+}));
+
+test('14.1 (c): redaction applied and merged here (file B), two Undos, B let go; two Redos make the redacted sheet a candidate again (local)', () => lowered(async () => {
+  const bytes = sheet();
+  mu.open('ec', bytes);
+  redact('ec');
+  const c = mu.heavyCandidates('ec', [0]).candidates[0];
+  assert.ok(c && c.local);
+  const B = (await mu.mergeLocal('ec', 0))?.path;
+  assert.ok(B, 'merged');
+  assert.deepEqual(named('ec'), [B]);
+  assert.ok(mu.undo('ec').ok && mu.undo('ec').ok);
+  assert.deepEqual(named('ec'), [], 'the sheet shows its first content: B is not named');
+  assert.deepEqual(mu.dropDisplay('ec', [B!]), [B], 'B is let go');
+  assert.deepEqual(mu.displayFiles('ec'), []);
+  assert.ok(mu.redo('ec').ok && mu.redo('ec').ok);
+  // (0.13.0: no candidate - drawn from B, which the window had deleted)
+  const r = mu.heavyCandidates('ec', [0]);
+  assert.deepEqual(r.candidates.map((x) => [x.page, x.streams, x.local]), [[0, c.streams, true]], 'the redacted sheet is a candidate again, merged here: ' + JSON.stringify(r));
+  mu.close('ec');
+}));
+
+test('14.1 (d): an Undo before the drop - the entry is in use again: kept, its file not let go, the drawing copy names it', () => lowered(async () => {
+  const { A } = await mergedSheet('ed');
+  redact('ed');
+  assert.deepEqual(named('ed'), []);
+  assert.ok(mu.undo('ed').ok && mu.undo('ed').ok);
+  assert.deepEqual(mu.dropDisplay('ed', [A]), [], 'shown again: kept');
+  assert.deepEqual(mu.displayFiles('ed'), [A]);
+  assert.deepEqual(named('ed'), [A], 'the drawing copy names A');
+  assert.deepEqual(mu.heavyCandidates('ed', [0]), { candidates: [], shown: [] }, 'drawn merged, nothing to merge');
+  mu.close('ed');
+}));
+
+test('14.1 (e): (a) with a text edit in place of the redaction', () => lowered(async () => {
+  const { c, A } = await mergedSheet('ee');
+  const line = mu.textBlocks('ee', 0).flatMap((b) => b.lines).find((l) => l.text.includes(SECRET));
+  assert.ok(line, 'the word on the sheet');
+  mu.replaceText('ee', 0, [line!.bbox], 'EDITED', line!.origin, { size: line!.size, color: line!.color }, line!.dir);
+  assert.deepEqual(named('ee'), [], 'the drawing copy no longer names A');
+  assert.deepEqual(mu.dropDisplay('ee', [A]), [A], 'A is let go');
+  assert.deepEqual(mu.displayFiles('ee'), []);
+  // (one undo step: the edit)
+  assert.ok(mu.undo('ee').ok);
+  const r = mu.heavyCandidates('ee', [0]);
+  assert.deepEqual(r.candidates.map((x) => [x.page, x.streams, !!x.local]), [[0, c.streams, false]], 'a candidate again, from the file as opened: ' + JSON.stringify(r));
+  mu.close('ee');
+}));
+
+// ---------------------------------------------------------------- 14.4
+
+/**
+ * The drawing copy as the engine host asks for it of a document opened from a file: 'pieces' (a
+ * whole copy written object by object) or 'one buffer' (MuPDF's "original + changes", built whole
+ * in its memory); the pieces are opened again (pages counted)
+ */
+function copyWay(id: string): { way: string; pages: number } {
+  const parts: Uint8Array[] = [];
+  let pieces = false, buffers = 0;
+  mu.snapshotTo(id, () => { buffers++; }, false, (fill) => { pieces = true; fill((b) => parts.push(typeof b === 'string' ? Buffer.from(b, 'latin1') : b.slice())); });
+  let pages = 0;
+  if (pieces) { const d = mupdf.Document.openDocument(Buffer.concat(parts), 'application/pdf'); pages = d.countPages(); d.destroy?.(); }
+  return { way: pieces ? 'pieces' : buffers === 1 ? 'one buffer' : `${buffers} buffers`, pages };
+}
+/** a sheet with over 30 MB of content unpacked (1 million strokes, about 34 MB; the file about 11 MB) */
+let bigSheetFile = '';
+function bigSheet(): string {
+  if (!bigSheetFile) { bigSheetFile = join(dir, 'big-sheet.pdf'); writeFileSync(bigSheetFile, sheet(1_000_000, 5)); }
+  assert.ok(statSync(bigSheetFile).size < 30e6, 'the file itself is under the bar');
+  return bigSheetFile;
+}
+/** wholeAt and the piece-wise save lowered to 30 MB for `f` */
+async function at30(f: () => void | Promise<void>) {
+  mu.setWholeAt(30e6);
+  mu.setStreamSaveForTests(30e6);
+  try { await f(); } finally { mu.setWholeAt(600e6); mu.setStreamSaveForTests(0); }
+}
+/** a save as the editing engine writes it (no sink: bytes) - in pieces: one plain cross-reference table, no object streams */
+const savedInPieces = (b: Uint8Array) => { const t = Buffer.from(b.subarray(Math.max(0, b.length - (1 << 20)))).toString('latin1'); return /\nxref\n0 \d+\n/.test(t) && !/\/ObjStm/.test(Buffer.from(b.subarray(0, 1 << 20)).toString('latin1')); };
+
+test('14.4 (a): a markup alone keeps the copy in one buffer; a redaction (its content written anew, unpacked) makes the copy and a save go in pieces', () => at30(() => {
+  mu.open('ra', new VFile({ path: bigSheet() }));
+  try {
+    mu.createAnnot('ra', 0, { type: 'Square', rect: [50, 50, 200, 200], color: [1, 0, 0] });
+    assert.equal(copyWay('ra').way, 'one buffer', 'a markup alone: "original + changes", as before');
+    mu.createAnnot('ra', 0, { type: 'Redact', rect: [400, 250, 700, 450] });
+    assert.equal(mu.applyRedactions('ra'), 1);
+    // (0985986: one buffer - the file and the page's whole content, unpacked, built in MuPDF's memory)
+    assert.deepEqual(copyWay('ra'), { way: 'pieces', pages: 1 }, 'after a redaction: written in pieces');
+    assert.ok(savedInPieces(mu.save('ra')), 'a save too: in pieces');
+  } finally { mu.close('ra'); }
+}));
+
+test('14.4 (b): a text edit (its page content written anew) makes the copy go in pieces', () => at30(() => {
+  mu.open('rb', new VFile({ path: bigSheet() }));
+  try {
+    const line = mu.textBlocks('rb', 0).flatMap((b) => b.lines).find((l) => l.text.includes(SECRET));
+    assert.ok(line, 'the word on the sheet');
+    mu.replaceText('rb', 0, [line!.bbox], 'EDITED', line!.origin, { size: line!.size, color: line!.color }, line!.dir);
+    // (0985986: one buffer)
+    assert.deepEqual(copyWay('rb'), { way: 'pieces', pages: 1 }, 'after a text edit: written in pieces');
+  } finally { mu.close('rb'); }
+}));
+
+// ---------------------------------------------------------------- 14.8
+
+/** a save's bytes written to the temp folder and opened from there as `id`, as a file on disk is */
+function reopen(id: string, b: Uint8Array) {
+  const f = join(dir, id + '.pdf');
+  writeFileSync(f, b);
+  mu.open(id, new VFile({ path: f }));
+}
+/** the sheet's biggest content stream in a saved file: its filter and its length there */
+function sheetContent(b: Uint8Array) {
+  const d = mupdf.Document.openDocument(b, 'application/pdf').asPDF()!;
+  try {
+    const c = d.findPage(0).get('Contents');
+    const s = (c.isArray() ? [...Array(c.length).keys()].map((k) => c.get(k)) : [c]).sort((x, y) => y.get('Length').asNumber() - x.get('Length').asNumber())[0];
+    return { filter: String(s.get('Filter')), length: s.get('Length').asNumber() };
+  } finally { d.destroy?.(); }
+}
+/** the page's text as the editing engine reads it */
+const textOf = (id: string) => mu.textBlocks(id, 0).flatMap((b) => b.lines).map((l) => l.text).join(' ');
+
+for (const how of ['redaction', 'text edit'] as const) {
+  test(`14.8: after a ${how}, a save in pieces packs the sheet's content; the file opens again as a sheet like any other`, () => lowered(() => at30(() => {
+    const id = how === 'redaction' ? 'pa' : 'pb';
+    mu.open(id, new VFile({ path: bigSheet() }));
+    let word = SECRET;
+    try {
+      if (how === 'redaction') redact(id);
+      else {
+        const line = mu.textBlocks(id, 0).flatMap((b) => b.lines).find((l) => l.text.includes(SECRET));
+        assert.ok(line, 'the word on the sheet');
+        mu.replaceText(id, 0, [line!.bbox], 'EDITED', line!.origin, { size: line!.size, color: line!.color }, line!.dir);
+        word = 'EDITED';
+      }
+      // (the same document saved whole by MuPDF's own writer, for its size)
+      const whole = mu.save(id, { clearMetadata: true });
+      const pieces = mu.save(id);
+      assert.ok(savedInPieces(pieces), 'saved in pieces (what an edit wrote counts as put in: 14.4)');
+      const c = sheetContent(pieces);
+      // (14.4 alone: no filter - the content as MuPDF wrote it, 4 times the whole save)
+      assert.equal(c.filter, '/FlateDecode', `the sheet's content packed (${c.length} bytes)`);
+      assert.ok(pieces.length < 1.5 * whole.length, `under 1.5 x the whole save: ${pieces.length} against ${whole.length}`);
+      console.log(`after a ${how}: saved in pieces ${(pieces.length / 1e6).toFixed(1)} MB (content ${(c.length / 1e6).toFixed(1)} MB packed), saved whole ${(whole.length / 1e6).toFixed(1)} MB`);
+      // opened again from the file: its text, a candidate merged from the file, a markup, saved in pieces again
+      reopen(id + '2', pieces);
+      assert.ok(textOf(id + '2').includes(word), 'the text is there');
+      assert.deepEqual(mu.heavyCandidates(id + '2', [0]).candidates.map((x) => [x.page, !!x.local]), [[0, false]], 'a candidate from the file as opened');
+      mu.createAnnot(id + '2', 0, { type: 'Square', rect: [50, 50, 200, 200], color: [1, 0, 0] });
+      mu.setStreamSaveForTests(1e6);
+      const again = mu.save(id + '2');
+      assert.ok(savedInPieces(again) && sheetContent(again).filter === '/FlateDecode', 'saved in pieces again, still packed');
+      const d = mupdf.Document.openDocument(again, 'application/pdf');
+      assert.ok(d.loadPage(0).toStructuredText().asText().includes(word), 'and it opens with its text');
+      d.destroy?.();
+    } finally { mu.close(id); try { mu.close(id + '2'); } catch { /* not opened */ } }
+  })));
+}
+
+// ---------------------------------------------------------------- 14.8b
+
+/** a picture's pixels, RGB (invented: a scanned drawing - white, a grid and diagonals in colour; packs to a few %) */
+function pixels(w: number, h: number, seed = 0): Buffer {
+  const px = Buffer.alloc(w * h * 3, 255);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const grid = (x + seed) % 24 < 2 || (y + seed) % 18 < 2, diag = (x + 2 * y + seed) % 61 < 3;
+    if (!grid && !diag) continue;
+    const i = (y * w + x) * 3;
+    px[i] = grid ? 20 : 200; px[i + 1] = grid ? 40 + (seed & 63) : 30; px[i + 2] = diag ? 90 : 160;
+  }
+  return px;
+}
+/** the decode parameters of an RGB picture with PNG predictors */
+function pngParms(d: mupdf.PDFDocument, w: number) {
+  const p = d.newDictionary();
+  p.put('Predictor', 15); p.put('Colors', 3); p.put('Columns', w);
+  return p;
+}
+/** an RGB picture's dictionary, without filter or decode parameters */
+function imageDict(d: mupdf.PDFDocument, w: number, h: number) {
+  const dict = d.newDictionary();
+  dict.put('Type', d.newName('XObject')); dict.put('Subtype', d.newName('Image'));
+  dict.put('Width', w); dict.put('Height', h);
+  dict.put('ColorSpace', d.newName('DeviceRGB')); dict.put('BitsPerComponent', 8);
+  return dict;
+}
+/** the pictures of page 0 of a saved file, by resource name: filter, decode parameters left (/DecodeParms or /DP), length in the file, decoded bytes */
+function picturesOf(b: Uint8Array) {
+  const d = mupdf.Document.openDocument(b, 'application/pdf').asPDF()!;
+  try {
+    const pics = new Map<string, { filter: string; parms: boolean; length: number; data: Buffer }>();
+    d.findPage(0).get('Resources').get('XObject').forEach((v: mupdf.PDFObject, k: string | number) => {
+      if (v.get('Subtype').asName() !== 'Image') return;
+      pics.set(String(k), { filter: String(v.get('Filter')), parms: !v.get('DecodeParms').isNull() || !v.get('DP').isNull(), length: v.readRawStream().getLength(), data: Buffer.from(v.readStream().asUint8Array()) });
+    });
+    return pics;
+  } finally { d.destroy?.(); }
+}
+
+test('14.8b (a): pictures written decoded with their decode parameters left on (/DecodeParms, /DP, an array) and no filter are packed by a save in pieces; the parameters go, the pixels stay', () => {
+  const W = 800, H = 600; // 1.44 MB each, unpacked
+  const d = new mupdf.PDFDocument();
+  const px = [0, 1, 2].map((k) => pixels(W, H, 50 * k));
+  const left: [string, () => mupdf.PDFObject][] = [
+    ['DecodeParms', () => pngParms(d, W)],
+    ['DP', () => pngParms(d, W)],
+    ['DecodeParms', () => { const a = d.newArray(); a.push(pngParms(d, W)); return a; }],
+  ];
+  const xo = d.newDictionary();
+  left.forEach(([key, parms], k) => {
+    const dict = imageDict(d, W, H);
+    dict.put(key, parms());
+    xo.put('Im' + k, d.addRawStream(px[k], dict));
+  });
+  const res = d.newDictionary();
+  res.put('XObject', xo);
+  d.insertPage(-1, d.addPage([0, 0, 600, 150], 0, res, left.map((_, k) => `q 200 0 0 150 ${200 * k} 0 cm /Im${k} Do Q`).join('\n')));
+  reopen('pp', d.saveToBuffer('').asUint8Array().slice());
+  mu.setStreamSaveForTests(1e6);
+  try {
+    const out = mu.save('pp');
+    assert.ok(savedInPieces(out), 'saved in pieces');
+    const pics = picturesOf(out);
+    left.forEach(([key], k) => {
+      const p = pics.get('Im' + k)!;
+      // (0.13.1: written as it is - no filter, the parameters left on)
+      assert.equal(p.filter, '/FlateDecode', `/${key} ${k === 2 ? '(an array) ' : ''}: packed (${p.length} bytes)`);
+      assert.ok(!p.parms, `/${key}: the parameters taken off (left on, the predictor would be applied to the new filter)`);
+      assert.ok(p.data.equals(px[k]), `/${key}: the pixels byte for byte`);
+    });
+    const raw = 3 * px[0].length;
+    assert.ok(out.length < raw / 5, `the file a fraction of the pixels unpacked: ${out.length} against ${raw}`);
+    console.log(`14.8b (a): saved in pieces ${(out.length / 1e6).toFixed(2)} MB for ${(raw / 1e6).toFixed(2)} MB of pixels`);
+  } finally { mu.setStreamSaveForTests(0); mu.close('pp'); }
+});
+
+/** a generated sheet with a picture under its line work, kept as pictures are (Flate with PNG predictors: rows "Sub") */
+function sheetWithPicture(px: Buffer, w: number, h: number): Uint8Array {
+  const rows: Buffer[] = [];
+  for (let y = 0; y < h; y++) {
+    const r = Buffer.alloc(1 + 3 * w);
+    r[0] = 1;
+    for (let k = 0; k < 3 * w; k++) r[1 + k] = (px[3 * w * y + k] - (k >= 3 ? px[3 * w * y + k - 3] : 0)) & 255;
+    rows.push(r);
+  }
+  const d = mupdf.Document.openDocument(sheet(), 'application/pdf').asPDF()!;
+  try {
+    const page = d.findPage(0);
+    const dict = imageDict(d, w, h);
+    dict.put('Filter', d.newName('FlateDecode'));
+    dict.put('DecodeParms', pngParms(d, w));
+    const xo = d.newDictionary();
+    xo.put('Pic', d.addRawStream(zlib.deflateSync(Buffer.concat(rows)), dict));
+    page.get('Resources').put('XObject', xo);
+    const parts = d.newArray();
+    parts.push(d.addStream(`q ${w} 0 0 ${h} 200 100 cm /Pic Do Q`, {}));
+    parts.push(page.get('Contents'));
+    page.put('Contents', parts);
+    return d.saveToBuffer('').asUint8Array().slice();
+  } finally { d.destroy?.(); }
+}
+
+test('14.8b (b): a redaction across a picture on a heavy sheet (MuPDF writes the picture decoded, its decode parameters left on), then a save in pieces: the picture is packed, the parameters go, the pixels are the redacted ones', () => lowered(async () => {
+  const W = 800, H = 600;
+  const px = pixels(W, H, 7);
+  const src = sheetWithPicture(px, W, H);
+  assert.ok(picturesOf(src).get('Pic')!.data.equals(px), 'the picture as made reads back as its pixels');
+  reopen('pr', src);
+  mu.setStreamSaveForTests(1e6);
+  try {
+    redact('pr');
+    // (MuPDF's own writer, for the redacted pixels and its size)
+    const whole = mu.save('pr', { clearMetadata: true });
+    const pieces = mu.save('pr');
+    assert.ok(savedInPieces(pieces), 'saved in pieces');
+    const [w] = [...picturesOf(whole).values()];
+    const pics = [...picturesOf(pieces).values()];
+    assert.equal(pics.length, 1, 'one picture on the page');
+    const p = pics[0];
+    // (0.13.1: no filter, /DecodeParms left on - 1.44 MB of pixels in the file)
+    assert.equal(p.filter, '/FlateDecode', `the picture packed (${p.length} bytes)`);
+    assert.ok(!p.parms, 'its decode parameters taken off');
+    assert.ok(!p.data.equals(px), 'the redaction changed the pixels');
+    assert.ok(p.data.equals(w.data), 'the pixels byte for byte those of the whole save');
+    assert.ok(p.length < px.length / 5, `a fraction of the pixels unpacked: ${p.length} against ${px.length}`);
+    assert.ok(pieces.length < 1.5 * whole.length, `the file under 1.5 x the whole save: ${pieces.length} against ${whole.length}`);
+    console.log(`14.8b (b): saved in pieces ${(pieces.length / 1e6).toFixed(2)} MB (picture ${(p.length / 1e6).toFixed(2)} MB packed), saved whole ${(whole.length / 1e6).toFixed(2)} MB`);
+  } finally { mu.setStreamSaveForTests(0); mu.close('pr'); }
 }));

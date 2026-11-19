@@ -10,9 +10,9 @@ mkdirSync(OUT, { recursive: true });
 const browser = await chromium.launch();
 let fails = 0;
 const states = {
-  fresh: { mode: 'install', version: '0.4.0', existing: null, dirs: { user: 'C:\\Users\\nabil\\AppData\\Local\\Programs\\PDF Editor', machine: 'C:\\Program Files\\PDF Editor' }, source: '\\\\gcc-fs01\\Software\\PDF Editor', opts: { scope: 'user', dir: 'C:\\Users\\nabil\\AppData\\Local\\Programs\\PDF Editor', desktop: true, openWith: true, source: '\\\\gcc-fs01\\Software\\PDF Editor' } },
-  update: { mode: 'install', version: '0.4.1', existing: { version: '0.4.0', dir: 'C:\\Users\\nabil\\AppData\\Local\\Programs\\PDF Editor', scope: 'user', source: '' }, dirs: { user: 'C:\\Users\\nabil\\AppData\\Local\\Programs\\PDF Editor', machine: 'C:\\Program Files\\PDF Editor' }, source: '', opts: { scope: 'user', dir: 'C:\\Users\\nabil\\AppData\\Local\\Programs\\PDF Editor', desktop: false, openWith: true, source: '' } },
-  remove: { mode: 'uninstall', version: '0.4.0', existing: { version: '0.4.0', dir: 'C:\\Users\\nabil\\AppData\\Local\\Programs\\PDF Editor', scope: 'user' } },
+  fresh: { mode: 'install', version: '0.4.0', existing: null, dirs: { user: 'C:\\Users\\user\\AppData\\Local\\Programs\\PDF Editor', machine: 'C:\\Program Files\\PDF Editor' }, source: '\\\\fileserver\\Software\\PDF Editor', opts: { scope: 'user', dir: 'C:\\Users\\user\\AppData\\Local\\Programs\\PDF Editor', desktop: true, openWith: true, source: '\\\\fileserver\\Software\\PDF Editor' } },
+  update: { mode: 'install', version: '0.4.1', existing: { version: '0.4.0', dir: 'C:\\Users\\user\\AppData\\Local\\Programs\\PDF Editor', scope: 'user', source: '' }, dirs: { user: 'C:\\Users\\user\\AppData\\Local\\Programs\\PDF Editor', machine: 'C:\\Program Files\\PDF Editor' }, source: '', opts: { scope: 'user', dir: 'C:\\Users\\user\\AppData\\Local\\Programs\\PDF Editor', desktop: false, openWith: true, source: '' } },
+  remove: { mode: 'uninstall', version: '0.4.0', existing: { version: '0.4.0', dir: 'C:\\Users\\user\\AppData\\Local\\Programs\\PDF Editor', scope: 'user' } },
 };
 for (const scheme of ['light', 'dark']) {
   for (const scale of [1, 1.5]) {

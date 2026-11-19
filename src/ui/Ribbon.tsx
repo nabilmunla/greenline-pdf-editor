@@ -190,7 +190,7 @@ export function Ribbon(p: Props) {
           <Group label="Markup">{T('highlight', 'highlight')}{T('textbox', 'textbox')}{T('note', 'note', 'Comment')}{B('stamp', 'Stamp', A.stamps)}</Group>
           <Group label="Pages">{B('rotr', 'Rotate', () => A.rotate(90), { title: 'Rotate the selected pages (or this page) right' })}{B('insert', 'Insert', A.insertFile)}{B('delete', 'Delete', A.deletePages)}</Group>
           <Group label="Find">{B('search', 'Search', A.find, { title: 'Ctrl+F' })}</Group>
-          <Group label="AI">{B('ai', 'Ask AI', () => A.ai('ask'), { title: 'Ask Claude or ChatGPT about this file – answers point to the pages' })}</Group>
+          <Group label="AI">{B('ai', 'Ask AI', () => A.ai('ask'), { title: 'Ask Claude, ChatGPT or DeepSeek about this file – answers point to the pages' })}</Group>
         </>
       );
       break;
@@ -304,9 +304,9 @@ export function Ribbon(p: Props) {
     case 'ai':
       body = (
         <>
-          <Group label="Ask">{B('ai', 'Ask about this file', () => A.ai('ask'), { title: 'Questions about the open PDF; answers cite the pages (Claude or ChatGPT)' })}</Group>
+          <Group label="Ask">{B('ai', 'Ask about this file', () => A.ai('ask'), { title: 'Questions about the open PDF; answers cite the pages (Claude, ChatGPT or DeepSeek)' })}</Group>
           <Group label="Translate">{B('translate', 'Translate', () => A.ai('translate'), { title: 'Translate this page, selected pages or the whole file (English, Arabic and more)' })}</Group>
-          <Group label="Set up">{B('key', 'AI keys', () => A.ai('setup'), { disabled: false, title: 'API keys for Claude / ChatGPT (stored encrypted on this PC)' })}</Group>
+          <Group label="Set up">{B('key', 'AI keys', () => A.ai('setup'), { disabled: false, title: 'API keys for Claude / ChatGPT / DeepSeek (stored encrypted on this PC)' })}</Group>
         </>
       );
       break;

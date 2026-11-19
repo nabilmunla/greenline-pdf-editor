@@ -1,12 +1,13 @@
-// AI assistant: what is sent about the open PDF, and the conversation with Claude / ChatGPT.
+// AI assistant: what is sent about the open PDF, and the conversation with Claude / ChatGPT / DeepSeek.
 // Nothing leaves the PC until the person presses Send, and the panel lists exactly what goes.
 import { gcc, type AiMessage, type AiPart, type AiProvider, type AiEvent } from './api';
 import { rendererFor, renderers } from './engines';
 import type { PdfDoc } from './doc';
 
-export const PROVIDERS: Record<AiProvider, { name: string; keyUrl: string; keyHint: string; models: { id: string; label: string }[] }> = {
+export const PROVIDERS: Record<AiProvider, { name: string; billedBy: string; keyUrl: string; keyHint: string; models: { id: string; label: string }[]; /** a line under the key: where what is sent goes */ dataLine?: string }> = {
   anthropic: {
     name: 'Claude',
+    billedBy: 'Anthropic',
     keyUrl: 'https://platform.claude.com/settings/keys',
     keyHint: 'sk-ant-…',
     models: [
@@ -17,6 +18,7 @@ export const PROVIDERS: Record<AiProvider, { name: string; keyUrl: string; keyHi
   },
   openai: {
     name: 'ChatGPT',
+    billedBy: 'OpenAI',
     keyUrl: 'https://platform.openai.com/api-keys',
     keyHint: 'sk-…',
     models: [
@@ -25,7 +27,39 @@ export const PROVIDERS: Record<AiProvider, { name: string; keyUrl: string; keyHi
       { id: 'gpt-6-luna', label: 'GPT-6 Luna (fastest)' },
     ],
   },
+  deepseek: {
+    name: 'DeepSeek',
+    billedBy: 'DeepSeek',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+    keyHint: 'sk-…',
+    // the fallback list, when the service's own list can't be read; only the vision one takes pictures
+    models: [
+      { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash (text only)' },
+      { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro (text only)' },
+      { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision (reads pictures)' },
+    ],
+    // where the data goes (PLAN 12; words by Fable, 18 Nov)
+    dataLine: 'What you send – the text and pictures of the pages you choose – goes to DeepSeek\'s servers (in China, by DeepSeek\'s privacy policy). Each person adds their own key, and DeepSeek bills that person\'s account.',
+  },
 };
+
+export const PROVIDER_IDS = ['anthropic', 'openai', 'deepseek'] as AiProvider[];
+
+/** what a model can be given. Claude and ChatGPT take a PDF and pictures; DeepSeek's chat format
+ *  has no PDF, and only its vision model takes pictures (any other answers HTTP 400 to one) */
+export interface Caps { pdf: boolean; images: boolean }
+export function capsOf(provider: AiProvider, model: string): Caps {
+  if (provider !== 'deepseek') return { pdf: true, images: true };
+  return { pdf: false, images: /vision/i.test(model) };
+}
+/** what the panel says when pictures can't go: plain, and what to do about it */
+export function textOnlyNotice(provider: AiProvider, model: string, skipped: number[]): string {
+  const left = skipped.length
+    ? ` ${skipped.length} picture-only page${skipped.length > 1 ? 's' : ''} (drawings or scans) ${skipped.length > 1 ? 'were' : 'was'} not sent: page${skipped.length > 1 ? 's' : ''} ${skipped.slice(0, 20).map((p) => p + 1).join(', ')}${skipped.length > 20 ? ', …' : ''}.`
+    : ' Pictures in the pages were not sent.';
+  const vision = PROVIDERS[provider].models.find((m) => capsOf(provider, m.id).images);
+  return `${model} reads text only, so only the text of the pages was sent.${left}` + (vision ? ` To send pictures, choose ${vision.label.replace(/ \(.*\)$/, '')} in the model list.` : '');
+}
 
 export type Scope = { kind: 'page'; page: number } | { kind: 'pages'; pages: number[] } | { kind: 'all' };
 
@@ -44,6 +78,8 @@ export interface Context {
   bytes: number;
   estTokens: number;
   note: string;
+  /** shown with the answer, not hidden: what was left out and why (the model takes no pictures) */
+  notice: string;
 }
 
 const PDF_PAGES = 20;          // up to this many pages go as a real PDF (text + pictures)
@@ -148,11 +184,12 @@ async function pageJpeg(doc: PdfDoc, page: number, longSide = 1568): Promise<Uin
  * and sees drawings). Many pages: their text with page numbers (the most relevant pages
  * when the file is too long), plus pictures of pages that have no text (scans, drawings).
  */
-export async function buildContext(doc: PdfDoc, scope: Scope, question: string, current: number, onProgress?: (msg: string) => void, prefer: 'auto' | 'text' = 'auto'): Promise<Context> {
+export async function buildContext(doc: PdfDoc, scope: Scope, question: string, current: number, onProgress?: (msg: string) => void, prefer: 'auto' | 'text' = 'auto', target: { provider: AiProvider; model: string } = { provider: 'anthropic', model: '' }): Promise<Context> {
+  const caps = capsOf(target.provider, target.model);
   const pages = scopePages(doc, scope);
   const name = doc.name;
   // 1) small: as a PDF of just those pages
-  if (prefer === 'auto' && pages.length <= PDF_PAGES) {
+  if (prefer === 'auto' && caps.pdf && pages.length <= PDF_PAGES) {
     onProgress?.('Preparing the pages…');
     const f = await doc.extract(pages);
     try {
@@ -166,7 +203,7 @@ export async function buildContext(doc: PdfDoc, scope: Scope, question: string, 
             { t: 'pdf', b64: b64(bytes), name: name.replace(/\.pdf$/i, '') + ' (extract).pdf' },
           ],
           pages, mode: 'pdf', images: [], skippedImages: [], trimmed: 0, chars: 0, bytes: bytes.length,
-          estTokens: pages.length * 2500, note: '',
+          estTokens: pages.length * 2500, note: '', notice: '',
         };
       }
     } finally { void gcc.dropTemp([f]); }
@@ -184,9 +221,10 @@ export async function buildContext(doc: PdfDoc, scope: Scope, question: string, 
     chosen = r.pages;
     trimmed = r.trimmed;
   }
-  const imgPages = picture.slice(0, MAX_IMAGES);
+  // a model that takes no pictures gets none (the pages left out are told to it, below)
+  const imgPages = caps.images ? picture.slice(0, MAX_IMAGES) : [];
   // the current page first among pictures when there are too many
-  if (picture.length > MAX_IMAGES && picture.includes(current) && !imgPages.includes(current)) imgPages[imgPages.length - 1] = current;
+  if (caps.images && picture.length > MAX_IMAGES && picture.includes(current) && !imgPages.includes(current)) imgPages[imgPages.length - 1] = current;
   const skippedImages = picture.filter((p) => !imgPages.includes(p));
   const parts: AiPart[] = [];
   const head = `Document: "${name}" (${doc.pages.length} pages).` +
@@ -209,7 +247,8 @@ export async function buildContext(doc: PdfDoc, scope: Scope, question: string, 
   return {
     parts, pages: [...chosen, ...imgPages].sort((a, b) => a - b), mode: 'text', images: imgPages, skippedImages, trimmed, chars,
     bytes: bytes + chars, estTokens: Math.round(chars / 3.6) + imgPages.length * 1600,
-    note: skippedImages.length ? `${skippedImages.length} more picture-only pages were not sent (limit ${MAX_IMAGES}).` : '',
+    note: caps.images && skippedImages.length ? `${skippedImages.length} more picture-only pages were not sent (limit ${MAX_IMAGES}).` : '',
+    notice: caps.images ? '' : textOnlyNotice(target.provider, target.model, skippedImages),
   };
 }
 

@@ -30,6 +30,11 @@ def die(msg):
 
 BRIDGE = opt('--bridge')
 BRIDGE_ONLY = '--bridge-only' in sys.argv
+if pkg.get('brand') and not pkg.get('reportEndpoint') and not BRIDGE_ONLY:
+    # (0.13.1 was first built from an export made without it: the app then sends no problem report and no
+    # user count, and Settings says reports stay on the PC - caught on the PC check, 19 Nov 2026)
+    die('this Greenline build has no reportEndpoint in package.json - export it again with '
+        'GREENLINE_REPORTS=<the receiver address> (scripts/export-public.py), or problem reports and the user count are never sent')
 if BRIDGE is not None or BRIDGE_ONLY or '--from-runtime' in sys.argv:
     # (PLAN 11.0, before anything is built or written)
     if not BRIDGE:

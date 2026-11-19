@@ -53,18 +53,21 @@ function sparsePdf(name: string, gap: number): string {
   return p;
 }
 
-test('the installed MuPDF .wasm takes both patches, exactly once each', () => {
+test('the installed MuPDF .wasm takes the three patches, exactly once each', () => {
   const p = resolve('node_modules/mupdf/dist/mupdf-wasm.wasm');
   const b = readFileSync(p);
   const r = patchMupdf(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
-  assert.deepEqual([r.unsigned, r.sp, r.notes], [true, true, []]);
+  // (PLAN 14.7: bomb - a build where its bytes are not found fails here, not at a user's)
+  assert.deepEqual([r.unsigned, r.sp, r.bomb, r.notes], [true, true, true, []]);
   assert.ok(WebAssembly.validate(new Uint8Array(r.bytes)), 'still a valid module');
   // a copy already patched: the seek test is no longer there - left as it is, said so
   const again = patchMupdf(r.bytes);
   assert.equal(again.unsigned, false);
-  assert.ok(again.notes.some((n: string) => /found 0 times/.test(n)));
+  assert.equal(again.bomb, false);
+  assert.ok(again.notes.some((n: string) => /seek test was found 0 times/.test(n)));
+  assert.ok(again.notes.some((n: string) => /size limit was found 0 times/.test(n)));
   // in use here (mupdf-pre.mjs ran first)
-  assert.deepEqual((globalThis as { $mupdfPatch?: unknown }).$mupdfPatch, { unsigned: true, sp: true });
+  assert.deepEqual((globalThis as { $mupdfPatch?: unknown }).$mupdfPatch, { unsigned: true, sp: true, bomb: true });
   assert.equal(mu.openLimit(), 2 ** 32 - 1);
 });
 

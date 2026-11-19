@@ -206,6 +206,53 @@ t('Go back: the setting names the folder again; offered only while cameFrom live
   delete process.env.PDFED_UPDATE_HELPER;
 });
 
+t('PLAN 15.1: a second move (after Go back) is not announced again; a first one never seen still is', async () => {
+  const SH = share(mkdtempSync(join(tmpdir(), 'bridge-share-m2-')), { build: 'company' });
+  const r = rig({ updateJson: { source: SH }, feedUrl: FEED, settings: { ...BASE, updateSource: SH } });
+  let u = r.make();
+  assert.equal(u.adopt(), true);
+  assert.equal(u.movedClaim(), true);
+  u.movedDone();
+  assert.equal(r.settings().moved.shown, true);
+  // Go back leaves the settings naming the share (update.json stays on the feed)
+  r.setSettings({ ...r.settings(), updateSource: SH });
+  // the copy the share hands out checks the share's signed company release: moved again
+  u = r.make();
+  assert.equal(u.adopt(), false, 'adopt() does not move twice');
+  const before = Date.now();
+  await u.check(true);
+  const s = r.settings();
+  assert.equal(s.updateSource, undefined, 'moved again');
+  assert.equal(s.moved.shown, true, 'the second move is silent');
+  assert.ok(s.cameFrom.until > before + 30 * DAY - 5000 && s.cameFrom.until < Date.now() + 30 * DAY + 5000, 'cameFrom 30 days from this move');
+  assert.equal(r.dropped, 2, 'queued reports dropped again');
+  assert.equal(u.movedClaim(), false, 'not claimed at this start');
+  assert.equal(r.make().movedClaim(), false, 'nor at the next');
+  // guard, the other direction: a first move by trigger B, never seen
+  const r2 = rig({ appOld: null, updateJson: { source: SH }, feedUrl: FEED, settings: { ...BASE, updateSource: SH } });
+  const u2 = r2.make();
+  await u2.check(true);
+  assert.equal(r2.settings().moved.shown, false);
+  assert.equal(r2.make().movedClaim(), true, 'claimed at the next start');
+  rmSync(SH, { recursive: true, force: true });
+  r.done(); r2.done();
+});
+
+t('PLAN 15.1: previousOld - the Go back copy is the company\'s unbranded one and still offered', async () => {
+  const SH = join(tmpdir(), 'bridge-share-po');
+  const alive = { ...BASE, updateSource: SH, cameFrom: { source: SH, until: Date.now() + 10 * DAY, version: '0.13.0' } };
+  let r = rig({ appOld: { version: '0.12.1' }, updateJson: { source: FEED }, feedUrl: FEED, settings: alive });
+  assert.equal(r.make().snapshot().previousOld, true, 'unbranded, cameFrom alive');
+  r.done();
+  r = rig({ appOld: { version: '0.13.0', brand: 'greenline' }, updateJson: { source: FEED }, feedUrl: FEED, settings: alive });
+  assert.equal(r.make().snapshot().previousOld, false, 'branded');
+  assert.equal(r.make().snapshot().previous, '0.13.0');
+  r.done();
+  r = rig({ appOld: { version: '0.12.1' }, updateJson: { source: FEED }, feedUrl: FEED, settings: { ...alive, cameFrom: { source: SH, until: Date.now() - DAY, version: '0.13.0' } } });
+  assert.equal(r.make().snapshot().previousOld, false, 'cameFrom run out');
+  r.done();
+});
+
 t('reports: dropQueue empties the queue and nothing else', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'bridge-rep-'));
   const outbox = join(dir, 'reports-outbox');

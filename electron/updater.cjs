@@ -104,6 +104,8 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
       ownSource: typeof s.updateSource === 'string',
       checked: s.updateChecked || 0,
       previous: ii ? previous() : '',
+      // the Go back copy is the company's (unbranded) one, still offered: the only case where "30 days" is true (PLAN 15.1)
+      previousOld: !!ii && !!previous() && build === 'greenline' && !(appOld() || {}).brand,
       pendingAtExit: !!pending,
     };
   }
@@ -611,7 +613,8 @@ function create({ version, readSettings, writeSettings, log, send, appName, defa
     try {
       const w = { ...readSettings() };
       if (written) delete w.updateSource; else w.updateSource = defaultSource;
-      w.moved = { at: t, from: prev, shown: false };
+      // a second move (after Go back) is not announced again; one never seen still is (PLAN 15.1)
+      w.moved = { at: t, from: prev, shown: !!(w.moved && w.moved.shown === true) };
       w.cameFrom = { source: from, until: t + GO_BACK_MS, version };
       writeSettings(w);
     } catch (e) { log('update: could not write the move: ' + e); return false; }

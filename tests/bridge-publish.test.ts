@@ -33,7 +33,7 @@ const SETUP = `Greenline PDF Editor Setup ${VER}.exe`;
 function build() {
   for (const d of ['scripts', 'electron', 'src/ui', 'node_modules/electron']) mkdirSync(join(tree, d), { recursive: true });
   mkdirSync(pub, { recursive: true });
-  writeFileSync(join(tree, 'package.json'), JSON.stringify({ name: 'pdf-editor', productName: 'PDF Editor', version: VER, brand: 'greenline', displayName: 'Greenline PDF Editor', updateFeed: FEED }));
+  writeFileSync(join(tree, 'package.json'), JSON.stringify({ name: 'pdf-editor', productName: 'PDF Editor', version: VER, brand: 'greenline', displayName: 'Greenline PDF Editor', updateFeed: FEED, reportEndpoint: 'https://reports.example.test' }));
   writeFileSync(join(tree, 'node_modules/electron/package.json'), JSON.stringify({ version: RT }));
   for (const f of ['scripts/publish.py', 'scripts/sign-latest.mjs', 'electron/updsig.cjs', 'src/ui/movedtext.ts']) copyFileSync(join(ROOT, f), join(tree, f));
   writeFileSync(join(pub, `app-v${VER}.zip`), crypto.randomBytes(60000));
@@ -81,6 +81,18 @@ t('the gate: another Electron, no --from-runtime, not a Greenline build, a used 
 });
 
 let bridge = '';
+t('a Greenline build without the report address is refused before anything is built (0.13.1 was first built without it)', () => {
+  build();
+  const pkg = JSON.parse(readFileSync(join(tree, 'package.json'), 'utf8'));
+  writeFileSync(join(tree, 'package.json'), JSON.stringify({ ...pkg, reportEndpoint: undefined }));
+  const fresh = join(tree, 'out-noreports');
+  const r = spawnSync('python3', ['-I', join(tree, 'scripts/publish.py'), fresh], { cwd: tree, encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /reportEndpoint.*GREENLINE_REPORTS/s);
+  assert.ok(!existsSync(fresh), 'nothing written');
+  writeFileSync(join(tree, 'package.json'), JSON.stringify(pkg));
+});
+
 t('the bridge folder: the same app package byte for byte, the Greenline setup, a signed latest.json as "company"', () => {
   bridge = join(tree, 'b-ok');
   const before = sha(join(pub, 'latest.json'));

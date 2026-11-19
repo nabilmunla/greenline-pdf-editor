@@ -1,4 +1,4 @@
-// Right panel: ask Claude or ChatGPT about the open PDF, or have it translated.
+// Right panel: ask Claude, ChatGPT or DeepSeek about the open PDF, or have it translated.
 // Opt-in: nothing is sent until Send / Translate is pressed, and every answer shows exactly
 // which pages went with it.
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -7,16 +7,16 @@ import { Ico } from './icons';
 import { Modal } from './Modal';
 import type { PdfDoc } from './doc';
 import type { Settings } from './App';
-import { PROVIDERS, buildContext, pageTexts, ask, blocks, inline, isRtl, SYSTEM_ASK, systemTranslate, translationHtml, type Context, type Run, type Scope } from './ai';
+import { PROVIDERS, PROVIDER_IDS, capsOf, buildContext, pageTexts, ask, blocks, inline, isRtl, SYSTEM_ASK, systemTranslate, translationHtml, type Context, type Run, type Scope } from './ai';
 
 export interface AiSettings {
-  /** asking: Claude or ChatGPT */
+  /** asking: Claude, ChatGPT or DeepSeek */
   provider?: AiProvider;
   models?: Partial<Record<AiProvider, string>>;
   lang?: string;
   /** old setting (translate with 'ai' = the asking provider, or 'offline') */
   engine?: 'ai' | 'offline';
-  /** translating: on this PC, or Claude / ChatGPT */
+  /** translating: on this PC, or Claude / ChatGPT / DeepSeek */
   trEngine?: 'offline' | AiProvider;
 }
 
@@ -39,16 +39,18 @@ interface Props {
 interface Msg { role: 'user' | 'assistant'; text: string; ctx?: Context; error?: string; busy?: string; usage?: Record<string, number> | null; stop?: string; provider?: AiProvider }
 /** a conversation: the request in flight lives here too, not in the panel - leaving the panel
  *  (or switching files) and coming back finds the answer still streaming and Stop still working */
-interface Chat { msgs: Msg[]; api: AiMessage[]; scopeKey: string; provider: AiProvider | null; run: Run | null; stopped: boolean }
+interface Chat { msgs: Msg[]; api: AiMessage[]; scopeKey: string; provider: AiProvider | null; /** what the pages went as (a model without pictures needs them sent again as text) */ caps: string; run: Run | null; stopped: boolean }
 /** conversations per open file (kept while the tab is open) */
 const chats = new Map<string, Chat>();
-const chatOf = (id: string) => { let c = chats.get(id); if (!c) { c = { msgs: [], api: [], scopeKey: '', provider: null, run: null, stopped: false }; chats.set(id, c); } return c; };
+const chatOf = (id: string) => { let c = chats.get(id); if (!c) { c = { msgs: [], api: [], scopeKey: '', provider: null, caps: '', run: null, stopped: false }; chats.set(id, c); } return c; };
 /** a translation (per file), with its run: Stop works from any panel showing it */
 interface Tr {
   text: string; pages: number[]; lang: string; busy?: string; error?: string; provider?: AiProvider; offline: boolean; model: string; from: string;
   /** pages finished, and how much of the text they make up (a retry carries on after them) */
   done: number[]; doneLen: number;
   run: Run | null; stopped: boolean;
+  /** what was left out because the model takes no pictures */
+  notice?: string;
 }
 const translations = new Map<string, Tr>();
 /** panels showing a file's conversation or translation repaint when it changes */
@@ -131,7 +133,7 @@ function useModels(provider: AiProvider, hasKey: boolean) {
     let live = true;
     gcc.aiModels(provider).then((list) => {
       if (!live || !list.length) return;
-      const ok = list.filter((m) => provider === 'anthropic' ? /^claude-/.test(m.id) : /^(gpt|o\d|chatgpt)/.test(m.id) && !/(audio|realtime|tts|transcribe|image|embedding|search|moderation|instruct)/.test(m.id));
+      const ok = list.filter((m) => provider === 'anthropic' ? /^claude-/.test(m.id) : provider === 'deepseek' ? /^deepseek-/.test(m.id) : /^(gpt|o\d|chatgpt)/.test(m.id) && !/(audio|realtime|tts|transcribe|image|embedding|search|moderation|instruct)/.test(m.id));
       const known = PROVIDERS[provider].models.filter((m) => ok.some((x) => x.id === m.id));
       const rest = ok.filter((m) => !known.some((k) => k.id === m.id)).map((m) => ({ id: m.id, label: m.name }));
       if (known.length || rest.length) setModels([...known, ...rest]);
@@ -141,7 +143,7 @@ function useModels(provider: AiProvider, hasKey: boolean) {
   return models;
 }
 
-type Keys = { anthropic: boolean; openai: boolean; secure: boolean };
+type Keys = { anthropic: boolean; openai: boolean; deepseek: boolean; secure: boolean };
 /** saved AI keys (refreshed when the AI keys window changes them) */
 function useKeys(): Keys | null {
   const [keys, setKeys] = useState<Keys | null>(null);
@@ -179,12 +181,12 @@ export function AiPanel(p: Props) {
   const ai: AiSettings = (p.settings as Settings & { ai?: AiSettings }).ai || {};
   const keys = useKeys();
   const saveAi = (patch: Partial<AiSettings>) => p.saveSettings({ ai: { ...ai, ...patch } } as Partial<Settings>);
-  // asking: Claude or ChatGPT
-  const provider: AiProvider = ai.provider || (keys && !keys.anthropic && keys.openai ? 'openai' : 'anthropic');
+  // asking: Claude, ChatGPT or DeepSeek (the first one with a key, until one is chosen)
+  const provider: AiProvider = ai.provider || (keys && PROVIDER_IDS.find((k) => keys[k])) || 'anthropic';
   const model = ai.models?.[provider] || PROVIDERS[provider].models[0].id;
   const hasKey = !!keys?.[provider];
-  // translating: on this PC, or Claude / ChatGPT (an older setting "ai" meant the provider above)
-  const engine: 'offline' | AiProvider = ai.trEngine || (ai.engine === 'offline' ? 'offline' : ai.engine === 'ai' ? provider : keys && (keys.anthropic || keys.openai) ? provider : 'offline');
+  // translating: on this PC, or Claude / ChatGPT / DeepSeek (an older setting "ai" meant the provider above)
+  const engine: 'offline' | AiProvider = ai.trEngine || (ai.engine === 'offline' ? 'offline' : ai.engine === 'ai' ? provider : keys && PROVIDER_IDS.some((k) => keys[k]) ? provider : 'offline');
   const trModel = engine === 'offline' ? '' : ai.models?.[engine] || PROVIDERS[engine].models[0].id;
   return (
     <div className="props ai-panel">
@@ -202,7 +204,7 @@ export function AiPanel(p: Props) {
         <>
           <div className="ai-row">
             <div className="seg ai-provider" title="Who answers your questions">
-              {(['anthropic', 'openai'] as AiProvider[]).map((k) => (
+              {PROVIDER_IDS.map((k) => (
                 <button key={k} className={provider === k ? 'on' : ''} onClick={() => saveAi({ provider: k })}>{PROVIDERS[k].name}</button>
               ))}
             </div>
@@ -225,10 +227,10 @@ export function AiPanel(p: Props) {
 export function AiKeysDialog({ onClose }: { onClose(): void }) {
   const keys = useKeys();
   return (
-    <Modal title="AI keys" onClose={onClose} sub="Only needed to ask questions about a file, or to translate with Claude or ChatGPT. Translating on this PC needs no key."
+    <Modal title="AI keys" onClose={onClose} sub="Only needed to ask questions about a file, or to translate with Claude, ChatGPT or DeepSeek. Translating on this PC needs no key."
       actions={<button className="btn primary" onClick={onClose}>Done</button>}>
       <div className="keyrows">
-        {(['anthropic', 'openai'] as AiProvider[]).map((k) => <KeyRow key={k} provider={k} keys={keys} />)}
+        {PROVIDER_IDS.map((k) => <KeyRow key={k} provider={k} keys={keys} />)}
       </div>
       {keys && !keys.secure && <p className="hint err">Windows key protection is not available on this PC, so a key can't be stored safely.</p>}
       <p className="hint">Keys are stored encrypted on this PC (Windows protection). What leaves the PC: only the pages listed with a question or translation, sent when you press Send or Translate – nothing in the background. Use is billed per question to your company's API account.</p>
@@ -266,7 +268,8 @@ function KeyRow({ provider, keys }: { provider: AiProvider; keys: Keys | null })
         <button className="btn" disabled={!key.trim() || busy} onClick={() => void save()}>{busy ? 'Checking…' : 'Save key'}</button>
       </div>
       {err && <p className="hint err">{err}</p>}
-      <p className="hint">Get one at <a href="#" onClick={(e) => { e.preventDefault(); void gcc.openLink(P.keyUrl).catch(() => {}); }}>{P.keyUrl.replace(/^https:\/\//, '')}</a> (billed by {provider === 'anthropic' ? 'Anthropic' : 'OpenAI'}).</p>
+      <p className="hint">Get one at <a href="#" onClick={(e) => { e.preventDefault(); void gcc.openLink(P.keyUrl).catch(() => {}); }}>{P.keyUrl.replace(/^https:\/\//, '')}</a> (billed by {P.billedBy}).</p>
+      {P.dataLine && <p className="hint ai-data">{P.dataLine}</p>}
     </div>
   );
 }
@@ -310,6 +313,7 @@ function Sent({ ctx, goTo }: { ctx: Context; goTo(p: number): void }) {
       <button className="sent-h" onClick={() => setOpen(!open)} title="What was sent with the question">
         <Ico n={open ? 'chev' : 'chevr'} size={12} /> Sent: {what} · ≈{fmtK(ctx.estTokens)} tokens
       </button>
+      {ctx.notice && <div className="hint ai-notice">{ctx.notice}</div>}
       {open && (
         <div className="sent-b">
           {ctx.pages.slice(0, 300).map((pg) => <button key={pg} className={'chip' + (ctx.images.includes(pg) ? ' img' : '')} onClick={() => goTo(pg)} title={ctx.images.includes(pg) ? 'Sent as a picture' : 'Sent'}>{pg + 1}</button>)}
@@ -355,7 +359,9 @@ function AskView(p: Props & { provider: AiProvider; model: string }) {
     setQ('');
     const id = doc.id;
     const key = scopeKey();
-    const fresh = !chat.api.length || chat.scopeKey !== key || chat.provider !== p.provider;
+    // (another model that takes pictures differently: the pages go again, in the form it reads)
+    const capsKey = JSON.stringify(capsOf(p.provider, p.model));
+    const fresh = !chat.api.length || chat.scopeKey !== key || chat.provider !== p.provider || chat.caps !== capsKey;
     const user: Msg = { role: 'user', text: question };
     const ans: Msg = { role: 'assistant', text: '', busy: 'Preparing…', provider: p.provider };
     chat.msgs.push(user, ans);
@@ -363,13 +369,14 @@ function AskView(p: Props & { provider: AiProvider; model: string }) {
     notify(id, true);
     try {
       if (fresh) {
-        const ctx = await buildContext(doc, scope(), question, p.page, (m) => { if (!chat.stopped) { ans.busy = m; notify(id); } });
+        const ctx = await buildContext(doc, scope(), question, p.page, (m) => { if (!chat.stopped) { ans.busy = m; notify(id); } }, 'auto', { provider: p.provider, model: p.model });
         // Stop while the pages were being read: nothing goes out
         if (chat.stopped) throw new Error(STOPPED);
         user.ctx = ctx;
         chat.api = [{ role: 'user', parts: [...ctx.parts, { t: 'text', text: 'Question: ' + question }], cache: true }];
         chat.scopeKey = key;
         chat.provider = p.provider;
+        chat.caps = capsKey;
       } else chat.api.push({ role: 'user', parts: [{ t: 'text', text: question }] });
       ans.busy = 'Asking ' + PROVIDERS[p.provider].name + '…';
       notify(id, true);
@@ -555,7 +562,8 @@ function TranslateView(p: Props & { engine: 'offline' | AiProvider; setEngine(e:
       const label = chunk.length > 1 ? `pages ${chunk[0] + 1}–${chunk[chunk.length - 1] + 1}` : `page ${chunk[0] + 1}`;
       t.busy = `Translating ${label}` + (t.pages.length > CHUNK ? ` (${Math.min(t.done.length + chunk.length, t.pages.length)} of ${t.pages.length})…` : '…');
       notify(id, true);
-      const ctx = await buildContext(doc, { kind: 'pages', pages: chunk }, '', chunk[0]);
+      const ctx = await buildContext(doc, { kind: 'pages', pages: chunk }, '', chunk[0], undefined, 'auto', { provider: t.provider!, model: t.model });
+      if (ctx.notice) t.notice = ctx.notice;
       if (t.stopped) break;
       const before = t.text;
       const r = ask(t.provider!, t.model, systemTranslate(t.lang), [{ role: 'user', parts: [...ctx.parts, { t: 'text', text: `Translate ${label} into ${t.lang}. Start each page with its heading "=== Page N ===" (N = the document's page number).` }] }], (all) => { t.text = before + (before ? '\n\n' : '') + all; notify(id); }, 8192);
@@ -638,8 +646,8 @@ function TranslateView(p: Props & { engine: 'offline' | AiProvider; setEngine(e:
         <div className="prow"><span className="plab">With</span>
           <div className="seg ai-engine">
             <button className={offline ? 'on' : ''} onClick={() => p.setEngine('offline')} disabled={!!tr?.busy} title="Translation models on this PC – free, nothing leaves the PC">On this PC</button>
-            {(['anthropic', 'openai'] as AiProvider[]).map((k) => (
-              <button key={k} className={p.engine === k ? 'on' : ''} onClick={() => p.setEngine(k)} disabled={!!tr?.busy} title={`Better wording, reads scans and drawings – billed to your ${PROVIDERS[k].name} API account`}>{PROVIDERS[k].name}</button>
+            {PROVIDER_IDS.map((k) => (
+              <button key={k} className={p.engine === k ? 'on' : ''} onClick={() => p.setEngine(k)} disabled={!!tr?.busy} title={k === 'deepseek' ? 'Billed to your DeepSeek API account. Text only, unless its picture model is chosen.' : `Better wording, reads scans and drawings – billed to your ${PROVIDERS[k].name} API account`}>{PROVIDERS[k].name}</button>
             ))}
           </div>
         </div>
@@ -691,6 +699,7 @@ function TranslateView(p: Props & { engine: 'offline' | AiProvider; setEngine(e:
           <div className="tr-out">
             {tr.busy && <div className="faint busyline"><span className="spin" /> {tr.busy}</div>}
             {tr.error && <div className="hint err">{tr.error}</div>}
+            {tr.notice && !tr.busy && <div className="hint ai-notice">{tr.notice}</div>}
             {!tr.busy && tr.text && (
               <div className="hrow">
                 <button className="btn xs" onClick={() => void gcc.copyText(tr.text.replace(/^=+\s*Page\s+(\d+)\s*=+$/gim, '— Page $1 —')).then(() => p.toast('Translation copied.', 'ok')).catch((er) => p.toast(errText(er), 'err'))}><Ico n="copy" size={12} /> Copy</button>

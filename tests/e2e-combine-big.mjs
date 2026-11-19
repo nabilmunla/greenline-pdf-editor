@@ -4,10 +4,15 @@
 // Explorer's "Combine with PDF Editor" does (one --combine start per file).
 //  1. all 40 (2.7 GB) merged into a new tab - over 2 GB, which the editing engine opens since 0.12 (its .wasm
 //     patched at start, PLAN 7.17; up to 4 GB): pages of the first / middle / last file drawn, Link the sheets on
-//     the result, saved, every page there, qpdf clean.
+//     the result, saved, every page there, qpdf clean (every object and stream read, all but the JPEGs
+//     decoded: `qpdf --check` also decodes the 1,980 scanned pages' JPEGs - 33 s per scan file, about 20
+//     minutes in all, past run-suites' 20-minute cap).
 //     The batch engine (which did the merge) gives its memory back afterwards (PLAN 10.5): 10 s after the
 //     merge it is under 400 MB, its peak during the merge is recorded, and the next batch job works.
-//  2. a merge cancelled half-way: no temp file left, the open files as they were.
+//  2. a merge cancelled half-way: "Merge stopped", no temp file left, the open files as they were.
+//  3. closed, the tab not saved again ("Don't save" - it was saved and checked in 1.): the window and every
+//     process of the app gone within a minute (how long it took is printed), no temp file of its engines and
+//     no recovery copy left.
 // Memory over all of it: every process together under the 0.11.0 release check's 4.2 GB, no engine stopped.
 // Generated files only.
 //   xvfb-run -a -s "-screen 0 1600x1000x24" node tests/e2e-combine-big.mjs
@@ -119,9 +124,12 @@ ok(saved === 'ok' && existsSync(OUT), 'saved: ' + saved);
 if (existsSync(OUT)) {
   const n2 = Number(execFileSync('qpdf', ['--show-npages', OUT], { encoding: 'utf8' }).trim());
   ok(n2 === expect2, `the saved file has every page (${n2} of ${expect2})`);
+  // (written out by qpdf - to nowhere - with every stream it can unpack unpacked: a warning, exit 3, for
+  // any object, length or packed stream it can't read; the JPEGs are copied, not decoded - see the top)
+  const tq = Date.now();
   let check = '';
-  try { check = execFileSync('qpdf', ['--check', OUT], { encoding: 'utf8', maxBuffer: 64 << 20 }); } catch (e) { check = String(e.stdout || e); }
-  ok(/No syntax or stream encoding errors found/.test(check), 'qpdf --check: clean');
+  try { execFileSync('qpdf', ['--stream-data=uncompress', '--decode-level=generalized', OUT, '/dev/null'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { check = `exit ${e.status}: ` + String(e.stderr || e).slice(0, 400); }
+  ok(!check, `qpdf: clean - every object and stream read (${Math.round((Date.now() - tq) / 1000)} s)` + (check ? ' - ' + check : ''));
 }
 
 // ---- Link the sheets on the result: sets A and B are in it
@@ -157,12 +165,34 @@ await win.locator('.modal .btn.primary:not([disabled])').click({ timeout: 120000
 await sleep(4000);
 const stop = win.locator('.modal button', { hasText: /^(Stop|Cancel)$/ }).first();
 if (await stop.count()) await stop.click();
-await until(() => E(() => !document.querySelector('.modal')), 60000);
+ok(!!(await until(() => E(() => [...document.querySelectorAll('.toast')].some((t) => /Merge stopped/.test(t.textContent || ''))), 60000)), 'Stop: "Merge stopped - no file was made."');
+// (after a Stop the dialog stays, with its list: closed here)
+await win.locator('.modal button', { hasText: /^Cancel$/ }).first().click({ timeout: 10000 }).catch(() => {});
+await until(() => E(() => !document.querySelector('.modal')), 10000);
 await sleep(3000);
 ok((await E(() => window.__gcc.docs().map((d) => d.pages.length).join(','))) === before, 'cancelled: no new tab, the open file as it was');
 ok(temps() <= tempBefore, `no temp file left (${temps()} / ${tempBefore})`);
 
-await app.close().catch(() => {});
+// ---- 3. closed: "Don't save" for the tab (with every answer "Save" - as above - the close saved the 2.9 GB tab
+// again: on the test machine its disk filled - the copies, the merge's temp file, the saved file, the drawing
+// copy after Link the sheets and the save's own working copy - the save failed, so the close was called off,
+// as it must be, and Playwright's close() waited for ever: the "hang at close")
+await app.evaluate(({ dialog }) => { dialog.showMessageBox = async (a, b) => ({ response: /^Save changes/.test((b || a)?.message || '') ? 1 : 0 }); });
+const pids = await app.evaluate(({ app: a }) => a.getAppMetrics().map((m) => m.pid));
+// (a process ended but not yet reaped by its parent is gone too)
+const alive = () => pids.filter((p) => { try { return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${p}/stat`, 'utf8')); } catch { return false; } });
+const tc = Date.now();
+let closed = false;
+void app.close().then(() => { closed = true; }, () => { closed = true; });
+const gone = await until(async () => closed && !alive().length, 60000);
+ok(!!gone, `closed: the window and all ${pids.length} processes gone in ${((Date.now() - tc) / 1000).toFixed(1)} s`);
+if (!gone) { console.log('   still running:', JSON.stringify(alive())); for (const p of alive()) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } }
+// (what the tab had in the temp folder - the merge's 2.9 GB file, the drawing copy after Link the sheets - and
+// its recovery copy went with it: nothing of these processes is left waiting for the next start to clear it)
+const leftOver = (() => { try { return readdirSync(WORK).filter((n) => pids.includes(Number(n.split('-')[0]))); } catch { return []; } })();
+ok(!leftOver.length, `closed: no temp file of its engines left (${leftOver.join(', ') || 'none'})`);
+const recs = (() => { try { return readdirSync(join(PROFILE, 'recovery')); } catch { return []; } })();
+ok(!recs.length, `closed: no recovery copy left (${recs.join(', ') || 'none'})`);
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

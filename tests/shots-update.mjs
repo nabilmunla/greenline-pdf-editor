@@ -15,7 +15,7 @@ const pkg = crypto.randomBytes(2_400_000);
 writeFileSync(join(SHARE, 'app-v0.9.0.zip'), pkg);
 writeFileSync(join(SHARE, 'latest.json'), signedJson({ version: '0.9.0', runtime: '', notes: ['Installer and automatic updates', 'Faster drawing of dense sheets', 'Highlights can be resized after placing them'], app: { file: 'app-v0.9.0.zip', sha256: crypto.createHash('sha256').update(pkg).digest('hex'), size: 21_400_000 } }));
 writeFileSync(join(INST, 'install.json'), JSON.stringify({ scope: 'user', version: '0.4.0' }));
-writeFileSync(join(INST, 'update.json'), JSON.stringify({ source: '\\\\gcc-fs01\\Software\\PDF Editor' }));
+writeFileSync(join(INST, 'update.json'), JSON.stringify({ source: '\\\\fileserver\\Software\\PDF Editor' }));
 writeFileSync(join(INST, 'resources', 'app.old', 'package.json'), JSON.stringify({ version: '0.3.9' }));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PROFILE = join(process.env.HOME, '.config', 'PDF Editor', 'profile-upshots');

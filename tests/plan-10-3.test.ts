@@ -146,3 +146,20 @@ test('10.3a: an insert that cannot fit is refused before anything is copied; one
   assert.equal(position('r'), p0 - 1);
   mu.close('r');
 });
+
+test('14.5: an insert refused because the editing engine itself is past its limit says so, not "too many links and markups"', () => {
+  // a sheet with no links at all: the markups cannot be the reason
+  const plain = path.join(scratch, 'plain-3.pdf');
+  makeLinkSet(plain, 3, 0);
+  host('m');
+  const p0 = position('m'), pages0 = mu.pageInfos('m').length;
+  const MEMORY_TEXT = 'The editing engine is nearly out of memory, so nothing was inserted. Restart it (the app asks; the line in the status bar does the same), then insert again.';
+  try {
+    mu.setInsertRoom(mu.heap() - 1);
+    assert.throws(() => mu.insertFrom('m', 1, new VFile({ path: plain }), [0]), (e: Error) => e.message === MEMORY_TEXT);
+    assert.throws(() => mu.replacePages('m', [1], { bytes: new VFile({ path: plain }) }), (e: Error) => e.message === MEMORY_TEXT);
+    assert.equal(mu.pageInfos('m').length, pages0, 'no page came in');
+    assert.equal(position('m'), p0, 'the journal did not move');
+  } finally { mu.setInsertRoom(); }
+  mu.close('m');
+});

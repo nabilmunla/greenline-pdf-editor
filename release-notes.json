@@ -1,4 +1,20 @@
 {
+  "0.13.1": {
+    "New features": [
+      "AI assistant: DeepSeek is a third choice next to Claude and ChatGPT, for questions about a file and for translation. Add your own DeepSeek key under AI keys; DeepSeek bills your own account.",
+      "What you send to DeepSeek goes to its servers (in China, by DeepSeek's privacy policy). Most of its models read text only: with one of those, only the text of the pages is sent, and the panel says so. To send drawings or scans, choose its model that reads pictures."
+    ],
+    "General polishing": [
+      "On the heaviest sheets, saving after redactions or text edits is much faster and takes less memory. On a 5-million-line sheet it took under a second and a half in testing (over 11 seconds before), with about a third less memory."
+    ],
+    "Fixes": [
+      "Undo after a redaction or a text edit on a sheet of millions of lines no longer ends in an error. The same goes for a sheet you had simplified.",
+      "Several redactions or text edits in a row on such a sheet could run out of memory: on a 5-million-line sheet the third one failed in testing, and Save and the automatic recovery copy failed with it. All three now work; four redactions in a row were applied and saved.",
+      "Save could fail with \"compression bomb detected\" after a redaction or text edit on a sheet of about 3 million lines or more, or in a file that holds one page or picture of over 100 MB. It was rare, because it depended on the exact size, but it goes back to version 0.10. When it happened nothing was written: the file on disk stayed as it was, and no file was damaged; what was at risk was the work not yet saved. These files now save.",
+      "Files over 350 MB: after a redaction or text edit on a heavy sheet, Save wrote that sheet unpacked, so the file came out bigger than needed. It is now packed.",
+      "An insert refused for lack of memory now says so, and what to do, instead of pointing at \"too many links and markups\"."
+    ]
+  },
   "0.13.0": {
     "New features": [
       "Lines and arrows: each end now has its own arrowhead setting, so an arrow can point both ways, or carry a different head at each end. A button swaps the two ends.",

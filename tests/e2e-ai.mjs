@@ -1,4 +1,4 @@
-// AI panel against a local stand-in for the Claude and OpenAI APIs (same request/streaming
+// AI panel against a local stand-in for the Claude, OpenAI and DeepSeek APIs (same request/streaming
 // formats), so everything up to the network is tested here. xvfb-run -a node tests/e2e-ai.mjs
 import { _electron as electron } from 'playwright';
 import http from 'node:http';
@@ -29,7 +29,13 @@ const server = http.createServer((req, res) => {
     const anth = req.headers['x-api-key'];
     const oai = (req.headers.authorization || '').replace(/^Bearer /, '');
     const key = anth || oai;
-    if (key !== 'sk-ant-test' && key !== 'sk-oai-test') { res.writeHead(401, { 'content-type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } })); return; }
+    if (key !== 'sk-ant-test' && key !== 'sk-oai-test' && key !== 'sk-ds-test') { res.writeHead(401, { 'content-type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } })); return; }
+    if (req.method === 'GET' && req.url === '/models') {
+      // DeepSeek: no /v1 in its paths
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash-vision-exp' }, { id: 'text-embedding-x' }] }));
+      return;
+    }
     if (req.method === 'GET' && req.url.startsWith('/v1/models')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ data: anth ? [{ id: 'claude-sonnet-5-5', display_name: 'Claude Sonnet 5.5' }, { id: 'claude-haiku-5-5', display_name: 'Claude Haiku 5.5' }] : [{ id: 'gpt-6.1-sol' }, { id: 'gpt-6-luna' }, { id: 'tts-1' }] }));
@@ -37,7 +43,7 @@ const server = http.createServer((req, res) => {
     }
     const j = JSON.parse(body || '{}');
     seen.push({ url: req.url, headers: req.headers, body: j });
-    const sys = (j.system || j.instructions || '');
+    const sys = (j.system || j.instructions || (j.messages && j.messages[0] && j.messages[0].role === 'system' ? j.messages[0].content : '') || '');
     const answer = /translate/i.test(sys)
       ? '=== Page 1 ===\nيجب على المقاول تقديم جميع العمالة والمعدات.\n\n| البند | الكمية |\n|---|---|\n| خرسانة | 120 |'
       : 'The contractor must provide **all labour** [p. 2]. See also [pp. 3-4].\n\n- first point\n- second point';
@@ -50,6 +56,11 @@ const server = http.createServer((req, res) => {
         ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 40 } }], ['message_stop', { type: 'message_stop' }]], ms);
     } else if (req.url === '/v1/responses') {
       sse(res, [['response.created', { type: 'response.created' }], ...parts.map((t) => ['response.output_text.delta', { type: 'response.output_text.delta', delta: t }]), ['response.completed', { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 900, output_tokens: 30 } } }]]);
+    } else if (req.url === '/chat/completions') {
+      // chat completions: data-only lines, a finish chunk, then a usage chunk with no choices
+      const chunk = (delta, fin) => ['message', { id: 'c1', object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason: fin || null }] }];
+      sse(res, [chunk({ role: 'assistant', content: '' }), ...parts.map((t) => chunk({ content: t })), chunk({}, 'stop'),
+        ['message', { id: 'c1', choices: [], usage: { prompt_tokens: 700, completion_tokens: 25, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 700 } }]]);
     } else { res.writeHead(404); res.end(); }
   });
 });
@@ -72,7 +83,7 @@ async function step(name, fn) {
   catch (e) { results.push({ ok: false }); console.log(`FAIL ${name}: ${e.message}`); await win.screenshot({ path: join(TMP, 'fail-' + name.replace(/\W+/g, '_').slice(0, 50) + '.png') }).catch(() => {}); }
 }
 
-app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--password-store=basic', '--profile=ai', join(TMP, 'long-spec.pdf')], env: { ...process.env, PDFED_AI_ANTHROPIC: base, PDFED_AI_OPENAI: base } });
+app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--password-store=basic', '--profile=ai', join(TMP, 'long-spec.pdf')], env: { ...process.env, PDFED_AI_ANTHROPIC: base, PDFED_AI_OPENAI: base, PDFED_AI_DEEPSEEK: base } });
 win = await app.firstWindow();
 win.on('pageerror', (e) => console.log('  PAGEERROR', e.message));
 await win.setViewportSize({ width: 1600, height: 1000 }).catch(() => {});
@@ -244,6 +255,55 @@ await step('translate this page into Arabic: right-to-left, save as PDF with rea
   return JSON.stringify(text.replace(/\s+/g, ' ').slice(0, 90));
 });
 
+// DeepSeek: a third provider, OpenAI chat-completions format. Only its vision model gets pictures.
+const bodyText = (b) => JSON.stringify(b);
+const addDeepSeekKey = async () => {
+  await panel().locator('.ai-note button', { hasText: 'Add key' }).click();
+  const kd = win.locator('.modal', { hasText: 'AI keys' });
+  const row = kd.locator('.keyrow').nth(2);
+  ok(/platform\.deepseek\.com\/api_keys/.test(await row.locator('.hint a').first().textContent()), 'key link');
+  await row.locator('input[type=password]').fill('sk-ds-wrong');
+  await row.locator('button', { hasText: 'Save key' }).click();
+  await until(() => row.locator('.err').count(), 10000, 'wrong key refused');
+  await row.locator('input[type=password]').fill('sk-ds-test');
+  await row.locator('button', { hasText: 'Save key' }).click();
+  await until(() => row.locator('.keystate.ok').count(), 10000, 'key saved');
+  await kd.locator('button', { hasText: 'Done' }).click();
+  await until(() => panel().locator('.ai-input textarea').count(), 10000, 'ask view');
+};
+const modelOptions = () => panel().locator('.ai-row .ai-model option').evaluateAll((els) => els.map((e) => ({ v: e.value, t: e.textContent })));
+const waitAnswer = (n) => until(async () => (await panel().locator('.msg.assistant').count()) === n && !(await lastAnswer().locator('.busyline').count()) && (await lastAnswer().locator('.cite').count()), 20000, 'answer ' + n);
+
+await step('DeepSeek, a text question: its own key and list of models, chat-completions request, no PDF, no picture', async () => {
+  await panel().locator('.ai-tabs button', { hasText: 'Ask' }).click();
+  await panel().locator('button', { hasText: 'New' }).click();
+  await panel().locator('.ai-provider button', { hasText: 'DeepSeek' }).click();
+  await addDeepSeekKey();
+  const s = JSON.parse(readFileSync(join(process.env.HOME, '.config', 'PDF Editor', 'profile-ai', 'settings.json'), 'utf8'));
+  ok(s.aiKeys && s.aiKeys.deepseek && !JSON.stringify(s).includes('sk-ds-test'), 'key stored encrypted, like the others');
+  await until(async () => (await modelOptions()).some((o) => /vision/.test(o.v)), 10000, 'model list');
+  const opts = await modelOptions();
+  ok(opts.map((o) => o.v).join() === 'deepseek-v4-flash,deepseek-v4-pro,deepseek-v4-flash-vision-exp', 'models: ' + opts.map((o) => o.v).join());
+  await panel().locator('.ai-model').selectOption('deepseek-v4-flash');
+  await panel().locator('.ai-input select').selectOption('page');
+  await panel().locator('.ai-input textarea').fill('Who provides the labour?');
+  await panel().locator('.ai-input textarea').press('Enter');
+  await waitAnswer(1);
+  const b = seen[seen.length - 1];
+  ok(b.url === '/chat/completions' && b.headers.authorization === 'Bearer sk-ds-test', 'request ' + b.url);
+  ok(b.body.model === 'deepseek-v4-flash' && b.body.stream === true && b.body.messages[0].role === 'system', 'model / stream / system');
+  const u = b.body.messages[1];
+  ok(u.role === 'user' && typeof u.content === 'string' && /=== Page 2 ===/.test(u.content) && /Question: Who provides/.test(u.content), 'page text and question: ' + JSON.stringify(u).slice(0, 120));
+  ok(!/image_url|application\/pdf|"file"|base64/.test(bodyText(b.body)), 'a picture or a PDF went to a text-only model');
+  const usage = await lastAnswer().locator('.ans-tools').textContent();
+  ok(/DeepSeek · .* in \/ .* out/.test(usage), usage);
+  // a text-only model: said, in the panel, next to what was sent
+  const note = await panel().locator('.sent .ai-notice').last().textContent();
+  ok(/deepseek-v4-flash reads text only/.test(note), note);
+  await panel().locator('.ai-provider button', { hasText: 'Claude' }).click(); // the steps after this one ask Claude
+  return usage.replace(/\s+/g, ' ').trim();
+});
+
 await step('a scanned page goes as a PDF (the AI sees the picture)', async () => {
   await app.evaluate(({ BrowserWindow }, f) => BrowserWindow.getAllWindows()[0].webContents.send('app:open', [f]), join(TMP, 'scan.pdf'));
   await until(() => E(() => window.__gcc.active()?.name === 'scan.pdf'), 20000, 'scan open');
@@ -259,6 +319,49 @@ await step('a scanned page goes as a PDF (the AI sees the picture)', async () =>
   const live = await lastAnswer().locator('.cite:not(.nopage)').count();
   ok(dead >= 1 && live === 0 && await lastAnswer().locator('.cite.nopage').first().isDisabled(), `${dead} disabled, ${live} live`);
   return `${dead} out-of-range citations disabled`;
+});
+
+await step('DeepSeek, a picture page on its vision model: the picture goes as image_url, no notice', async () => {
+  ok(await E(() => window.__gcc.active()?.name === 'scan.pdf'), 'scan.pdf is the open file');
+  await panel().locator('button', { hasText: 'New' }).click();
+  await panel().locator('.ai-provider button', { hasText: 'DeepSeek' }).click();
+  await panel().locator('.ai-model').selectOption('deepseek-v4-flash-vision-exp');
+  await panel().locator('.ai-input textarea').fill('What is the amount?');
+  await panel().locator('.ai-input textarea').press('Enter');
+  await waitAnswer(1);
+  const b = seen[seen.length - 1];
+  ok(b.url === '/chat/completions' && b.body.model === 'deepseek-v4-flash-vision-exp', 'request ' + b.url + ' ' + b.body.model);
+  const c = b.body.messages[1].content;
+  ok(Array.isArray(c), 'content is a list of parts');
+  const img = c.find((x) => x.type === 'image_url');
+  ok(img && /^data:image\/jpeg;base64,/.test(img.image_url.url) && img.image_url.url.length > 2000, 'image part');
+  ok(c[c.length - 1].type === 'text' && /What is the amount/.test(c[c.length - 1].text), 'question last');
+  ok(!/application\/pdf|"file"/.test(bodyText(b.body)), 'no PDF part');
+  ok(!(await panel().locator('.sent .ai-notice').count()), 'no notice for a model that takes pictures');
+  const sent = await panel().locator('.sent-h').last().textContent();
+  ok(/1 page picture/.test(sent), sent);
+  return sent.trim();
+});
+
+await step('DeepSeek, a picture page on a text-only model: text only, nothing lost silently, no image in the request', async () => {
+  // the conversation goes on with another model (no New): the pages go again, now without the picture
+  const before = seen.length;
+  await panel().locator('.ai-model').selectOption('deepseek-v4-flash');
+  await panel().locator('.ai-input textarea').fill('And the date?');
+  await panel().locator('.ai-input textarea').press('Enter');
+  await until(async () => (await panel().locator('.msg.assistant').count()) === 2 && !(await lastAnswer().locator('.busyline').count()) && (await lastAnswer().locator('.cite').count()), 20000, 'answer 2');
+  ok(seen.length === before + 1, 'one request');
+  const b = seen[seen.length - 1];
+  ok(b.body.model === 'deepseek-v4-flash', 'model ' + b.body.model);
+  ok(!/image_url|application\/pdf|"file"|base64/.test(bodyText(b.body)), 'an image or a PDF in the body');
+  const all = b.body.messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+  ok(b.body.messages.every((m) => typeof m.content === 'string'), 'plain text messages');
+  ok(/Not sent: 1 picture-only page/.test(all) && /And the date\?/.test(all), 'the model is told what is missing: ' + all.slice(0, 200));
+  const note = await panel().locator('.sent .ai-notice').last().textContent();
+  ok(/deepseek-v4-flash reads text only/.test(note) && /1 picture-only page .* not sent: page 1/.test(note) && /DeepSeek V4 Flash Vision/.test(note), note);
+  const sent = await panel().locator('.sent-h').last().textContent();
+  ok(/text of 0 pages/.test(sent) && !/picture/.test(sent), sent);
+  return note.trim().slice(0, 90);
 });
 
 await app.evaluate(({ app: a }) => a.exit(0)).catch(() => {});

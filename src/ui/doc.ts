@@ -288,8 +288,13 @@ export class PdfDoc {
     if (this.closed) { this.dropCopy(src); return; }
     const prev = this.drawSrc;
     if (!looksSame) tiles.bump(this.id);
+    // (PLAN 14.2: until it is the drawing copy, the files this one names are not deleted by a
+    // dropMerged answer that comes meanwhile)
+    if (!(src instanceof Uint8Array)) this.opening.add(src);
     try { await Promise.all(renderers.map((w) => w.call('open', [this.id, toArg(src), this.password]))); }
     catch (e) { if (this.closed) { this.dropCopy(src); return; } throw e; }
+    // (nothing awaited from here to `drawSrc = src` below: no dropMerged answer comes in between)
+    finally { this.opening.delete(src as FileSpec); }
     if (this.closed) {
       await Promise.all(renderers.map((w) => w.call('close', [this.id]).catch(() => {})));
       this.dropCopy(src);
@@ -300,9 +305,13 @@ export class PdfDoc {
     if (!(src instanceof Uint8Array)) for (const t of tempsOf(src)) if (t !== this.srcPath()) this.temps.add(t);
     if (prev && !(prev instanceof Uint8Array)) {
       const keep = new Set(src instanceof Uint8Array ? [] : tempsOf(src));
-      const gone = tempsOf(prev).filter((t) => this.temps.has(t) && !keep.has(t) && t !== this.srcPath() && !this.engineReads.has(t));
-      for (const t of gone) this.temps.delete(t);
-      if (gone.length) void gcc.dropTemp(gone);
+      const gone = tempsOf(prev).filter((t) => this.temps.has(t) && !keep.has(t) && !this.keptTemps.has(t) && t !== this.srcPath() && !this.engineReads.has(t));
+      // (PLAN 14.1: a merged copy goes with its entry in the editing engine - not while an Undo
+      // shows it again; the others go now)
+      const plain = gone.filter((t) => !this.displayTemps.has(t)), merged = gone.filter((t) => this.displayTemps.has(t));
+      for (const t of plain) this.temps.delete(t);
+      if (plain.length) void gcc.dropTemp(plain);
+      if (merged.length) void this.dropMerged(merged);
     }
     if (this.drawStale) {
       // the drawing engines had an older copy for a while (a redraw after a change failed):
@@ -314,6 +323,36 @@ export class PdfDoc {
       this.charCache.clear();
       this.emit();
     }
+  }
+  /** drawing copies being opened in the drawing engines now (PLAN 14.2): from the start of `redraw`
+   *  until `drawSrc = src` - made outside the redraw queue (simplify, refreshDrawing, reopenIn) too */
+  private opening = new Set<FileSpec>();
+  /**
+   * PLAN 14.1: merged copies the drawing copy no longer names. The editing engine lets go of the
+   * entries no page shows now; those files go - in the same turn as its answer (before any other
+   * await). Kept, or the call failed (engine restarting, tab closing): the file stays in `temps` -
+   * named by a later copy, or removed on close.
+   * PLAN 14.2: the window gives up its own claim first. The `merges` entries naming these files are
+   * taken out in the turn of the call, so no `attachDisplay` can be posted after `dropDisplay` for
+   * a file about to go; those the engine did not free go back under their key if it is still free.
+   * A freed file that a drawing copy being opened (or the current one, 14.2b) names is not deleted:
+   * it stays in `temps` (let go by a later copy, or on close).
+   */
+  private async dropMerged(paths: string[]) {
+    const want = new Set(paths);
+    const taken: [string, { streams: number[]; file: { path: string; size: number } }][] = [];
+    for (const [k, m] of this.merges) if (want.has(m.file.path)) { taken.push([k, m]); this.merges.delete(k); }
+    const freed = await mu<string[]>('dropDisplay', this.id, paths).catch(() => [] as string[]);
+    // (same turn as the answer, nothing awaited from here to the end)
+    const f = new Set(freed);
+    for (const [k, m] of taken) if (!f.has(m.file.path) && !this.merges.has(k)) this.merges.set(k, m);
+    const held = new Set<string>();
+    for (const s of this.opening) for (const t of tempsOf(s)) held.add(t);
+    // (PLAN 14.2b: nor one the current drawing copy names - a copy made before the engine ran dropDisplay)
+    for (const t of tempsOf(this.drawSrc instanceof Uint8Array ? null : this.drawSrc)) held.add(t);
+    const go = freed.filter((t) => !held.has(t));
+    for (const t of go) { this.temps.delete(t); this.displayTemps.delete(t); }
+    if (go.length) void gcc.dropTemp(go);
   }
   private srcPath() { return this.src && !(this.src instanceof Uint8Array) ? this.src.path : ''; }
   /** a drawing copy that is not going to be used: its temp files go (never the document's own file) */
@@ -723,6 +762,13 @@ export class PdfDoc {
    *  by a full save - can't match another content): attached again after the editing engine
    *  restarted; emptied when the file is opened again from a new copy */
   private merges = new Map<string, { streams: number[]; file: { path: string; size: number } }>();
+  /** the merged copies this document made (runMerges): they go with their entry in the editing
+   *  engine (dropMerged - PLAN 14.1) */
+  private displayTemps = new Set<string>();
+  /** PLAN 14.3: the copies Simplify made. Their entry in the editing engine lives until the file
+   *  is closed (nothing brings a simplified page back by itself), so the file does too: a later
+   *  drawing copy not naming one does not delete it; they go on close with the rest of `temps` */
+  private keptTemps = new Set<string>();
   /** pages are looked at before the drawing engines read them: from opening a file big enough, or
    *  (PLAN 10.10b) from an insert that may have brought a heavy sheet into a light one */
   private startLooking() {
@@ -857,6 +903,7 @@ export class PdfDoc {
             const f = await mu<{ path: string; size: number } | null>('mergeLocal', this.id, c.page).catch((e) => { gcc.log('heavy page ' + (c.page + 1) + ': ' + e); return null; });
             if (f) {
               this.temps.add(f.path);
+              this.displayTemps.add(f.path);
               gcc.log(`heavy page ${c.page + 1} merged for display in ${Math.round(performance.now() - t0)} ms (editing engine: changed in this session)`);
               redraw = true;
               await pinHeavyPage(this.id, c.page);
@@ -869,7 +916,7 @@ export class PdfDoc {
             src ??= await mu<FileSpec | null>('sourceOf', this.id).catch(() => null);
             const t0 = performance.now();
             const f = src ? await muBatch<{ path: string; size: number } | null>('mergeForDisplay', toArg(src), c.streams, false).catch((e) => { gcc.log('heavy page ' + (c.page + 1) + ': ' + e); return null; }) : null;
-            if (f) { this.temps.add(f.path); m = { streams: c.streams, file: f }; this.merges.set(key, m); gcc.log(`heavy page ${c.page + 1} merged for display in ${Math.round(performance.now() - t0)} ms`); }
+            if (f) { this.temps.add(f.path); this.displayTemps.add(f.path); m = { streams: c.streams, file: f }; this.merges.set(key, m); gcc.log(`heavy page ${c.page + 1} merged for display in ${Math.round(performance.now() - t0)} ms`); }
           }
           if (m && (await mu<boolean>('attachDisplay', this.id, c.page, c.key, m.streams, m.file).catch(() => false))) {
             redraw = true;
@@ -897,7 +944,11 @@ export class PdfDoc {
     // (display only: the drawing engines get simplified line work for it, the file is not changed -
     // nothing to save, nothing to undo)
     const ok = await mu<boolean>('simplifyPage', this.id, page);
-    if (ok) await pinHeavyPage(this.id, page);
+    if (ok) {
+      // (PLAN 14.3: the files the engine holds that this window did not merge are Simplify's)
+      for (const t of await mu<string[]>('displayFiles', this.id).catch(() => [] as string[])) if (!this.displayTemps.has(t)) this.keptTemps.add(t);
+      await pinHeavyPage(this.id, page);
+    }
     await this.redraw(await mu<FileSpec>('drawSnapshot', this.id, false));
     const old = this.crev[page];
     this.crev = this.crev.slice();

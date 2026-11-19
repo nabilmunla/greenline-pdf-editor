@@ -409,6 +409,8 @@ textarea.input.ta { width: 100%; }
 .ai-setup .err, .ai-panel .err { color: var(--danger); }
 .ai-panel .hint { font-size: 12px; color: var(--text-2); line-height: 1.45; margin: 0; }
 .ai-panel .hint a { color: var(--accent-strong); }
+.ai-panel .ai-notice { margin-top: 3px; }
+.keyrow .ai-data { margin-top: 2px; }
 .ai-list { flex: 1; min-height: 0; overflow: auto; padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 12px; user-select: text; border-top: 1px solid var(--border); }
 .ai-empty { color: var(--text-2); font-size: 12.5px; }
 .ai-empty p { margin: 4px 0 10px; }

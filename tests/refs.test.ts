@@ -480,3 +480,45 @@ test('10.19: not 1.28.1\'s text (a doctored helper) - nothing patched, refsFixed
   assert.equal(refsOf(d.newDictionary()), 1);
   d.destroy();
 });
+
+// MuPDF.js #201 (found 18 Nov, PLAN 13): after resolve() on an image XObject, a save with garbage=compact or
+// garbage=deduplicate writes the image without its stream (1.28.x). 10.19's fix cures it; these cases keep it
+// cured, and guard the move to a later 1.28.x (10.22). REFS_201_FIX_OFF=1 runs them with the fix switched off:
+// the three resolve cases then fail (isStream false), the control still passes.
+const FIX_201 = process.env.REFS_201_FIX_OFF !== '1';
+type Kind = 'jpeg' | 'flate';
+/** a one-page PDF holding one 16 x 16 image XObject /Im, written and reopened as a file would be */
+function imagePdf(kind: Kind): mupdf.PDFDocument {
+  const doc = new mupdf.PDFDocument();
+  const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 16, 16], false);
+  pix.clear(200);
+  const image = kind === 'jpeg' ? new mupdf.Image(pix.asJPEG(80, false)) : new mupdf.Image(pix);
+  doc.insertPage(-1, doc.addPage([0, 0, 100, 100], 0, { XObject: { Im: doc.addImage(image) } }, 'q 50 0 0 50 10 10 cm /Im Do Q'));
+  const saved = doc.saveToBuffer('compress').asUint8Array().slice();
+  doc.destroy();
+  return mupdf.Document.openDocument(saved, 'application/pdf').asPDF()!;
+}
+const imRef = (d: mupdf.PDFDocument) => d.findPage(0).get('Resources', 'XObject', 'Im');
+function after201(kind: Kind, touch: (im: O) => void, saveOpts: string): boolean {
+  const doc = imagePdf(kind);
+  const im = imRef(doc);
+  assert.equal(im.isIndirect() && im.isStream(), true, 'the image is a stream before');
+  touch(im);
+  const out = doc.saveToBuffer(saveOpts).asUint8Array().slice();
+  doc.destroy();
+  const again = mupdf.Document.openDocument(out, 'application/pdf').asPDF()!;
+  try { return imRef(again).isStream(); } finally { again.destroy(); }
+}
+function run201(kind: Kind, saveOpts: string, touch: (im: O) => void, fix = FIX_201) {
+  try { setRefsFixForTests(fix); return after201(kind, touch, saveOpts); } finally { setRefsFixForTests(true); }
+}
+const resolved = (im: O) => { im.resolve().destroy(); };
+for (const [kind, opts] of [['jpeg', 'garbage=compact,compress'], ['jpeg', 'garbage=deduplicate,compress'], ['flate', 'garbage=compact,compress']] as [Kind, string][]) {
+  test(`#201: ${kind} image, resolve().destroy() then save ${opts} - still a stream after reopening`, () => {
+    assert.equal(refsFixed(), true, 'the fix is in: ' + refsNote());
+    assert.equal(run201(kind, opts, resolved), true, 'the image is a stream in the output');
+  });
+}
+test('#201 control: get(\'Width\') only (no resolve) then save garbage=compact - a stream, with or without the fix', () => {
+  for (const fix of [true, false]) assert.equal(run201('jpeg', 'garbage=compact,compress', (im) => { im.get('Width'); }, fix), true, `fix ${fix}`);
+});

@@ -1946,6 +1946,39 @@ test('10.2: the piece-wise writer lets go of the objects it makes (60,000 object
   }
 });
 
+test('14.8: a save in pieces packs a long stream written with no filter; random bytes (nothing to gain) are written as they are', () => {
+  // two streams of 2 MB with no filter, kept from the catalog: line work as text, and random bytes
+  const d = new mupdf.PDFDocument();
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, ''));
+  const lines: string[] = [];
+  for (let i = 0; lines.length * 34 < 2 << 20; i++) lines.push(`${(i % 900).toFixed(2)} ${(i % 700).toFixed(2)} m ${(i % 900 + 2).toFixed(2)} 5.00 l S`);
+  const text = Buffer.from(lines.join('\n'), 'latin1');
+  const noise = randomBytes(2 << 20);
+  const keep = d.newArray();
+  keep.push(d.addStream(text, {}));
+  keep.push(d.addStream(noise, {}));
+  d.getTrailer().get('Root').put('Junk', keep);
+  const src = d.saveToBuffer('').asUint8Array().slice();
+  const reader = { size: src.length, read: (buf: Uint8Array, off: number, len: number, pos: number) => { const n = Math.max(0, Math.min(len, src.length - pos)); buf.set(src.subarray(pos, pos + n), off); return n; }, close() { /* */ } };
+  mu.open('p14-8', reader as never);
+  mu.setStreamSaveForTests(1e6);
+  try {
+    const out = mu.save('p14-8');
+    const o = mupdf.Document.openDocument(out, 'application/pdf').asPDF()!;
+    const [a, b] = [0, 1].map((k) => o.getTrailer().get('Root').get('Junk').get(k));
+    // (0.13.0: both written as they are)
+    assert.equal(String(a.get('Filter')), '/FlateDecode', 'the line work packed');
+    assert.ok(a.readRawStream().getLength() < text.length / 2, 'to under half');
+    assert.deepEqual(Buffer.from(a.readStream().asUint8Array()), text, 'the same bytes when read');
+    assert.ok(b.get('Filter').isNull(), 'the random bytes: no filter');
+    assert.deepEqual(Buffer.from(b.readRawStream().asUint8Array()), noise, 'written as they are');
+    o.destroy?.();
+  } finally {
+    mu.setStreamSaveForTests(0);
+    mu.close('p14-8');
+  }
+});
+
 test('10.14: long edits are cut into journal parts; one undo takes back all of them, the step before stays', () => {
   const pages = (n: number) => { const d = new mupdf.PDFDocument(); for (let i = 0; i < n; i++) d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, '')); return d.saveToBuffer('').asUint8Array().slice(); };
   const pos = (id: string) => mu.journalBothWays(id).slow.position;

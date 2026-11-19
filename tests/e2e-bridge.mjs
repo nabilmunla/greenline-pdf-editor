@@ -145,6 +145,33 @@ try {
   ok(JSON.stringify(updateJson()) === JSON.stringify({ source: FEED }), 'update.json stays on the feed');
   await app.close().catch(() => {});
 
+  // 3b. PLAN 15.1: started again after Go back (the settings hold the share, the Go back copy is the company's): its check
+  // moves it again; started once more, no notice - the second move is not announced
+  ({ app, win } = await launch());
+  await sleep(1500);
+  s = await win.evaluate(() => window.gcc.updateCheck());
+  for (let i = 0; i < 100 && s.state === 'checking'; i++) { await sleep(200); s = await win.evaluate(() => window.gcc.updateGet()); }
+  st = settings();
+  ok(s.source === FEED && st.updateSource === undefined && st.cameFrom?.source === SHARE && st.cameFrom.until > Date.now() + 29 * 86400000, 'after Go back the check moves it again: ' + s.source);
+  ok(st.moved?.shown === true, 'the second move keeps the notice as seen');
+  await quit(app);
+  ({ app, win } = await launch());
+  await dlg(win, MOVED_TITLE).waitFor({ timeout: 5000 }).catch(() => {});
+  ok(await dlg(win, MOVED_TITLE).count() === 0, 'started once more: no notice within 5 s (counter pop-up or the plain window instead)');
+  await quit(app);
+
+  // 3c. PLAN 15.1: the notice not yet seen, the Go back copy Greenline's own (branded): no "Go back to", no 30 days
+  company({ appOld: false });
+  writeFileSync(join(INST, 'resources', 'app.old', 'package.json'), JSON.stringify({ version: OLD, brand: 'greenline' }));
+  writeFileSync(join(INST, 'update.json'), JSON.stringify({ source: FEED }));
+  writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ theme: 'dark', lastRunVersion: pkg.version, moved: { at: Date.now(), from: '0.12.1', shown: false }, cameFrom: { source: SHARE, until: Date.now() + 20 * 86400000, version: pkg.version } }));
+  ({ app, win } = await launch());
+  await dlg(win, MOVED_TITLE).waitFor({ timeout: 10000 }).catch(() => {});
+  ok(await dlg(win, MOVED_TITLE).count() === 1, 'a notice not yet seen still shows');
+  const txt = await dlg(win, MOVED_TITLE).innerText().catch(() => '');
+  ok(txt.includes(MOVED_BODY) && !/Go back to|30 days/.test(txt), 'without the Go back line when the copy is Greenline\'s own: ' + txt.slice(-80).replace(/\n/g, ' '));
+  await app.close().catch(() => {});
+
   // 4. trigger B: no Go back copy - the share's signed company release moves the copy at the first check
   company({ appOld: false });
   hits.length = 0;

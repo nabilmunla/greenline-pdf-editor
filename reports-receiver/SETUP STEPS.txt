@@ -79,3 +79,17 @@ What changes on the pages:
  - Anything that is not one of these two apps is turned away.
 The free plan's limits are unchanged: still one stored write per install per day, and one daily
 total row for both apps together.
+
+
+Goldline Takeoff, the third app
+================================
+
+The same worker now also takes reports and counts from Goldline Takeoff (it says "goldline-takeoff" in
+every message). Again NO new setup: paste the new worker.js exactly as above and Deploy.
+ - The reports list shows "Goldline Takeoff" in the App column and as a tab: "Show: All / PDF Editor /
+   Rev Radar / Goldline Takeoff" (or add ?app=goldline-takeoff to the address).
+ - "User counts" gets a third table, Goldline Takeoff, and the last table is now "All apps together".
+ - Daily totals stored before this update have no Goldline Takeoff in them; they show it as 0.
+ - Anything that is not one of these three apps is still turned away.
+The free plan's limits are unchanged: still one stored write per install per day, and one daily
+total row for all the apps together.

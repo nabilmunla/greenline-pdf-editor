@@ -6,6 +6,7 @@
 // Coordinates: "page space" = the page as shown, origin top-left, PDF points
 // (MuPDF's own page space; PDFium's drawing uses the same).
 import * as mupdf from 'mupdf';
+import zlib from 'node:zlib';
 import { sheetLayout, heavyForPrinter, AUTO_PICTURE_MAX_AREA, PICTURE_DPI, type PrintOpts } from './printlayout';
 import { wrapText, TEXT_PAD, TYPE_PAD, AUTO_MIN } from './textwrap';
 import { fontStack, availableFamilies, fontFromBytes, fontBytes, type FontRef } from './fonts';
@@ -160,18 +161,44 @@ function writeOut(doc: mupdf.PDFDocument, opts: string, srcSize: number): Uint8A
  * about 1 GB (it builds the whole file in the engine's memory, then fails: "realloc failed").
  * Only what the file uses is written (from the trailer's Root and Info - like a garbage-collected
  * save: deleted pages and redacted content don't stay in it); each stream's bytes are copied as
- * they are (from the file, or from `spilled` - a merge's temp file). Not for encrypted files
- * (their strings would come out decrypted).
+ * they are (from the file, or from `spilled` - a merge's temp file) - in a save (`pack`), one with
+ * no filter is packed (packed()). Not for encrypted files (their strings would come out decrypted).
  */
-/** a stream's dictionary with its real length (written as text: the open document is not changed) */
-function streamDict(doc: mupdf.PDFDocument, obj: mupdf.PDFObject, len: number) {
+/** a stream's dictionary with its real length (written as text: the open document is not changed);
+ *  `flate`: its bytes are written packed (it had no filter) - decode parameters left on it
+ *  (/DecodeParms, /DP) are not written: they would apply to the new filter (a /Predictor would
+ *  garble the data) */
+function streamDict(doc: mupdf.PDFDocument, obj: mupdf.PDFObject, len: number, flate = false) {
   let d = '<<';
   // (each wrapper let go of at once - see writeObjects' scan)
   obj.forEach((v: mupdf.PDFObject, k: string | number) => {
-    if (String(k) !== 'Length') { const nm = doc.newName(String(k)); d += nm.toString() + ' ' + v.toString(true, true); nm.destroy?.(); }
+    const key = String(k);
+    if (key !== 'Length' && !(flate && (key === 'DecodeParms' || key === 'DP'))) { const nm = doc.newName(key); d += nm.toString() + ' ' + v.toString(true, true); nm.destroy?.(); }
     v.destroy?.();
   });
-  return d + '/Length ' + len + '>>';
+  return d + (flate ? '/Filter/FlateDecode' : '') + '/Length ' + len + '>>';
+}
+/** a stream whose bytes in the file are its data: no /Filter (nor /F, which MuPDF reads as one).
+ *  Decode parameters apply to filters only: a picture MuPDF wrote decoded after a redaction keeps
+ *  its /DecodeParms and has no filter (PLAN 14.8b: 41 MB of pixels written as they were) */
+function unfiltered(obj: mupdf.PDFObject): boolean {
+  let plain = true;
+  obj.forEach((v: mupdf.PDFObject, k: string | number) => { if (k === 'Filter' || k === 'F') plain = false; v.destroy?.(); });
+  return plain;
+}
+/**
+ * PLAN 14.8: a save in pieces packs what MuPDF wrote with no filter - a redacted or edited page's
+ * content (a sheet of 5 million lines: 174 MB in the file against 40 MB saved whole; a stream over
+ * 100 MiB in a file is also what MuPDF.js read back only at some lengths, 14.7). From PACK_FROM on:
+ * its first PACK_FROM bytes are packed as a trial - not to half (pictures, data already packed),
+ * null: written as it is, no big buffer made; else the whole of it (zlib level 1: 172 MB to 49 MB
+ * in 1.2 s). Held outside MuPDF's memory, one stream at a time.
+ */
+const PACK_FROM = 1 << 20;
+function packed(v: Uint8Array): Buffer | null {
+  if (v.length < PACK_FROM) return null;
+  if (zlib.deflateSync(v.subarray(0, PACK_FROM), { level: 1 }).length > PACK_FROM / 2) return null;
+  return zlib.deflateSync(v, { level: 1 });
 }
 /**
  * flushed: objects already written whole into the spill file during a merge (copied back as they
@@ -180,7 +207,7 @@ function streamDict(doc: mupdf.PDFDocument, obj: mupdf.PDFObject, len: number) {
  */
 /** a reference in an object's text: number, generation, R (not part of a longer token) */
 const REF_TEXT = /(?<![\d.])(\d+) (\d+) R(?![A-Za-z0-9#])/g;
-function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => void, spilled?: Map<number, { off: number; len: number }>, copy?: (off: number, len: number) => void, flushed?: Map<number, { off: number; len: number }>, pinned?: Set<number>): number {
+function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => void, spilled?: Map<number, { off: number; len: number }>, copy?: (off: number, len: number) => void, flushed?: Map<number, { off: number; len: number }>, pinned?: Set<number>, pack = false): number {
   const n = doc.countObjects();
   const tr = doc.getTrailer();
   // (an object's generation, as a reference to it gives it - "12 1 R")
@@ -235,8 +262,10 @@ function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => v
           const raw = ref.readRawStream();
           try {
             const v = raw.asUint8Array();
-            w(`${num} ${g} obj\n${dictWith(obj, v.length)}\nstream\n`);
-            w(v);
+            // (packed, in a save: let go of with this block, before the next object)
+            const z = pack && v.length >= PACK_FROM && unfiltered(obj) ? packed(v) : null;
+            w(`${num} ${g} obj\n${z ? streamDict(doc, obj, z.length, true) : dictWith(obj, v.length)}\nstream\n`);
+            w(z ?? v);
             w('\nendstream\nendobj\n');
           } finally { raw.destroy?.(); }
         } else w(`${num} ${g} obj\n${obj.isNull() ? 'null' : obj.toString(true, true)}\nendobj\n`);
@@ -304,8 +333,11 @@ function isSigned(doc: mupdf.PDFDocument): boolean {
   } catch { return false; }
 }
 /** the .wasm MuPDF.js runs was patched at start (mupdf-pre.mjs): positions unsigned (4 GB), the
- *  stack pointer exported (errors no longer leak it) */
-const PATCH = ((globalThis as { $mupdfPatch?: { unsigned: boolean; sp: boolean } }).$mupdfPatch) ?? { unsigned: false, sp: false };
+ *  stack pointer exported (errors no longer leak it), no stream-length limit of its own (PLAN 14.7) */
+const PATCH = ((globalThis as { $mupdfPatch?: { unsigned: boolean; sp: boolean; bomb?: boolean } }).$mupdfPatch) ?? { unsigned: false, sp: false, bomb: false };
+// (PLAN 14.7: without it a stream over 100 MiB in a file is refused at some lengths - Save, the
+// recovery copy and Combine of such a file then fail with MuPDF's "compression bomb detected")
+if (!PATCH.bomb) console.error('MuPDF wasm: the stream size limit is not patched - a stream over 100 MiB in a file may be refused ("compression bomb detected")');
 // (MuPDF.js's references left as they came: every PDF object it ever wrapped stays in memory)
 if (!REFS.fixed) console.error('MuPDF.js references: ' + REFS.note);
 /** files this big can't be read by the editing engine (see openIn): 4 GB with the patch (the drawing
@@ -464,6 +496,10 @@ interface Open {
   /** what other files' pages put in since it was opened (Insert, Replace pages) add to it, bytes:
    *  their share of those files' sizes. That content is in MuPDF's memory, not in `reader` (memSize) */
   grown?: number;
+  /** page content a redaction or a text edit wrote anew, bytes (its /Length: MuPDF writes it
+   *  unpacked - 175 MB for a sheet of 5 million lines). In MuPDF's memory, and in every later copy
+   *  built whole - the earlier edits' too, kept for Undo (memSize). Not taken off on Undo */
+  rewrote?: number;
   /** where the original file's last cross-reference section starts (-1: unknown) */
   origXref?: number;
   /** size/rotation/label of every page, kept up to date by the page operations (reading
@@ -904,6 +940,40 @@ export function drawPlain(id: string): boolean {
 /** the merged-line-work files of a document (the engine host removes them with it) */
 export function displayFiles(id: string): string[] { return [...(docs.get(id)?.display?.values() ?? [])].map((d) => d.file.path); }
 /**
+ * Page object `pn` as it is now, with `d`'s merged line work (object `sn`) in place of its original
+ * line work's streams; our wrappers and drawn-in markups stay around it. Null when it is no page
+ * now, or none of those streams is in its content any more (an edit replaced them): the "is it
+ * shown now" test of displayOverlay and dropDisplay (PLAN 14.1).
+ */
+function swapped(o: Open, pn: number, d: Display, sn: number): { ref: mupdf.PDFObject; po: mupdf.PDFObject; out: string[] } | null {
+  const ref = o.doc.newIndirect(pn);
+  const po = ref.resolve();
+  if (!po.isDictionary() || !po.get('Type').isName() || po.get('Type').asName() !== 'Page') return null;
+  const orig = new Set(d.orig);
+  const out: string[] = [];
+  let hit = false;
+  for (const s of contentList(po)) {
+    if (s.isIndirect() && orig.has(s.asIndirect())) { if (!hit) out.push(`${sn} 0 R`); hit = true; } else out.push(s.toString());
+  }
+  return hit ? { ref, po, out } : null;
+}
+/** some page of the entry still shows its original line work (the drawing copy swaps it) */
+const usedNow = (o: Open, d: Display) => [...d.pageObjs].some((pn) => swapped(o, pn, d, 0) !== null);
+/**
+ * PLAN 14.1: merged copies the new drawing copy no longer names (the window asks once the drawing
+ * engines have it). An entry of `paths` no page shows now is let go - its file is the window's to
+ * delete; one shown again (an Undo came first) is kept. Returns the paths no entry holds any more
+ * (let go here, or never held). This engine runs one call at a time: a delete and an Undo are
+ * settled here.
+ */
+export function dropDisplay(id: string, paths: string[]): string[] {
+  const o = O(id);
+  const want = new Set(paths);
+  for (const [k, d] of o.display ?? []) if (want.has(d.file.path) && !usedNow(o, d)) o.display!.delete(k);
+  const held = new Set(displayFiles(id));
+  return paths.filter((p) => !held.has(p));
+}
+/**
  * A name as written in a PDF file (ISO 32000-1 7.3.5): every byte outside `!`..`~`, the delimiters
  * and `#` itself is written as `#xx`. The bytes are UTF-8, as the name is in the file.
  */
@@ -939,19 +1009,9 @@ export function displayOverlay(id: string, len: number, prevXref: number, plain 
     const sn = num;
     let used = false;
     for (const pn of d.pageObjs) {
-      const ref = o.doc.newIndirect(pn);
-      const po = ref.resolve();
-      if (!po.isDictionary() || !po.get('Type').isName() || po.get('Type').asName() !== 'Page') continue;
-      // (the page's content as it is now: our wrappers and drawn-in markups stay around it; the
-      // original line work's streams give way to the merged one - gone: an edit replaced them)
-      const orig = new Set(d.orig);
-      const cur = contentList(po);
-      const out: string[] = [];
-      let hit = false;
-      for (const s of cur) {
-        if (s.isIndirect() && orig.has(s.asIndirect())) { if (!hit) out.push(`${sn} 0 R`); hit = true; } else out.push(s.toString());
-      }
-      if (!hit) continue;
+      const sw = swapped(o, pn, d, sn);
+      if (!sw) continue;
+      const { ref, po, out } = sw;
       const m = /^\d+ (\d+) R$/.exec(ref.toString());
       let body = '<<';
       po.forEach((v: mupdf.PDFObject, k: string | number) => { if (k !== 'Contents') body += `${pdfName(String(k))} ${v.toString()}`; });
@@ -4293,9 +4353,21 @@ const docSize = (o: Open) => (o.reader?.size ?? 0) + (o.grown ?? 0);
  * the new one at once: 2.5 × (file + put in) + put in = 2.5 × (file + 1.4 × put in).) By the
  * file's size alone, 200 sheets of a 522 MB set inserted into a 53 MB file were "53 MB": the
  * drawing copy and every save were built whole and failed ("realloc (827430261 bytes) failed",
- * 0.13 stress run - 0.12.1 failed the same way from about 280 such sheets).
+ * 0.13 stress run - 0.12.1 failed the same way from about 280 such sheets). Page content an edit
+ * wrote anew is put in too (PLAN 14.4): the third redaction on a sheet of 5 million lines made a
+ * 42 MB file "42 MB" while its copy was 567 MB - the same 827 MB block failed, then the recovery
+ * copy and Save. (docSize - the "too big to save" test - stays by the file and what was inserted.)
  */
-const memSize = (o: Open) => (o.reader?.size ?? 0) + 1.4 * (o.grown ?? 0);
+const memSize = (o: Open) => (o.reader?.size ?? 0) + 1.4 * ((o.grown ?? 0) + (o.rewrote ?? 0));
+/** the content streams of page `p` made since the file had `from` objects (an edit wrote them):
+ *  their /Length added to Open.rewrote - dictionaries read, no stream */
+function noteRewrote(o: Open, p: mupdf.PDFPage, from: number) {
+  let n = 0;
+  try {
+    for (const s of contentList(p.getObject())) if (s.isIndirect() && s.asIndirect() >= from) n += Math.max(0, s.get('Length').asNumber() || 0);
+  } catch { /* a page that can't be read: counted as nothing */ }
+  if (n > 0) o.rewrote = (o.rewrote ?? 0) + n;
+}
 /** the file's pages are looked at before they are drawn (heavyCandidates) - the window asks after
  *  an insert (lookFrom) */
 export function looking(id: string): boolean { return !!O(id).look; }
@@ -4508,7 +4580,13 @@ function markupsOf(doc: mupdf.PDFDocument, pages: number[]): number {
   for (const i of pages) { try { const a = doc.findPage(i).get('Annots'); if (a.isArray()) n += a.length; } catch { /* not a page: its copy fails later */ } }
   return n;
 }
-function roomFor(src: mupdf.PDFDocument, list: number[]) { if (markupsOf(src, list) * MARKUP_BYTES + heap() > ROOM.refuse) throw new Error(TOO_MANY_MARKUPS); }
+/** refused for the engine's own memory (PLAN 14.5): the markups are not the reason, so this is what the person is told */
+export const MEMORY_INSERT = 'The editing engine is nearly out of memory, so nothing was inserted. Restart it (the app asks; the line in the status bar does the same), then insert again.';
+function roomFor(src: mupdf.PDFDocument, list: number[]) {
+  const h = heap();
+  if (h > ROOM.refuse) throw new Error(MEMORY_INSERT);
+  if (markupsOf(src, list) * MARKUP_BYTES + h > ROOM.refuse) throw new Error(TOO_MANY_MARKUPS);
+}
 /** the markups of inserted pages, copied ANNOT_STEP pages at a time: each step its own part of the
  *  undo step (opMore - one part for all took the journal's time up with the square of its size) */
 function carryAnnotsInto(o: Open, gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument, pairs: [number, number][]) {
@@ -5476,6 +5554,7 @@ export function replaceText(id: string, page: number, area: Rect[], text: string
   o.removedContent = true;
   op(o, 'Edit text', 'c', () => {
     const p = pg(o, page);
+    const from = o.doc.countObjects();
     // MuPDF applies every redaction mark on the page: the person's own marks (not applied yet)
     // are set aside for the moment - only the text being replaced goes
     const held: mupdf.PDFObject[] = [];
@@ -5491,6 +5570,7 @@ export function replaceText(id: string, page: number, area: Rect[], text: string
     finally { for (const ob of held) ob.put('Subtype', o.doc.newName('Redact')); }
     if (text.trim()) writeText(o, p, text.split('\n'), origin, style, dir, fontBytes, Math.max(...area.map((r) => Math.max(r[0], r[2]))));
     p.update();
+    noteRewrote(o, p, from);
     resetPages(o);
   });
 }
@@ -5539,6 +5619,8 @@ export function applyRedactions(id: string, opts: { black?: boolean; lineArt?: b
   o.removedContent = true;
   return op(o, 'Apply redactions', 'c', () => {
     let n = 0, withMarks = 0;
+    // (each page counted as it is done: a page object is let go once 64 newer ones were read)
+    const from = o.doc.countObjects();
     for (let i = 0; i < o.doc.countPages(); i++) {
       const p = pg(o, i);
       const marks = p.getAnnotations().filter((a) => a.getType() === 'Redact');
@@ -5564,6 +5646,7 @@ export function applyRedactions(id: string, opts: { black?: boolean; lineArt?: b
         appendContent(o, p, 'q ' + ops.join('\n') + ' Q');
       }
       p.update();
+      noteRewrote(o, p, from);
       n += marks.length;
     }
     resetPages(o);
@@ -5912,7 +5995,8 @@ function saveFile(id: string, s: SaveOpts): Uint8Array {
   // "remove hidden info", or an encrypted file. By what the document became (memSize): a small
   // file with a big set's pages inserted was saved whole in memory and failed (0.13 stress run)
   if (memSize(o) > pieceWiseFrom && !keepSigs && !s.password && !s.decrypt && !s.sanitize && !s.clearMetadata && !encrypted(o)) {
-    return emitStream((put) => writeObjects(o.doc, put));
+    // (what was written unpacked is packed - PLAN 14.8; the drawing and recovery copies are not)
+    return emitStream((put) => writeObjects(o.doc, put, undefined, undefined, undefined, undefined, true));
   }
   if (canInc && !o.removedContent && (keepSigs || big || (s.incremental && !o.changedContent && !tidy))) {
     const b = saveIncremental(o);

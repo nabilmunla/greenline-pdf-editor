@@ -1309,14 +1309,19 @@ async function refreshRegistration() {
   log('file association refreshed: ' + JSON.stringify(r));
 }
 
-// ---------------------------------------------------------------- AI assistant (Claude / ChatGPT)
+// ---------------------------------------------------------------- AI assistant (Claude / ChatGPT / DeepSeek)
 // Keys are stored encrypted with Windows' own protection (DPAPI via safeStorage), never in
 // the page. Requests go out from here (system proxy settings apply) and the answer streams
 // back to the window as it is written.
 const AI = {
   anthropic: { base: process.env.PDFED_AI_ANTHROPIC || 'https://api.anthropic.com', name: 'Claude' },
   openai: { base: process.env.PDFED_AI_OPENAI || 'https://api.openai.com', name: 'ChatGPT' },
+  // DeepSeek speaks the OpenAI chat-completions format (not the Responses one ChatGPT uses here);
+  // its paths have no /v1
+  deepseek: { base: process.env.PDFED_AI_DEEPSEEK || 'https://api.deepseek.com', name: 'DeepSeek', chat: true },
 };
+/** the service's list-of-models path */
+const aiModelsUrl = (provider, limit) => AI[provider].base + (AI[provider].chat ? '/models' : '/v1/models' + (provider === 'anthropic' ? '?limit=' + limit : ''));
 /** Linux (test machines only) without a keyring: Chromium's basic store */
 function linuxKeyFallback() {
   try { if (process.platform === 'linux' && !safeStorage.isEncryptionAvailable() && safeStorage.getSelectedStorageBackend() === 'basic_text') safeStorage.setUsePlainTextEncryption(true); } catch (_) { /* n/a */ }
@@ -1329,14 +1334,14 @@ function aiKey(provider) {
 ipcMain.handle('ai:keys', () => {
   linuxKeyFallback();
   const k = readSettings().aiKeys || {};
-  return { anthropic: !!k.anthropic, openai: !!k.openai, secure: safeStorage.isEncryptionAvailable() };
+  return { anthropic: !!k.anthropic, openai: !!k.openai, deepseek: !!k.deepseek, secure: safeStorage.isEncryptionAvailable() };
 });
 ipcMain.handle('ai:setKey', async (_e, provider, key, check) => {
   if (!AI[provider]) throw new Error('unknown provider');
   // a new key is tried first: a typo or a network problem leaves the saved key as it was
   if (key && check) {
     let res;
-    try { res = await net.fetch(AI[provider].base + '/v1/models' + (provider === 'anthropic' ? '?limit=1' : ''), { headers: aiHeaders(provider, String(key).trim()), signal: AbortSignal.timeout(20000) }); }
+    try { res = await net.fetch(aiModelsUrl(provider, 1), { headers: aiHeaders(provider, String(key).trim()), signal: AbortSignal.timeout(20000) }); }
     catch (err) { throw new Error('Could not reach ' + AI[provider].name + ' to check the key (' + (err && err.message ? err.message : err) + '). The saved key was not changed.'); }
     if (!res.ok) throw new Error(await aiError(res, provider));
   }
@@ -1368,7 +1373,7 @@ async function aiError(res, provider) {
 ipcMain.handle('ai:models', async (_e, provider) => {
   const key = aiKey(provider);
   if (!key) return [];
-  const res = await net.fetch(AI[provider].base + '/v1/models' + (provider === 'anthropic' ? '?limit=100' : ''), { headers: aiHeaders(provider, key) });
+  const res = await net.fetch(aiModelsUrl(provider, 100), { headers: aiHeaders(provider, key) });
   if (!res.ok) throw new Error(await aiError(res, provider));
   const j = await res.json();
   return (j.data || []).map((m) => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || m.created || 0 }));
@@ -1391,6 +1396,18 @@ function aiBody(provider, r) {
     }));
     return { model: r.model, max_tokens: r.maxTokens || 4096, system: r.system, messages, stream: true };
   }
+  if (AI[provider].chat) {
+    // chat completions: the system text is the first message; a message with no picture is plain
+    // text (what every model of the service reads), one with pictures is a list of parts.
+    // (A PDF part has no place in this format: the window sends text and pictures only.)
+    const messages = [{ role: 'system', content: r.system }];
+    for (const m of r.messages) {
+      const parts = m.parts.filter((p) => p.t === 'text' || p.t === 'image');
+      if (m.role === 'assistant' || !parts.some((p) => p.t === 'image')) messages.push({ role: m.role, content: parts.map((p) => p.text || '').join('\n\n') });
+      else messages.push({ role: m.role, content: parts.map((p) => p.t === 'image' ? { type: 'image_url', image_url: { url: `data:${p.mime || 'image/jpeg'};base64,${p.b64}` } } : { type: 'text', text: p.text }) });
+    }
+    return { model: r.model, messages, max_tokens: r.maxTokens || 4096, stream: true, stream_options: { include_usage: true } };
+  }
   const input = r.messages.map((m) => ({
     role: m.role,
     content: m.parts.map((p) => {
@@ -1412,7 +1429,7 @@ ipcMain.handle('ai:send', async (e, id, provider, r) => {
   const send = (ev) => { if (!e.sender.isDestroyed()) e.sender.send('ai:event', id, ev); };
   (async () => {
     try {
-      const url = AI[provider].base + (provider === 'anthropic' ? '/v1/messages' : '/v1/responses');
+      const url = AI[provider].base + (provider === 'anthropic' ? '/v1/messages' : AI[provider].chat ? '/chat/completions' : '/v1/responses');
       const res = await net.fetch(url, { method: 'POST', headers: aiHeaders(provider, key), body: JSON.stringify(aiBody(provider, r)), signal: ac.signal });
       if (!res.ok) { send({ type: 'error', message: await aiError(res, provider) }); return; }
       const reader = res.body.getReader();
@@ -1437,6 +1454,13 @@ ipcMain.handle('ai:send', async (e, id, provider, r) => {
             else if (j.type === 'message_start' && j.message && j.message.usage) usage = { ...j.message.usage };
             else if (j.type === 'message_delta') { if (j.usage) usage = { ...(usage || {}), ...j.usage }; if (j.delta && j.delta.stop_reason) stop = j.delta.stop_reason; }
             else if (j.type === 'error') { send({ type: 'error', message: 'Claude: ' + ((j.error && j.error.message) || 'error') }); return; }
+          } else if (AI[provider].chat) {
+            if (j.error) { send({ type: 'error', message: AI[provider].name + ': ' + (j.error.message || 'error') }); return; }
+            const c = j.choices && j.choices[0];
+            if (c && c.delta && c.delta.content) send({ type: 'delta', text: c.delta.content });
+            if (c && c.finish_reason) stop = c.finish_reason === 'length' ? 'max_tokens' : c.finish_reason === 'stop' ? 'end_turn' : c.finish_reason;
+            // the panel reads input_tokens / output_tokens
+            if (j.usage) usage = { input_tokens: j.usage.prompt_cache_miss_tokens != null ? j.usage.prompt_cache_miss_tokens : j.usage.prompt_tokens, cache_read_input_tokens: j.usage.prompt_cache_hit_tokens || 0, output_tokens: j.usage.completion_tokens };
           } else {
             if (j.type === 'response.output_text.delta') send({ type: 'delta', text: j.delta || '' });
             else if (j.type === 'response.completed') { usage = j.response && j.response.usage; stop = (j.response && j.response.status) || ''; }

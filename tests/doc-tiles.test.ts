@@ -324,3 +324,177 @@ test('restart asked, a changed file cannot get its recovery copy: named, not res
     await d.close();
   }
 });
+
+// ---------------------------------------------------------------- PLAN 14.2 / 14.3: merged copies and their files
+
+type Held = { release: (v: unknown) => void; fail: (e: Error) => void };
+/** a document whose pages are looked at (heavy sheets): page 0 is merged into file A and shown from it */
+const A = '/work/A/merged.bin';
+async function mergedDoc() {
+  mu = baseMu();
+  draw = baseDraw();
+  let n = 0;
+  const attached: { page: number; path: string }[] = [];
+  const mergedNow: string[] = [];
+  mu.open = () => ({ pages: [page(0), page(1), page(2)], needsPassword: false, repaired: false, hasForms: false, size: 100, look: true });
+  mu.sourceOf = () => ({ path: '/doc.pdf', size: 100 });
+  // every page a look asks about is the same sheet: one key (a copied page)
+  mu.heavyCandidates = (_id: unknown, pages: unknown) => ({ candidates: (pages as number[]).map((p) => ({ page: p, key: 'K', streams: [5, 6], size: 10 })), shown: [] });
+  mu.attachDisplay = (_id: unknown, p: unknown, _k: unknown, _s: unknown, f: unknown) => { attached.push({ page: p as number, path: (f as { path: string }).path }); return true; };
+  batcher_merge = () => { const path = n++ === 0 ? A : `/work/B${n}/merged.bin`; mergedNow.push(path); return { path, size: 12 }; };
+  mu.mergeForDisplay = () => batcher_merge();
+  mu.pinHeavy = () => true;
+  mu.drawSnapshot = () => ({ path: '/doc.pdf', size: 100, extra: [{ path: A, size: 12 }] });
+  const d = new PdfDoc('/doc.pdf');
+  assert.equal(await d.load({ path: '/doc.pdf' }), 'ok');
+  await d.ensurePage(0);
+  calls.length = 0;
+  assert.deepEqual(attached.map((a) => a.path), [A], 'page 1 shows A');
+  attached.length = 0;
+  return { d, attached, mergedNow };
+}
+let batcher_merge: () => { path: string; size: number } = () => ({ path: '', size: 0 });
+const inner = (d: unknown) => d as { merges: Map<string, { file: { path: string } }>; temps: Set<string>; displayTemps: Set<string> };
+const hold = () => {
+  const h = {} as Held;
+  const p = new Promise((res, rej) => { h.release = res; h.fail = rej; });
+  return { h, p };
+};
+const plainCopy = () => ({ path: '/doc.pdf', size: 100, delta: '/work/plain' + calls.length + '/changes.bin' });
+
+test('PLAN 14.2 (a): a look while the engine is asked to let go of A attaches no file the window is about to delete', async () => {
+  const { d, attached, mergedNow } = await mergedDoc();
+  const { h, p } = hold();
+  mu.dropDisplay = () => p;
+  mu.drawSnapshot = plainCopy; // the new copy no longer names A (an edit changed the page)
+  dropped.length = 0;
+  await d.refreshDrawing();
+  assert.ok(calls.includes('edit:dropDisplay'), 'the engine is asked');
+  // a second page showing A's line work is looked at while the answer is held back
+  await d.ensurePage(1);
+  assert.ok(!attached.some((a) => a.path === A), 'no attachDisplay carries A: ' + JSON.stringify(attached));
+  assert.equal(mergedNow.length, 2, 'the sheet is merged anew');
+  h.release([A]);
+  await tick(); await tick();
+  assert.equal(dropped.filter((t) => t === A).length, 1, 'A goes, once');
+  assert.ok(![...inner(d).merges.values()].some((m) => m.file.path === A), 'no entry names A');
+  assert.ok(!inner(d).temps.has(A) && !inner(d).displayTemps.has(A));
+  await d.close();
+});
+
+test('PLAN 14.2 (b): the engine kept A (an Undo showed it again): A stays, its entry is back, the next look merges nothing', async () => {
+  const { d, attached, mergedNow } = await mergedDoc();
+  const { h, p } = hold();
+  mu.dropDisplay = () => p;
+  mu.drawSnapshot = plainCopy;
+  dropped.length = 0;
+  await d.refreshDrawing();
+  assert.ok(![...inner(d).merges.values()].some((m) => m.file.path === A), 'taken out while the engine is asked');
+  h.release([]);
+  await tick(); await tick();
+  assert.ok(!dropped.includes(A), 'A is not deleted');
+  assert.ok([...inner(d).merges.values()].some((m) => m.file.path === A), 'its entry is back');
+  assert.ok(inner(d).temps.has(A));
+  await d.ensurePage(1);
+  assert.deepEqual(attached.map((a) => a.path), [A], 'attached with A');
+  assert.equal(mergedNow.length, 1, 'nothing merged again');
+  await d.close();
+});
+
+test('PLAN 14.2 (c): the call to the engine fails: as when it kept A', async () => {
+  const { d, attached, mergedNow } = await mergedDoc();
+  const { h, p } = hold();
+  mu.dropDisplay = () => p;
+  mu.drawSnapshot = plainCopy;
+  dropped.length = 0;
+  await d.refreshDrawing();
+  assert.ok(![...inner(d).merges.values()].some((m) => m.file.path === A), 'taken out while the engine is asked');
+  h.fail(new Error('Editing engine restarted'));
+  await tick(); await tick();
+  assert.ok(!dropped.includes(A), 'A is not deleted');
+  assert.ok([...inner(d).merges.values()].some((m) => m.file.path === A), 'its entry is back');
+  await d.ensurePage(1);
+  assert.deepEqual(attached.map((a) => a.path), [A]);
+  assert.equal(mergedNow.length, 1);
+  await d.close();
+});
+
+test('PLAN 14.2 (d): a drawing copy that names A is being opened when the engine lets go of it: A stays until a later copy does not name it', async () => {
+  const { d } = await mergedDoc();
+  const { h, p } = hold();
+  let dropAnswer: unknown = p;
+  mu.dropDisplay = () => dropAnswer;
+  mu.drawSnapshot = plainCopy;
+  dropped.length = 0;
+  await d.refreshDrawing(); // the engine is asked about A (held)
+  // a second drawing copy, made outside the redraw queue, names A and is being opened
+  const { h: hOpen, p: pOpen } = hold();
+  mu.drawSnapshot = () => ({ path: '/doc.pdf', size: 100, extra: [{ path: A, size: 12 }] });
+  draw.open = () => pOpen;
+  const second = d.refreshDrawing();
+  await tick();
+  h.release([A]);
+  await tick(); await tick();
+  assert.ok(!dropped.includes(A), 'A is not deleted while a copy that names it is opening');
+  assert.ok(inner(d).temps.has(A), 'it stays in temps');
+  hOpen.release(true);
+  await second;
+  // a later copy that does not name it: it goes
+  dropAnswer = [A];
+  draw.open = () => true;
+  mu.drawSnapshot = plainCopy;
+  await d.refreshDrawing();
+  await tick(); await tick();
+  assert.equal(dropped.filter((t) => t === A).length, 1, 'dropped by the later copy');
+  await d.close();
+});
+
+// ---------------------------------------------------------------- PLAN 14.3
+
+test('PLAN 14.3: a simplified sheet\'s copy is kept when a later drawing copy does not name it; it goes on close', async () => {
+  mu = baseMu();
+  draw = baseDraw();
+  const S = '/work/S/simplified.bin';
+  mu.simplifyPage = () => true;
+  mu.pinHeavy = () => true;
+  mu.displayFiles = () => [S];
+  mu.dropDisplay = () => [S]; // were it asked, the engine would let go
+  mu.drawSnapshot = () => ({ path: '/doc.pdf', size: 100, extra: [{ path: S, size: 12 }] });
+  const d = new PdfDoc('/doc.pdf');
+  assert.equal(await d.load({ path: '/doc.pdf' }), 'ok');
+  calls.length = 0;
+  dropped.length = 0;
+  assert.equal(await d.simplify(1), true);
+  // an edit: the new copy no longer names S
+  mu.drawSnapshot = plainCopy;
+  await d.refreshDrawing();
+  await tick(); await tick();
+  assert.ok(!dropped.includes(S), 'S is not deleted: ' + JSON.stringify(dropped));
+  assert.ok(!calls.includes('edit:dropDisplay'), 'the engine is not asked about it');
+  await d.close();
+  assert.ok(dropped.includes(S), 'S goes on close');
+});
+
+test('PLAN 14.2b: the engine lets go of A after a copy that names A became the drawing copy: A is not deleted under it', async () => {
+  const { d } = await mergedDoc();
+  const { h, p } = hold();
+  let dropAnswer: unknown = p;
+  mu.dropDisplay = () => dropAnswer;
+  mu.drawSnapshot = plainCopy;
+  dropped.length = 0;
+  await d.refreshDrawing(); // the engine is asked about A (held)
+  // a copy made before the engine ran dropDisplay still names A, and is opened and current
+  mu.drawSnapshot = () => ({ path: '/doc.pdf', size: 100, extra: [{ path: A, size: 12 }] });
+  await d.refreshDrawing();
+  h.release([A]);
+  await tick(); await tick();
+  assert.ok(!dropped.includes(A), 'A is not deleted while the drawing copy names it');
+  assert.ok(inner(d).temps.has(A) && inner(d).displayTemps.has(A), 'it stays in temps and displayTemps');
+  // a later copy that does not name it: it goes
+  dropAnswer = [A];
+  mu.drawSnapshot = plainCopy;
+  await d.refreshDrawing();
+  await tick(); await tick();
+  assert.equal(dropped.filter((t) => t === A).length, 1, 'dropped by the later copy');
+  await d.close();
+});

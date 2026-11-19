@@ -15,7 +15,7 @@ export interface AppInfo { version: string; user: string; winUser: string; platf
 /** fileMtime: its file's time when the copy was made (the file server's clock, like the file's own) */
 export interface Recovery { key: string; file: string; path: string | null; name: string; time: number; base?: { path: string; size: number; mtime: number } | null; fileMtime?: number }
 
-export type AiProvider = 'anthropic' | 'openai';
+export type AiProvider = 'anthropic' | 'openai' | 'deepseek';
 export type AiPart = { t: 'text'; text: string } | { t: 'image'; b64: string; mime?: string } | { t: 'pdf'; b64: string; name?: string };
 export interface AiMessage { role: 'user' | 'assistant'; parts: AiPart[]; cache?: boolean }
 export interface AiRequest { model: string; system: string; messages: AiMessage[]; maxTokens?: number }
@@ -34,6 +34,8 @@ export interface UpdateState {
   /** there is a default to put back (it may be '' - no updates, as the setup chose) */
   defaultSet?: boolean;
   checked: number; previous: string; pendingAtExit: boolean;
+  /** the Go back copy is the company's (unbranded) one and still offered: only then "30 days" holds */
+  previousOld?: boolean;
   /** Linux package this copy came in ('' elsewhere) and the new version's package file */
   linux?: '' | 'appimage' | 'deb'; pkgFile?: string;
   available?: string; notes?: string[]; groups?: NoteGroups | null; kind?: 'app' | 'full' | 'appimage' | 'deb'; size?: number; pct?: number; err?: string; show?: boolean;
@@ -98,7 +100,7 @@ export interface GccApi {
   printRun(file: string, o: { deviceName?: string; copies?: number; collate?: boolean; color?: boolean; duplex?: 'simplex' | 'longEdge' | 'shortEdge'; sheet?: { w: number; h: number }; sheets?: number; dialog?: boolean }): Promise<{ ok: boolean; reason: string }>;
   /** pages dragged out: bytes, or an engine temp file (moved into the drag folder) */
   dragPrepare(data: Uint8Array | string, name: string): Promise<string>;
-  aiKeys(): Promise<{ anthropic: boolean; openai: boolean; secure: boolean }>;
+  aiKeys(): Promise<{ anthropic: boolean; openai: boolean; deepseek: boolean; secure: boolean }>;
   /** check: try the key with the service first and keep the old one if it fails */
   aiSetKey(provider: AiProvider, key: string, check?: boolean): Promise<boolean>;
   aiModels(provider: AiProvider): Promise<{ id: string; name: string; created: number | string }[]>;

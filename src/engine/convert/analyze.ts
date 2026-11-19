@@ -96,7 +96,7 @@ export function dropStampText(pms: PageModel[]) {
     found.push(key);
   }
   if (!stamped.size) return;
-  // the stamp's words run together into one ("GENERALCONSTRUCTIONCO.LLC")
+  // the stamp's words run together into one ("ACMEBUILDERSCO.LLC")
   const keys = found.filter((k) => k.length >= 10);
   for (const sg of segs) for (const t of sg.toks) if (!stamped.has(t.w) && t.k.length >= 12 && keys.some((k) => t.k.includes(k))) stamped.add(t.w);
   // a word of the stamp read on its own line ("TENDER" without "DOCUMENTS") next to the rest of it

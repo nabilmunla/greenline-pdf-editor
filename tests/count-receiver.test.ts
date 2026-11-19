@@ -83,7 +83,7 @@ test('next day one id returns: yesterday\'s row {day 2}, today 1, week 2, writte
   await s.ping(a, '0.12.0', 'win');
   const yRow = 'n:' + new Date(s.clock.t - DAY).toISOString().slice(0, 10);
   const row = JSON.parse(s.kv.m.get(yRow)!.v);
-  assert.deepEqual(row, { apps: { 'pdf-editor': { day: 2, week: 2, month: 2, byVersion: { '0.12.0': 1, '0.11.0': 1 }, byOs: { win: 1, mac: 1 } }, 'rev-radar': { day: 0, week: 0, month: 0, byVersion: {}, byOs: {} } } });
+  assert.deepEqual(row, { apps: { 'pdf-editor': { day: 2, week: 2, month: 2, byVersion: { '0.12.0': 1, '0.11.0': 1 }, byOs: { win: 1, mac: 1 } }, 'rev-radar': { day: 0, week: 0, month: 0, byVersion: {}, byOs: {} }, 'goldline-takeoff': { day: 0, week: 0, month: 0, byVersion: {}, byOs: {} } } });
   assert.equal(s.kv.m.get(yRow)!.exp, s.clock.t + 400 * DAY);
   const j = await s.read();
   assert.deepEqual([j.today.total.day, j.today.total.week, j.today.total.month], [1, 2, 2]);
@@ -213,7 +213,7 @@ test('KV write budget: one write per install per day plus at most one n: row a d
 });
 
 // ------------------------------------------------------------------ 7.18: two apps, kept apart
-const PE = 'pdf-editor', RR = 'rev-radar';
+const PE = 'pdf-editor', RR = 'rev-radar', GT = 'goldline-takeoff';
 const hashOf = (i: string) => createHash('sha256').update(i).digest('hex').slice(0, 24);
 const rr = { client: RR };
 
@@ -237,7 +237,7 @@ test('both apps are counted apart: same install number in both = two installs; k
   assert.equal(s.kv.stats.puts.length, w);
   // the page shows each app and the total
   const page = await (await s.call('/counts', { headers: s.auth })).text();
-  assert.ok(page.includes('<h2>PDF Editor</h2>') && page.includes('<h2>Rev Radar</h2>') && page.includes('Both apps together'));
+  assert.ok(page.includes('<h2>PDF Editor</h2>') && page.includes('<h2>Rev Radar</h2>') && page.includes('All apps together'));
   // metadata of a Rev Radar key is the same shape
   assert.deepEqual(s.kv.m.get('c:rev-radar:' + hashOf(b))!.meta, { last: Math.floor(s.clock.t / DAY), prev: null, v: '1.0.0', os: 'win' });
 });
@@ -285,7 +285,7 @@ test('the n: row holds both apps, one write a day for everything; the key\'s met
   const e = s.kv.m.get(name)!;
   assert.deepEqual(JSON.parse(e.v).apps[PE], { day: 1, week: 1, month: 1, byVersion: { '0.12.0': 1 }, byOs: { win: 1 } });
   assert.deepEqual(JSON.parse(e.v).apps[RR], { day: 1, week: 1, month: 1, byVersion: { '1.0.0': 1 }, byOs: { mac: 1 } });
-  assert.deepEqual(e.meta, { a: { [PE]: [1, 1, 1], [RR]: [1, 1, 1] } });
+  assert.deepEqual(e.meta, { a: { [PE]: [1, 1, 1], [RR]: [1, 1, 1], [GT]: [0, 0, 0] } });
   assert.ok(JSON.stringify(e.meta).length < 1000, 'metadata limit is 1 KB');
 });
 
@@ -370,4 +370,167 @@ test('reports page, one app: its reports shown even when the newest 200 are all 
   assert.equal(page.split('<td>Rev Radar</td>').length - 1, 3, 'the three Rev Radar reports');
   assert.ok(!page.includes('<td>PDF Editor</td>'));
   assert.ok(!page.includes('Older'), 'nothing older for it');
+});
+
+// ------------------------------------------------------------------ 7.19: a third app, Goldline Takeoff
+const gt = { client: GT };
+const dateOf = (t: number) => new Date(t).toISOString().slice(0, 10);
+
+test('Goldline Takeoff: its ping is accepted, counted apart under c:goldline-takeoff:<24 hex>, once a day', async () => {
+  const s = setup();
+  const a = s.id(), b = s.id();
+  assert.equal((await s.ping(a, '0.1.0', 'linux', gt)).status, 200);
+  assert.equal((await s.ping(b, '0.1.0', 'win', gt)).status, 200);
+  assert.equal((await s.ping(a, '0.12.0', 'win')).status, 200, 'the same number in the PDF Editor is another install');
+  const key = 'c:goldline-takeoff:' + hashOf(a);
+  assert.match(key, /^c:goldline-takeoff:[0-9a-f]{24}$/);
+  assert.ok(s.kv.m.has(key) && s.kv.m.has('c:' + hashOf(a)));
+  assert.deepEqual(s.kv.m.get(key)!.meta, { last: Math.floor(s.clock.t / DAY), prev: null, v: '0.1.0', os: 'linux' });
+  const w = s.kv.stats.puts.length;
+  await s.ping(a, '0.1.0', 'linux', gt);
+  assert.equal(s.kv.stats.puts.length, w, 'the same day again: no write');
+  const j = await s.read();
+  const g = j.today.apps[GT];
+  assert.deepEqual([g.day, g.week, g.month, g.byOs, g.byVersion], [2, 2, 2, { linux: 1, win: 1 }, { '0.1.0': 2 }]);
+  assert.deepEqual([j.today.apps[PE].day, j.today.apps[RR].day, j.today.total.day], [1, 0, 3]);
+  // the key reads back as its own app (not the PDF Editor's): the PDF Editor stays at 1
+  const page = await (await s.call('/counts', { headers: s.auth })).text();
+  assert.ok(page.includes('<h2>Goldline Takeoff</h2>'));
+});
+
+test('Goldline Takeoff: /report accepted, an App column, the filter tab and ?app=goldline-takeoff', async () => {
+  const s = setup();
+  const send = (client: string, body: object) => s.call('/report', { method: 'POST', body: JSON.stringify({ version: '1.0.0', ...body }) }, { client });
+  assert.equal((await send(GT, { kind: 'problem', app: 'Goldline Takeoff', text: 'takeoff scale wrong' })).status, 200);
+  assert.equal((await send(RR, { kind: 'crash', app: 'Rev Radar', message: 'radar boom' })).status, 200);
+  assert.equal((await send(PE, { kind: 'crash', app: 'PDF Editor', message: 'pdf boom' })).status, 200);
+  const page = async (q = '') => (await s.call('/' + q, { headers: s.auth })).text();
+  const all = await page();
+  assert.ok(all.includes('href="/?app=goldline-takeoff">Goldline Takeoff</a>'), 'the filter tab');
+  assert.ok(all.includes('<td>Goldline Takeoff</td>') && all.includes('takeoff scale wrong'));
+  const only = await page('?app=goldline-takeoff');
+  assert.ok(only.includes('takeoff scale wrong') && !only.includes('radar boom') && !only.includes('pdf boom'));
+  assert.ok(only.includes('<b>Goldline Takeoff</b>'));
+  const onlyRr = await page('?app=rev-radar');
+  assert.ok(!onlyRr.includes('takeoff scale wrong') && onlyRr.includes('radar boom'));
+  const id = /href="\/r\/([\w-]+)">takeoff scale/.exec(all)![1];
+  assert.ok((await (await s.call('/r/' + id, { headers: s.auth })).text()).includes('<th>app</th><td>Goldline Takeoff</td>'));
+  assert.equal(JSON.parse(s.kv.m.get('r:' + id)!.v).client, GT);
+});
+
+test('near-miss clients are still 400, nothing stored (with three apps)', async () => {
+  const s = setup();
+  for (const client of ['goldline', 'goldline-takeoff2', 'Goldline Takeoff', 'goldline-takeoff,rev-radar', 'takeoff']) {
+    assert.equal((await s.ping(s.id(), '1.0.0', 'win', { client })).status, 400, client);
+    assert.equal((await s.call('/report', { method: 'POST', body: JSON.stringify({ kind: 'crash', version: '1.0.0' }) }, { client })).status, 400, client + ' report');
+  }
+  assert.equal(s.kv.m.size, 0);
+});
+
+test('a goldline ping is the same strict body as the others: 3 keys, 32 hex, version, os, 200 bytes', async () => {
+  const s = setup();
+  const post = (body: string) => s.call('/count', { method: 'POST', body }, gt);
+  const id = s.id();
+  assert.equal((await post(JSON.stringify({ id, v: '0.1.0', os: 'mac' }))).status, 200);
+  assert.equal((await post(JSON.stringify({ id: s.id(), v: '0.1.0', os: 'mac', extra: 1 }))).status, 400);
+  assert.equal((await post(JSON.stringify({ id: 'ABC', v: '0.1.0', os: 'mac' }))).status, 400);
+  assert.equal((await post(JSON.stringify({ id: s.id(), v: '0.1.0', os: 'beos' }))).status, 400);
+  assert.equal((await post('x'.repeat(300))).status, 400);
+});
+
+test('rows stored before this change (two apps, or only the PDF Editor) read with Goldline Takeoff as zeros; never rewritten', async () => {
+  const s = setup();
+  const today = Math.floor(s.clock.t / DAY);
+  const put = (d: number, v: any, meta: any) => s.kv.m.set('n:' + dateOf(d * DAY), { v: JSON.stringify(v), meta, exp: Infinity });
+  // (a) the two-app shape, as the receiver wrote it until now
+  put(today - 1, { apps: { [PE]: { day: 3, week: 5, month: 9, byVersion: { '0.12.0': 3 }, byOs: { win: 3 } }, [RR]: { day: 1, week: 2, month: 2, byVersion: { '1.0.0': 1 }, byOs: { mac: 1 } } } }, { a: { [PE]: [3, 5, 9], [RR]: [1, 2, 2] } });
+  put(today - 2, { apps: { [PE]: { day: 2, week: 4, month: 8, byVersion: { '0.12.0': 2 }, byOs: { win: 2 } } } }, { a: { [PE]: [2, 4, 8] } });   // (one app named only)
+  // (b) the first, flat, one-app shape
+  put(today - 3, { day: 1, week: 2, month: 7, byVersion: { '0.11.0': 1 }, byOs: { linux: 1 } }, { day: 1, week: 2, month: 7 });
+  // (c) a two-app row whose value lost its split (metadata only)
+  s.kv.m.set('n:' + dateOf((today - 4) * DAY), { v: 'not json', meta: { a: { [PE]: [1, 1, 1] } }, exp: Infinity });
+  await s.ping(s.id(), '0.1.0', 'win', gt);
+  const j = await s.read();
+  const row = (d: number) => j.days.find((r: any) => r.date === dateOf(d * DAY));
+  const y = row(today - 1);
+  assert.deepEqual([y.apps[PE].day, y.apps[PE].week, y.apps[PE].month, y.apps[PE].byOs], [3, 5, 9, { win: 3 }]);
+  assert.deepEqual([y.apps[RR].day, y.apps[RR].week, y.apps[RR].month], [1, 2, 2]);
+  assert.deepEqual([y.apps[GT].day, y.apps[GT].week, y.apps[GT].month], [0, 0, 0]);
+  assert.deepEqual(y.total, { day: 4, week: 7, month: 11 }, 'sumApps with a missing app');
+  assert.deepEqual([row(today - 2).apps[GT].day, row(today - 2).apps[RR].month, row(today - 2).total.month], [0, 0, 8]);
+  const flat = row(today - 3);
+  assert.deepEqual([flat.apps[PE].day, flat.apps[PE].month, flat.apps[PE].byOs, flat.apps[RR].day, flat.apps[GT].month, flat.total.month], [1, 7, { linux: 1 }, 0, 0, 7]);
+  assert.deepEqual([row(today - 4).apps[PE].day, row(today - 4).apps[GT].day, row(today - 4).total.day], [1, 0, 1]);
+  assert.deepEqual(j.today.apps[GT].day, 1);
+  // the page (HTML) renders them too, one table per app
+  const html = await s.call('/counts', { headers: s.auth });
+  assert.equal(html.status, 200);
+  const h = await html.text();
+  assert.ok(h.includes('<h2>Goldline Takeoff</h2>') && h.includes(dateOf((today - 3) * DAY)));
+  assert.equal(s.kv.stats.puts.filter((p) => p.k.startsWith('n:') && p.day === today).length, 0, 'old rows are not rewritten (yesterday\'s exists)');
+});
+
+test('closing a day after an old two-app row exists writes a three-app row; old installs of the two apps are untouched', async () => {
+  const s = setup();
+  const a = s.id(), b = s.id();
+  await s.ping(a, '0.12.0', 'win'); await s.ping(b, '1.0.0', 'mac', rr);
+  s.clock.t += DAY;
+  await s.ping(s.id(), '0.1.0', 'linux', gt);      // Goldline's first ping of the new day closes yesterday
+  const e = s.kv.m.get('n:' + dateOf(s.clock.t - DAY))!;
+  assert.deepEqual(JSON.parse(e.v).apps[GT], { day: 0, week: 0, month: 0, byVersion: {}, byOs: {} });
+  assert.deepEqual(e.meta, { a: { [PE]: [1, 1, 1], [RR]: [1, 1, 1], [GT]: [0, 0, 0] } });
+  s.clock.t += DAY;
+  await s.ping(s.id(), '0.1.0', 'win', gt);
+  const j = await s.read();
+  assert.deepEqual([j.days[0].apps[GT].day, j.days[0].apps[GT].month], [1, 1]);
+  assert.deepEqual([j.days[1].apps[GT].day, j.days[1].apps[GT].month], [0, 0]);
+});
+
+test('KV metadata limit: an n: row with three apps and huge numbers stays well under 1,024 bytes', async () => {
+  const s = setup();
+  const big = 999_999_999;
+  const nums: any = {};
+  for (const a of [PE, RR, GT]) nums[a] = { day: big, week: big, month: big, byVersion: {}, byOs: {} };
+  // (nine-digit numbers are far beyond any real count: the size depends on the digits only, so the shape is measured directly)
+  const meta = { a: Object.fromEntries(Object.entries(nums).map(([k, x]: any) => [k, [x.day, x.week, x.month]])) };
+  const size = new TextEncoder().encode(JSON.stringify(meta)).length;
+  console.log('3-app n: metadata bytes (9-digit numbers):', size);
+  assert.ok(size < 300, 'three apps with nine-digit numbers: ' + size);
+  // and the real writer: many installs, three apps -> read the stored metadata's size
+  const s2 = setup();
+  for (let i = 0; i < 30; i++) { await s2.ping(s2.id(), '0.12.0', 'win'); await s2.ping(s2.id(), '1.0.0', 'win', rr); await s2.ping(s2.id(), '0.1.0', 'win', gt); }
+  s2.clock.t += DAY;
+  await s2.ping(s2.id(), '0.1.0', 'win', gt);
+  const real = s2.kv.m.get('n:' + dateOf(s2.clock.t - DAY))!;
+  assert.deepEqual(real.meta, { a: { [PE]: [30, 30, 30], [RR]: [30, 30, 30], [GT]: [30, 30, 30] } });
+  assert.ok(JSON.stringify(real.meta).length < 1024);
+});
+
+test('write budget with three apps: one write per install per day per app, one n: row a day', async () => {
+  const s = setup(7);
+  const N = 10, DAYS = 12;
+  const ids = Array.from({ length: N }, () => s.id());
+  for (let d = 0; d < DAYS; d++) {
+    for (const i of ids) { for (let k = 0; k < 2; k++) { await s.ping(i); await s.ping(i, '1.0.0', 'win', rr); await s.ping(i, '0.1.0', 'win', gt); } }
+    await s.read();
+    s.clock.t += DAY;
+  }
+  const perDay = new Map<number, { c: number; n: number }>();
+  for (const p of s.kv.stats.puts) {
+    const r = perDay.get(p.day) || { c: 0, n: 0 };
+    if (p.k.startsWith('c:')) r.c++; else if (p.k.startsWith('n:')) r.n++; else assert.fail('other write ' + p.k);
+    perDay.set(p.day, r);
+  }
+  for (const [, r] of perDay) assert.ok(r.c === 3 * N && r.n <= 1, JSON.stringify(r));
+  assert.equal(new Set([...s.kv.m.keys()].filter((k) => k.startsWith('c:goldline-takeoff:'))).size, N);
+});
+
+test('keyApp / keyPrefix cover goldline-takeoff: its keys list as its own app, never the PDF Editor\'s', async () => {
+  const s = setup();
+  const today = Math.floor(s.clock.t / DAY);
+  s.kv.m.set('c:goldline-takeoff:' + 'e'.repeat(24), { v: '', meta: { last: today, prev: null, v: '0.1.0', os: 'mac' }, exp: Infinity });
+  s.kv.m.set('c:' + 'f'.repeat(24), { v: '', meta: { last: today, prev: null, v: '0.12.0', os: 'win' }, exp: Infinity });
+  const j = await s.read();
+  assert.deepEqual([j.today.apps[GT].day, j.today.apps[PE].day, j.today.apps[RR].day], [1, 1, 0]);
+  assert.deepEqual(j.today.apps[GT].byVersion, { '0.1.0': 1 });
 });

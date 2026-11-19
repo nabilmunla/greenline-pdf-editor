@@ -34,7 +34,7 @@ How: pages are read from disk only as they're needed, never the whole file at on
 - **Scans:** OCR in English and Arabic, fully offline.
 - **Export:** BOQs and schedules to Excel, documents to Word.
 - **Print:** A0 sheets fitted onto A3 or A4, or at actual size for drawings to scale, with a preview of every sheet; or just a marked part of a sheet, enlarged to the paper.
-- **Optional:** an AI assistant (Claude or ChatGPT, with your own key) and an offline translator.
+- **Optional:** an AI assistant (Claude, ChatGPT or DeepSeek, with your own key) and an offline translator.
 
 <p align="center"><img src="brand/greenline/screenshots/zoom.gif" width="800" alt="Zooming from a whole A1 sheet into a 1:50 unit plan"></p>
 
@@ -47,6 +47,8 @@ How: pages are read from disk only as they're needed, never the whole file at on
 ## Private by design
 
 Your files never leave your PC. The only things that go online are update checks (here, on GitHub), the translator's one-off language download, the AI assistant only when you use it, problem reports only when you send them (see below), the anonymous user count (see below; you can turn it off), and, on Linux, the spelling check's dictionary.
+
+**AI assistant.** It does nothing until you add a key of your own for Claude, ChatGPT or DeepSeek. Nothing of your files goes out in the background: only the pages the panel lists, with your question or for a translation, when you press Send or Translate. They go to the service you chose (Anthropic for Claude, OpenAI for ChatGPT, DeepSeek for DeepSeek), and that service bills your own account. DeepSeek's servers are in China, by DeepSeek's privacy policy. Apart from that, the app only checks a key with its service when you save it and asks the service for its list of models; neither carries anything from a file. What a service does with what it receives is set by its own terms, not by this app. Translating on this PC needs no key and sends none of your pages.
 
 **Spelling check on Linux.** The first time it is needed, the app downloads the dictionary for your language from Google's servers. This is how the browser engine inside the app gets its dictionaries, and Google sees your internet address and the language asked for, as with any download. The words you type are checked on your PC and are not sent anywhere. On Windows the app uses Windows' own spelling checker; a dictionary is downloaded the same way only if Windows has none for your language.
 

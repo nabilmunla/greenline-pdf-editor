@@ -14,6 +14,17 @@
 //  2. the C stack pointer exported: every MuPDF error is thrown out of the WebAssembly code
 //     without unwinding it, leaking 64 bytes of a 64 KB stack each time (the engine was
 //     restarted every 400 errors for it); mupdf-guard.ts now puts it back after each error.
+//  3. (PLAN 14.7) no "compression bomb" limit of its own where the caller states none: MuPDF's
+//     fz_read_best limits a stream loaded whole to `initial * 200` bytes (100 MiB at least) - a
+//     size_t, 32 bits here, which wraps once `initial` passes 21.47 MB. A stream of L bytes over
+//     100 MiB in a file was then refused ("compression bomb detected") when 200 × L mod 2^32 < L:
+//     raw loads, MuPDF's own save, a decoded Flate load (600 × L). Six bytes: "initial * 200"
+//     becomes all ones (no limit); a limit the caller states (an image: width × height) stays.
+//     A real bomb is still stopped, later (Fable, 18 Nov): a 2 KB stream packed twice (Flate on
+//     Flate) that unpacks to 1 GB was refused as a "bomb" at 431 MiB of engine memory before; now
+//     it ends in a handled "realloc ... failed" at 1,746 MiB after 2.5 s, and the document still
+//     answers. 3 GB packed once reaches 1,897 MiB either way. The bound is the .wasm's memory
+//     maximum (2 GiB) and MuPDF's handled realloc failure.
 // Exact match or nothing: a byte pattern that is not there exactly once (another MuPDF.js build)
 // leaves the .wasm as it is - with today's limits - and the log says so.
 import { readFileSync, existsSync } from 'node:fs';
@@ -26,6 +37,11 @@ globalThis.$libmupdf_wasm_Module ??= {};
 /** js_stm_seek's "n < 0 -> try later": ... local.tee 3, i32.const 0, i32.lt_s (+6), if ... */
 const SEEK_TEST = [0x10, 0x00, 0x22, 0x03, 0x41, 0x00, 0x48, 0x04, 0x40, 0x20, 0x00, 0x41, 0x09];
 const LT_S = 0x48, LT_U = 0x49;
+/** fz_read_best's "worst_case ? worst_case : initial * 200": local.get 3, local.get 2, i32.const 200,
+ *  i32.mul, local.get 3, select, local.set 13 (+2: "local.get 2, i32.const 200, i32.mul" becomes
+ *  "i32.const -1" - all ones - and four nops) */
+const BOMB_TEST = [0x20, 0x03, 0x20, 0x02, 0x41, 0xc8, 0x01, 0x6c, 0x20, 0x03, 0x1b, 0x21, 0x0d];
+const BOMB_NONE = [0x41, 0x7f, 0x01, 0x01, 0x01, 0x01];
 
 function leb(b, i) { let r = 0, k = 0; for (;;) { const x = b[i++]; r += (x & 0x7f) * 2 ** k; k += 7; if (x < 0x80 || k > 35) return [r, i]; } }
 function lebBytes(n) { const out = []; do { let x = n % 128; n = Math.floor(n / 128); if (n) x |= 0x80; out.push(x); } while (n); return out; }
@@ -39,19 +55,24 @@ function findAll(b, pat) {
 }
 
 /**
- * The patched copy: { bytes, unsigned, sp, notes }. `unsigned`: file positions up to 4 GB;
+ * The patched copy: { bytes, unsigned, sp, bomb, notes }. `unsigned`: file positions up to 4 GB;
  * `sp`: the stack pointer is exported as "sp" (global 0, the mutable i32 every emscripten build
- * keeps it in). Either may be false (left as it is), never half-done.
+ * keeps it in); `bomb`: no stream-length limit of its own (3. above). Any may be false (left as
+ * it is), never half-done.
  */
 export function patchMupdf(input) {
   let b = new Uint8Array(input);
   const notes = [];
-  if (b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return { bytes: input, unsigned: false, sp: false, notes: ['not a wasm file'] };
-  let unsigned = false, sp = false;
+  if (b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return { bytes: input, unsigned: false, sp: false, bomb: false, notes: ['not a wasm file'] };
+  let unsigned = false, sp = false, bomb = false;
   // 1. unsigned positions
   const hits = findAll(b, SEEK_TEST);
   if (hits.length === 1) { b = b.slice(); b[hits[0] + 6] = LT_U; unsigned = true; }
   else notes.push(`the stream seek test was found ${hits.length} times, not once: files stay under 2 GB`);
+  // 3. no stream-length limit of its own (before 2: that one moves the code section)
+  const bombs = findAll(b, BOMB_TEST);
+  if (bombs.length === 1) { if (!unsigned) b = b.slice(); b.set(BOMB_NONE, bombs[0] + 2); bomb = true; }
+  else notes.push(`the stream size limit was found ${bombs.length} times, not once: a stream over 100 MiB in a file may be refused ("compression bomb detected")`);
   // 2. the stack pointer as an export: global 0 must be a mutable i32, and no export may be called "sp"
   let i = 8, globalOk = false, exp = -1, expEnd = -1, expSizeAt = -1;
   while (i < b.length) {
@@ -80,7 +101,7 @@ export function patchMupdf(input) {
     } else notes.push(taken ? 'an export is already called "sp"' : 'the export section did not read as expected');
   } else notes.push(globalOk ? 'no export section' : 'global 0 is not the stack pointer');
   if (!sp) notes.push('MuPDF errors still leak its stack (restart every 400 errors, as before)');
-  return { bytes: unsigned || sp ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : input, unsigned, sp, notes };
+  return { bytes: unsigned || sp || bomb ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : input, unsigned, sp, bomb, notes };
 }
 
 function wasmPath() {
@@ -97,20 +118,20 @@ if (!off && !M.wasmBinary && !M.instantiateWasm) {
   if (p) {
     const orig = readFileSync(p);
     const r = patchMupdf(orig.buffer.slice(orig.byteOffset, orig.byteOffset + orig.byteLength));
-    globalThis.$mupdfPatch = { unsigned: r.unsigned, sp: r.sp };
+    globalThis.$mupdfPatch = { unsigned: r.unsigned, sp: r.sp, bomb: r.bomb };
     if (r.notes.length) console.error('MuPDF wasm: ' + r.notes.join('; '));
-    if (r.unsigned || r.sp) {
+    if (r.unsigned || r.sp || r.bomb) {
       // (instantiated here so the exports - "sp" among them - are kept; a patched copy that
       // fails to compile falls back to the file as it is, never no engine at all)
       M.instantiateWasm = (imports, done) => {
         const use = ({ instance, module }) => { globalThis.$mupdfExports = instance.exports; done(instance, module); };
         WebAssembly.instantiate(r.bytes, imports).then(use, (e) => {
           console.error('MuPDF wasm: the patched copy failed (' + (e && e.message) + '), the file as it is');
-          globalThis.$mupdfPatch = { unsigned: false, sp: false };
+          globalThis.$mupdfPatch = { unsigned: false, sp: false, bomb: false };
           return WebAssembly.instantiate(orig, imports).then(use);
         });
         return {};
       };
     }
-  } else globalThis.$mupdfPatch = { unsigned: false, sp: false };
-} else globalThis.$mupdfPatch ??= { unsigned: false, sp: false };
+  } else globalThis.$mupdfPatch = { unsigned: false, sp: false, bomb: false };
+} else globalThis.$mupdfPatch ??= { unsigned: false, sp: false, bomb: false };
