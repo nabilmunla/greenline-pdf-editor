@@ -272,13 +272,18 @@ function writeObjects(doc: mupdf.PDFDocument, put: (b: string | Uint8Array) => v
       } finally { obj.destroy?.(); }
     } finally { ref.destroy?.(); }
   }
+  // (a catalogue written straight into the trailer - not as an object of its own - was left out and
+  // the file could not be opened again (F09): it is written as an object of its own, as readers expect)
+  let size = n;
+  let rootDirect = '';
+  { const v = tr.get('Root'); try { if (!v.isIndirect() && v.isDictionary()) { offs[n] = pos; gens[n] = '0'; w(`${n} 0 obj\n${v.toString(true, true)}\nendobj\n`); rootDirect = `/Root ${n} 0 R`; size = n + 1; } } finally { v.destroy?.(); } }
   const xref = pos;
-  let x = `xref\n0 ${n}\n0000000000 65535 f\r\n`;
-  for (let num = 1; num < n; num++) x += String(offs[num]).padStart(10, '0') + ' ' + gens[num].padStart(5, '0') + ' n\r\n';
+  let x = `xref\n0 ${size}\n0000000000 65535 f\r\n`;
+  for (let num = 1; num < size; num++) x += String(offs[num]).padStart(10, '0') + ' ' + gens[num].padStart(5, '0') + ' n\r\n';
   // (an /Info written straight into the trailer - not as an object of its own - is kept too: title and author were lost)
   const ref = (k: string) => { const v = tr.get(k); return v.isIndirect() ? `/${k} ${v.asIndirect()} ${genOf(v)} R` : k === 'Info' && v.isDictionary() ? `/Info ${v.toString(true, true)}` : ''; };
   const id = tr.get('ID');
-  x += `trailer\n<</Size ${n}${ref('Root')}${ref('Info')}${id.isArray() ? '/ID ' + id.toString(true, true) : ''}>>\nstartxref\n${xref}\n%%EOF\n`;
+  x += `trailer\n<</Size ${size}${rootDirect || ref('Root')}${ref('Info')}${id.isArray() ? '/ID ' + id.toString(true, true) : ''}>>\nstartxref\n${xref}\n%%EOF\n`;
   w(x);
   return pos;
 }

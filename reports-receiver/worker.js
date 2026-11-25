@@ -1,5 +1,6 @@
 // The public build's report receiver: a Cloudflare Worker on the developer's own account.
 //   POST /report          an anonymised report from the app (electron/anon.cjs) -> stored privately
+//                         (POST / is taken the same way: Greenline 0.12.1 to 0.13.1 post there)
 //   GET  /                the list (password: the ADMIN_KEY secret, browser sign-in box)
 //   GET  /r/<id>          one report (its picture inline);  POST /r/<id>/delete
 //   POST /count           the anonymous user counter: one ping per install per day (id, version, OS)
@@ -28,6 +29,8 @@ export default {
     const url = new URL(req.url);
     try {
       if (url.pathname === '/report') return req.method === 'POST' ? await receive(req, env) : text('POST only', 405);
+      // (Greenline 0.12.1 to 0.13.1 post reports to the bare address: taken the same way)
+      if (url.pathname === '/' && req.method === 'POST') return await receive(req, env);
       if (url.pathname === '/count') return req.method === 'POST' ? await ping(req, env) : text('POST only', 405);
       if (!authorised(req, env)) return new Response('Sign in', { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Reports", charset="UTF-8"' } });
       if (url.pathname === '/') return await list(env, url);

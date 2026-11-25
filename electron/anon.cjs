@@ -40,6 +40,34 @@ function scrub(text, { user = '', pc = '', words = [] } = {}) {
 }
 
 /** the report as it is sent: only these fields, scrubbed, cut to size */
+/** the person's own words (Report a problem): paths and file names taken out, everything else as
+ *  typed. The log's rules (scrub) run a path to the end of its line - in a sentence that took the
+ *  words after it too; here a path ends with its file name (folders may hold spaces, a file name
+ *  doesn't). A file name of several words is taken out whole only in quotes or when it is one of
+ *  the PC's recent files (who.words) - it was sent as typed (F17) */
+function scrubText(text, { user = '', pc = '', words = [] } = {}) {
+  let s = String(text || '');
+  const known = [...new Set((words || []).map((w) => String(w || '').trim()).filter((w) => w.length >= 4 && /\p{L}.*\p{L}/u.test(w)))].sort((a, b) => b.length - a.length);
+  for (const w of known) s = s.split(w).join(/\.[a-z0-9]{2,5}$/i.test(w) ? '\u0001F\u0001' : '\u0001N\u0001');
+  // folders (spaces allowed, each ending in a slash - not one that holds "name.pdf "), then the last
+  // part; the paths go before the user name (a path with "<user>" in it stopped at its "<")
+  const dirs = `(?:(?:(?!\\.(?:${FILE_EXT})\\b)[^\\\\/"'|*?<>\\r\\n])*[\\\\/])*`;
+  // (the last part: a file name up to its extension, spaces and all - "Tower B GA Plan Rev 3.pdf" left
+  // "B GA Plan Rev" behind, sweep S2 - or, with no file name, up to the next space)
+  const last = `(?:[^\\\\/"'|*?<>\\r\\n]{1,255}?\\.(?:${FILE_EXT})\\b|[^\\s\\\\/"'|*?<>\\r\\n,;]*)`;
+  // (web addresses: a SharePoint or OneDrive link carries the company's and the person's names)
+  s = s.replace(/\bhttps?:\/\/[^\s"'<>]+/gi, '<link>');
+  s = s.replace(/file:\/\/\/?[^\s"'<>)]*/gi, '<path>');
+  s = s.replace(new RegExp(`\\b[A-Za-z]:[\\\\/]${dirs}${last}`, 'g'), '<path>');
+  s = s.replace(new RegExp(`\\\\\\\\[^\\\\/\\s"'|*?<>\\r\\n]+[\\\\/]${dirs}${last}`, 'g'), '<path>');
+  s = s.replace(new RegExp(`(^|[\\s"'(=])\\/(?:home|Users|tmp|mnt|media|run|srv|opt|root|var|private|Volumes|sessions)\\/${dirs}${last}`, 'g'), '$1<path>');
+  s = replaceNames(s, { user, pc });
+  s = s.replace(new RegExp(`(["'])[^"'\\r\\n]{1,255}?\\.(?:${FILE_EXT})\\1`, 'gi'), '$1<file>$1');
+  // (a name of at most 255 letters: unbounded, a long paste with no spaces took minutes)
+  s = s.replace(new RegExp(`[^\\s"'<>|*?:\\\\/\\u0001]{1,255}\\.(?:${FILE_EXT})\\b`, 'gi'), '<file>');
+  return s.replace(/\u0001F\u0001/g, '<file>').replace(/\u0001N\u0001/g, '<name>');
+}
+
 function anonymize(rep, who = {}) {
   const r = rep || {};
   const cut = (v, n) => (v == null ? undefined : String(v).slice(0, n));
@@ -57,8 +85,8 @@ function anonymize(rep, who = {}) {
     where: cut(scrub(r.where, who), 200),
     message: r.message != null ? cut(scrub(r.message, who), 2000) : undefined,
     stack: r.stack ? cut(scrub(r.stack, who), 8000) : undefined,
-    // (the person's own words: as typed - only their user and PC names come out)
-    text: r.text != null ? cut(replaceNames(String(r.text), who), 20000) : undefined,
+    // (the person's own words: as typed, with paths and file names taken out, as the window says - F17)
+    text: r.text != null ? cut(scrubText(String(r.text).slice(0, 20000), who), 20000) : undefined,
     openFiles: Number.isFinite(r.openFiles) ? r.openFiles : undefined,
     log: r.log ? cut(scrub(String(r.log).split('\n').slice(-120).join('\n'), who), 30000) : undefined,
   };
@@ -73,4 +101,4 @@ function replaceNames(s, { user = '', pc = '' } = {}) {
   return s;
 }
 
-module.exports = { scrub, anonymize };
+module.exports = { scrub, scrubText, anonymize };

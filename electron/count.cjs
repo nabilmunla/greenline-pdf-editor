@@ -129,4 +129,13 @@ function create(o) {
   };
 }
 
-module.exports = { create, countUrl };
+/** where reports go, from the receiver's address (".../report" or just the base): ".../report" -
+ *  the public build's address is the bare base, and the receiver takes reports only at /report:
+ *  every report was refused (F34) */
+function reportUrl(endpoint) {
+  const e = String(endpoint || '').trim();
+  if (!/^https?:\/\//i.test(e)) return e;
+  return e.replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\/report$/i, '') + '/report';
+}
+
+module.exports = { create, countUrl, reportUrl };

@@ -129,6 +129,9 @@ export interface Sheet {
   page: number; no: string; key: string; title: string;
   /** read at a spot whose numbers repeat (repeatedNos): its references need more proof (findRefs) */
   repeats?: boolean;
+  /** the title block as shown: text in it is never a reference; text elsewhere in the strips is.
+   *  Absent (a page label, or a block that could not be bounded): all the strips' text stays out */
+  block?: Box;
 }
 export interface SheetIndex {
   /** the numbered pages, in page order */
@@ -137,6 +140,14 @@ export interface SheetIndex {
   byKey: Map<string, number>;
   /** pages with no text at all (a scan: OCR first) */
   noText: number;
+  /** numbers found on more than one page of a small set, linked to the first copy (the user is told) */
+  dups: string[];
+}
+
+/** the notice for numbers on more than one page ('' when there are none) */
+export function dupLine(dups: string[]): string {
+  if (!dups.length) return '';
+  return dups.length === 1 ? `Sheet number ${dups[0]} is on more than one page: links to it go to the first.` : `Sheet numbers ${dups.join(', ')} are on more than one page: links to them go to the first.`;
 }
 
 const cellOf = (b: Box, w: number, h: number): [number, number] => [Math.floor((w - (b[0] + b[2]) / 2) / CELL), Math.floor((h - (b[1] + b[3]) / 2) / CELL)];
@@ -162,6 +173,7 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
   // page, put set B's 40 A3 sheets under 60 % and it lost all its numbers - e2e-combine-big)
   for (const p of pages) { if (!p || !(p.w > 0) || !p.text) continue; const k = sizeKey({ w: p.w, h: p.h }); let g = groups.get(k); if (!g) groups.set(k, (g = [])); g.push(p); }
   const found = new Map<number, Sheet>();
+  const dups: string[] = [];
   for (const g of groups.values()) {
     if (g.length < 3) continue;
     // every cell any band candidate falls in, and each page's pick there (as pick() below) - made
@@ -192,7 +204,9 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
     type Spot = { c: [number, number]; cover: number; tall: number; dist: number };
     const better = (a: Spot | null, b: Spot) => !a || b.cover > a.cover || (b.cover === a.cover && (b.tall > a.tall + 0.5 || (Math.abs(b.tall - a.tall) <= 0.5 && b.dist < a.dist)));
     // (a spot whose numbers repeat is taken only when no spot differs on every page: repeatedNos)
-    let best: Spot | null = null, again: Spot | null = null;
+    // (a small set - 4 to 9 pages - with one number on two of them fails the 90 % rule, one page in
+    //  5 is 20 %: taken last, the duplicate is reported and linked to its first copy)
+    let best: Spot | null = null, again: Spot | null = null, few: Spot | null = null;
     const big = Math.min(g[0].w, g[0].h) >= 270 * MM;
     for (const [k, c] of cells) {
       const e = picked.get(k);
@@ -201,9 +215,11 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
       const cand = { c, cover: e.vals.length, tall: e.tall / e.vals.length, dist: c[0] + c[1] };
       if (new Set(e.vals).size >= 0.9 * e.vals.length) { if (better(best, cand)) best = cand; }
       else if (big && repeatedNos(e.vals, e.raws) && better(again, cand)) again = cand;
+      else if (e.vals.length >= 4 && new Set(e.vals).size >= e.vals.length - 1 && better(few, cand)) few = cand;
     }
     const repeats = !best && !!again;
-    best = best || again;
+    const tolerant = !best && !again && !!few;
+    best = best || again || few;
     if (!best) continue;
     // (each page's titles made once: the title's spot and the page's title both need them)
     const heads = new Map<PageToks, Head[]>();
@@ -211,8 +227,12 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
     const titleSpot = best ? titleCell(g, best.c, headsOf) : null;
     for (const p of g) {
       const t = pick(p, best.c);
-      if (t) found.set(p.page, { page: p.page, no: t.raw, key: t.key, title: titleSpot ? titleOf(p, titleSpot, t, headsOf(p)) : '', ...(repeats ? { repeats } : {}) });
+      if (t) { const block = titleBlock(p, t); found.set(p.page, { page: p.page, no: t.raw, key: t.key, title: titleSpot ? titleOf(p, titleSpot, t, headsOf(p)) : '', ...(repeats ? { repeats } : {}), ...(block ? { block } : {}) }); }
       else if (p.label && looksLikeNo(p.label)) found.set(p.page, labelSheet(p));
+    }
+    if (tolerant) {
+      const seen = new Set<string>();
+      for (const p of g) { const f = found.get(p.page); if (!f) continue; if (seen.has(f.key) && !dups.includes(f.key)) dups.push(f.key); seen.add(f.key); }
     }
   }
   // no spot anywhere: page labels that look like drawing numbers, when they differ (a set labelled
@@ -226,7 +246,7 @@ export function sheetIndex(pages: PageToks[]): SheetIndex {
     sheets.push(s);
     if (!byKey.has(s.key)) byKey.set(s.key, s.page);
   }
-  return { sheets, byKey, noText };
+  return { sheets, byKey, noText, dups };
 }
 
 /**
@@ -284,6 +304,33 @@ function pick(p: PageToks, c: [number, number]): Tok | null {
   }
   return best;
 }
+
+/** lines this close (mm of paper) to the block's edge belong to it: the fields of a title block sit
+ *  up to 25 mm apart */
+const BLOCK_GAP = 30 * MM;
+/**
+ * The title block around a page's number: the box of the strip lines that join up with the number,
+ * each within BLOCK_GAP of the box so far. Text in the strips beyond it (a key plan's callouts, a
+ * notes column far off) is no title block. null when the box keeps growing past a few rounds (a
+ * legend down the whole strip): then all of the strips counts as title block, as before.
+ */
+function titleBlock(p: PageToks, no: Tok): Box | null {
+  const b: Box = [no.box[0], no.box[1], no.box[2], no.box[3]];
+  const rest = p.lines.slice();
+  for (let round = 0; round < 8; round++) {
+    let grew = false;
+    for (let k = rest.length - 1; k >= 0; k--) {
+      const l = rest[k].box;
+      if (l[0] > b[2] + BLOCK_GAP || l[2] < b[0] - BLOCK_GAP || l[1] > b[3] + BLOCK_GAP || l[3] < b[1] - BLOCK_GAP) continue;
+      b[0] = Math.min(b[0], l[0]); b[1] = Math.min(b[1], l[1]); b[2] = Math.max(b[2], l[2]); b[3] = Math.max(b[3], l[3]);
+      rest.splice(k, 1);
+      grew = true;
+    }
+    if (!grew) return b;
+  }
+  return null;
+}
+const inBlock = (t: Box, b: Box) => { const cx = (t[0] + t[2]) / 2, cy = (t[1] + t[3]) / 2; return cx >= b[0] - MM && cx <= b[2] + MM && cy >= b[1] - MM && cy <= b[3] + MM; };
 
 const REVISH = /^(REV(ISION)?|ISSUE|STATUS|DATE|SCALE|DRAWN|CHECKED|APPROVED|PROJECT|CLIENT|CONSULTANT|CONTRACTOR|SIZE|PURPOSE|SUITABILITY)\b|^(DRAWING|DWG|DRG|SHEET|TITLE)\.?\s*(NO\b|NUMBER|TITLE|NAME|:|$)|^(NO|NUMBER)\b/i;
 const DATEISH = /\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})\b/;
@@ -381,7 +428,8 @@ const KEYWORD = /\b(SEE|REFER|REF|DWG|DWGS|DRG|DRAWING|DRAWINGS|SHEET|SHT|DETAIL
  * before them (room numbers, levels and quantities are digits too); to a sheet read at a spot whose
  * numbers repeat, always that word. A number on more than one sheet is never linked: which of them
  * is meant cannot be told, and a wrong link is worse than none (PLAN 9.3b: the user's A1 set holds
- * 112 numbers several times). Only sheets of this file are ever linked.
+ * 112 numbers several times) - except a small set's duplicate (idx.dups), linked to its first copy.
+ * Only sheets of this file are ever linked.
  */
 export function findRefs(pages: PageToks[], idx: SheetIndex): Ref[] {
   if (!idx.sheets.length) return [];
@@ -403,9 +451,10 @@ export function findRefs(pages: PageToks[], idx: SheetIndex): Ref[] {
   const out: Ref[] = [];
   for (const p of pages) {
     if (!p) continue;
+    const block = own.get(p.page)?.block;
     for (const t of p.toks) {
-      if (t.band) continue;
-      let target = (count.get(t.key) ?? 0) > 1 ? undefined : idx.byKey.get(t.key);
+      if (t.band && !(block && !inBlock(t.box, block))) continue;
+      let target = (count.get(t.key) ?? 0) > 1 && !idx.dups.includes(t.key) ? undefined : idx.byKey.get(t.key);
       if (target === undefined && !count.has(t.key)) { const tl = tails.get(t.key); target = tl !== undefined && tl >= 0 ? tl : undefined; }
       if (target === undefined || target === p.page || own.get(p.page)?.key === t.key) continue;
       if (/^\d+$/.test(t.key) && (t.key.length < 5 || own.get(target)?.repeats) && !KEYWORD.test(t.pre)) continue;

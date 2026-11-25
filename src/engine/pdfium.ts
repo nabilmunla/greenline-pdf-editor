@@ -746,7 +746,21 @@ function snippet(tp: number, s: number, c: number, total: number): string {
   return ((a > 0 ? '…' : '') + one(t.slice(0, i0)).trimStart() + '\u0001' + one(t.slice(i0, i1)) + '\u0002' + one(t.slice(i1)).trimEnd() + (e < total ? '…' : ''));
 }
 
-export interface LinkInfo { rect: number[]; url?: string; page?: number }
+/** `view`: the destination's view, FPDFDest_GetView's type (2 = /Fit, 1 = /XYZ ...) and its parameters */
+export interface LinkInfo { rect: number[]; url?: string; page?: number; view?: { kind: number; params: number[] } }
+
+/** the view of a destination (0 = none given); the parameters it carries (up to 4 numbers) */
+function destView(q: WrappedPdfiumModule, dest: number): { kind: number; params: number[] } | null {
+  const n = malloc(4), ps = malloc(16);
+  try {
+    M().HEAP32[n >>> 2] = 0;
+    const kind = q.FPDFDest_GetView(dest, n, ps);
+    if (!kind) return null;
+    const count = Math.min(4, M().HEAP32[n >>> 2]);
+    const f = new Float32Array(M().HEAPU8.buffer, ps, 4);
+    return { kind, params: Array.from(f.subarray(0, Math.max(0, count))) };
+  } finally { free(n); free(ps); }
+}
 
 export function links(id: string, pg: number): LinkInfo[] {
   const d = mustDoc(id);
@@ -789,7 +803,11 @@ export function links(id: string, pg: number): LinkInfo[] {
           }
         }
       }
-      if (dest) info.page = q.FPDFDest_GetDestPageIndex(d.doc, dest);
+      if (dest) {
+        info.page = q.FPDFDest_GetDestPageIndex(d.doc, dest);
+        const view = destView(q, dest);
+        if (view) info.view = view;
+      }
       if (info.url || info.page != null) out.push(info);
     }
   } finally {

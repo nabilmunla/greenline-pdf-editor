@@ -307,7 +307,8 @@ one is refused. The signing key stays with the developer copy, never on the shar
 # for people outside the company (testers): one zip with the setup, the guides and the source
 import zipfile
 tester = os.path.join(out_root, f'{NAME} {ver} (test copy).zip')
-note = open(os.path.join(ROOT, 'installer', 'ALPHA-TEST.txt'), encoding='utf-8').read().replace('{{VERSION}}', ver)
+from start_here import start_here
+note = start_here(open(os.path.join(ROOT, 'installer', 'ALPHA-TEST.txt'), encoding='utf-8').read(), pkg.get('brand') or '', ver)
 with zipfile.ZipFile(tester, 'w') as z:
     folder = f'{NAME} {ver}/'
     z.write(setup, folder + os.path.basename(setup), compress_type=zipfile.ZIP_STORED)

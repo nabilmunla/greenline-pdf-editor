@@ -57,7 +57,17 @@ const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
 const dirName = (p: string) => p.replace(/[\\/][^\\/]*$/, '');
 const joinPath = (d: string, f: string) => d.replace(/[\\/]+$/, '') + (d.includes('\\') ? '\\' : '/') + f;
 /** the same file? (Windows: case and / or \ don't matter) */
-export const samePath = (a: string, b: string) => { const n = (p: string) => p.replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase(); return n(a) === n(b); };
+/** the same file however it is written: case, \ or /, and "." / ".." steps (F16: "C:\\a\\..\\a\\x.pdf" is
+ *  "c:/a/x.pdf"). The share's two leading slashes are kept */
+export const samePath = (a: string, b: string) => {
+  const n = (p: string) => {
+    const unc = /^[\\/]{2}/.test(p);
+    const out: string[] = [];
+    for (const s of p.replace(/[\\/]+/g, '/').replace(/\/$/, '').split('/')) { if (s === '.') continue; if (s === '..' && out.length > 1) out.pop(); else out.push(s); }
+    return (unc ? '//' : '') + out.join('/').replace(/^\/+/, '').toLowerCase();
+  };
+  return n(a) === n(b);
+};
 
 export interface OutPlan {
   /** nothing can start: what to change first */

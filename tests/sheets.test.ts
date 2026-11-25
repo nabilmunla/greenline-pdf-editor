@@ -1,7 +1,7 @@
 // Sheet numbers, titles and references in drawing sets (PLAN 7.4) - invented numbers only
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tokensOf, sheetIndex, findRefs, plainNumbersOk, repeatedNos, type PageToks } from '../src/ui/sheets.ts';
+import { tokensOf, sheetIndex, findRefs, plainNumbersOk, repeatedNos, dupLine, type PageToks } from '../src/ui/sheets.ts';
 
 type W = { s: string; x: number; y: number; h?: number };
 /** a page's text the way the drawing engine gives it: one box per character, lines by '\n' */
@@ -338,4 +338,39 @@ test('repeating numbers are not taken on A4 paper, nor codes that repeat more', 
   const ten = Array.from({ length: 20 }, (_, i) => `A-${i % 10}`);
   assert.equal(repeatedNos(ten.map((x) => x.replace('A-', 'A')), ten), true);
   assert.equal(repeatedNos(ten, ten.map((x) => x.replace('A-', ''))), false);
+});
+
+// 13.2.9: a key plan keeps its callouts in the right fifth and the bottom 15 %, beside a title block
+// that is far smaller than those strips. Only the title block is off limits.
+test('callouts in the right and bottom strips outside the title block are linked; title block text is not', () => {
+  const { w, h } = A1;
+  const pages: PageToks[] = [];
+  for (let i = 0; i < 12; i++) {
+    const body: W[][] = i !== 3 ? [] : [
+      [{ s: 'SEE', x: w - 110 * MM, y: h - 300 * MM }, { s: 'A-105', x: w - 90 * MM, y: h - 300 * MM }], // right strip, above the block
+      [{ s: 'DETAIL', x: 200 * MM, y: h - 30 * MM }, { s: 'A-106', x: 230 * MM, y: h - 30 * MM }], // bottom strip, left of the block
+      [{ s: 'RELATED', x: w - 150 * MM, y: h - 85 * MM }, { s: 'DWG', x: w - 125 * MM, y: h - 85 * MM }, { s: 'A-107', x: w - 110 * MM, y: h - 85 * MM }], // inside the block
+    ];
+    pages.push(sheet(i, `A-${101 + i}`, `PLAN ${i}`, body));
+  }
+  const idx = sheetIndex(pages);
+  assert.equal(idx.sheets.length, 12);
+  assert.deepEqual(findRefs(pages, idx).map((r) => `${r.page}->${r.target}:${r.text}`).sort(), ['3->4:A-105', '3->5:A-106']);
+});
+
+// 13.2.10: five pages, two with one number: 4 distinct numbers of 5 fell under the 90 % rule and no
+// sheet was found, so no link either.
+test('a small set with one number twice: every number is linked, the duplicate to its first copy, one notice', () => {
+  const nos = ['A-101', 'A-102', 'A-103', 'A-104', 'A-102'];
+  const refs: Record<number, [string, string]> = { 0: ['A-102', 'A-103'], 2: ['A-104', 'A-101'] };
+  const pages = nos.map((no, i) => sheet(i, no, `PLAN ${i}`, (refs[i] || []).map((r, k) => [{ s: 'SEE', x: 300, y: 300 + k * 40 }, { s: r, x: 330, y: 300 + k * 40 }])));
+  const idx = sheetIndex(pages);
+  assert.deepEqual(idx.sheets.map((s) => s.no), nos);
+  assert.deepEqual(idx.dups, ['A-102']);
+  assert.deepEqual(findRefs(pages, idx).map((r) => `${r.page}->${r.target}:${r.text}`).sort(), ['0->1:A-102', '0->2:A-103', '2->0:A-101', '2->3:A-104']);
+  assert.equal(dupLine(idx.dups), 'Sheet number A-102 is on more than one page: links to it go to the first.');
+  assert.equal(dupLine(['A-102', 'B-7']), 'Sheet numbers A-102, B-7 are on more than one page: links to them go to the first.');
+  assert.equal(dupLine([]), '');
+  // a set with no duplicate has none to report
+  assert.deepEqual(sheetIndex(pages.map((_, i) => sheet(i, `A-${101 + i}`, `PLAN ${i}`))).dups, []);
 });

@@ -94,6 +94,11 @@ export const sheetName = (s: string) => s.replace(/[\u200e\u200f\u202a-\u202e\u2
 /** the same bill on the next page? On a scan the bill's number is where OCR slips ("NO.09" read as
  *  "NO.0S", "10.09"): there the title after it decides */
 function sameBill(a: string, b: string, ocr: boolean): boolean {
+  // (normKey blanks every number, so "BILL No. 4 - FINISHES" and "No. 5 - FINISHES" looked alike: bills
+  //  with two different numbers are two bills - on a scan the number is what OCR slips on, left to the title)
+  const no = (s: string) => /\bbill\s*(?:no\.?|number|nr\.?)?\s*(\d+[a-z]?)\b/i.exec(s)?.[1]?.toLowerCase();
+  const na = no(a), nb = no(b);
+  if (!ocr && na && nb && na !== nb) return false;
   if (similar(normKey(a), normKey(b)) >= 0.8) return true;
   if (!ocr) return false;
   const title = (s: string) => normKey(s.replace(/^\s*bill\s*(?:no\.?|number|nr\.?)?\s*[\w.¢$§%]{1,6}\s*[-–:]?\s*/i, ''));

@@ -90,12 +90,29 @@ WHAT TO TRY (whatever you normally do with PDFs)
 REPORTING PROBLEMS
   File > Report a problem: say what you did and what went wrong (a picture of the
   window can go with it). Crashes are noted by themselves.
+<<company>>
   Your copy has no shared reports folder, so reports stay on your PC:
   Settings > Help > "Show them" opens the folder - send me those files.
+<</company>>
+<<greenline>>
+  Press Send and it goes to the developer, with the app's recent log. Your user name
+  and PC name, and the file names, folders and paths the app can recognise, are taken
+  out first, and so are web links in what you type; the rest is sent as typed. Crash
+  reports are sent only if you turn them on (Settings > Help).
+<</greenline>>
 
 GOOD TO KNOW
+<<company>>
   - Everything stays on your PC. Only the AI assistant (AI tab) uses the internet,
     and only with your own key.
+<</company>>
+<<greenline>>
+  - Your PDF files are not sent anywhere, except the pages you ask the AI assistant
+    about (AI tab, only with your own key). What else goes online: the check for
+    updates (on GitHub), a once-a-day anonymous count of installs (turn it off in
+    Settings > Privacy), problem reports when you send them, and crash reports only
+    if you turn them on (Settings > Help).
+<</greenline>>
   - Saving keeps the previous version in a backups folder (Settings > Open backups folder).
   - The full user guide is README.txt.
 

@@ -14,6 +14,7 @@ import { eachPage } from './eachpage';
 import { renderers, rendererFor } from './engines';
 import { TOOLS, css, type ToolId, type Style, type Gesture, type MeasureHow } from './tools';
 import { wrapText, TEXT_PAD, TYPE_PAD, AUTO_MIN } from '../engine/textwrap';
+import { jumpOf, type LinkView } from './linkview';
 import { hitList, geomBox, rectOf, dist, inRect, inPoly, overlaps, ortho, perpFootOn, fmtLen, segDist, calloutPath, measureValue, yRatio, realDist, LEGACY_FMT, circlePts, circleOf, CIRCLE_N, isAxisRect, rectKeep, parseTypedLength, zoomToShow, placeOnPage, shiftOnPages, type MeasureFmt, selfCrosses } from './geom';
 import { gcc } from './api';
 
@@ -53,7 +54,8 @@ export interface ViewerApi {
   goTo(page: number, rect?: number[], keepZoom?: boolean): void;
   zoomBy(f: number): void;
   setZoom(z: number): void;
-  fit(mode: 'width' | 'page'): void;
+  /** fit the zoom to the page in view, or to `page` (a link's target) */
+  fit(mode: 'width' | 'page', page?: number): void;
   zoom(): number;
   page(): number;
   copySelection(): boolean;
@@ -187,7 +189,7 @@ export function Viewer(props: Props) {
   /** the latest markups (for handlers that continue after an await) */
   const annotsNow = useRef(annots);
   annotsNow.current = annots;
-  const [links, setLinks] = useState<Record<number, { rect: number[]; url?: string; page?: number }[]>>({});
+  const [links, setLinks] = useState<Record<number, { rect: number[]; url?: string; page?: number; view?: LinkView }[]>>({});
   const [draft, setDraft] = useState<Draft | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [textSel, setTextSel] = useState<{ page: number; a: number; b: number } | null>(null);
@@ -620,11 +622,11 @@ export function Viewer(props: Props) {
       },
       zoomBy(f) { zoomAt(zRef.current * f); },
       setZoom(nz) { zoomAt(nz); },
-      fit(mode) {
+      fit(mode, page) {
         restoreTo.current = null;
         doc.view.fit = mode;
-        const pg = curPage();
-        const nz = fitZoom(mode);
+        const pg = page != null && page >= 0 && page < pages.length ? page : curPage();
+        const nz = fitZoom(mode, pg);
         if (Math.abs(nz - zRef.current) < 1e-6) { const el = scroller.current; if (el) { el.scrollTop = tops[pg] - GAP / 2; centreX(pg); readVp(); } return; }
         fitPage.current = pg;
         setZ(nz);
@@ -1729,7 +1731,12 @@ export function Viewer(props: Props) {
   function followLink(page: number, p: Pt, e: { ctrlKey: boolean }) {
     const l = linkAt(page, p);
     if (!l) return false;
-    if (l.page != null && l.page >= 0) { props.apiRef.current?.goTo(l.page); return true; }
+    const jump = jumpOf(l);
+    if (jump) {
+      // (the destination's view: /Fit shows the whole sheet; a detail zoom, 13.2.12, goes here too)
+      if (jump.fit) props.apiRef.current?.fit('page', jump.page); else props.apiRef.current?.goTo(jump.page);
+      return true;
+    }
     if (l.url) {
       // only web and e-mail links: a link in someone else's PDF must not start a program, open a
       // network share or a Windows handler (file:, \\server\..., ms-..., search-ms:...)

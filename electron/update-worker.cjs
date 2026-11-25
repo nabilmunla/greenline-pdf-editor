@@ -160,6 +160,7 @@ async function copyWeb(url, dst, size) {
 
 // ---------------------------------------------------------------- anonymous reports (public build)
 async function post(url, queue, since, wordsFile) {
+  url = require('./count.cjs').reportUrl(url);
   const anon = require('./anon.cjs');
   const os = require('os');
   let who = { user: '', pc: '' };
@@ -173,6 +174,8 @@ async function post(url, queue, since, wordsFile) {
   for (const n of names) {
     let rep;
     try { rep = JSON.parse(fs.readFileSync(path.join(queue, n), 'utf8')); } catch (_) { continue; }
+    // (a file that reads as JSON but is no report - null, a number: skipped; it stopped the whole queue - sweep S1)
+    if (!rep || typeof rep !== 'object') continue;
     // crash reports only with the person's say-so, and only those made since they said so
     if (rep.kind !== 'problem' && !(from && Date.parse(rep.time) >= from)) continue;
     const body = anon.anonymize(rep, who);

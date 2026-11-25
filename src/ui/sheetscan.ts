@@ -7,7 +7,7 @@
 import type { PdfDoc } from './doc';
 import { renderers } from './engines';
 import { isEngineDown } from '../engine/rpc';
-import { tokensOf, sheetIndex, findRefs, unlessStopped, type PageToks } from './sheets';
+import { tokensOf, sheetIndex, findRefs, unlessStopped, dupLine, type PageToks } from './sheets';
 
 export interface SheetScan {
   /** the file's pages, for the sheet index */
@@ -77,6 +77,8 @@ export interface SheetPlan {
   marks: { page: number; title: string }[];
   sheets: number;
   noText: number;
+  /** numbers on more than one page, linked to the first copy */
+  dups: string[];
 }
 
 /** what the scan found: the links and the bookmark titles ("<number> <title>", or the number alone) */
@@ -85,7 +87,7 @@ export function planSheets(pages: PageToks[]): SheetPlan {
   const idx = sheetIndex(have);
   const links = findRefs(have, idx).map((r) => ({ page: r.page, box: r.box, target: r.target }));
   const marks = idx.sheets.map((s) => ({ page: s.page, title: s.title ? s.no + ' ' + s.title : s.no }));
-  return { links, marks, sheets: idx.sheets.length, noText: idx.noText };
+  return { links, marks, sheets: idx.sheets.length, noText: idx.noText, dups: idx.dups };
 }
 
 const plural = (n: number, one: string, many = one + 's') => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`;
@@ -94,10 +96,10 @@ export const noTextLine = (n: number) => (n > 0 ? (n === 1 ? '1 page has no text
 export const NOTHING_FOUND = 'No sheet numbers found. Nothing was changed.';
 
 /** the closing message; the first line says what was written */
-export function doneText(r: { links: number; sheetsWithLinks: number; bookmarks: number; wantLinks: boolean; wantMarks: boolean }, noText: number): string {
+export function doneText(r: { links: number; sheetsWithLinks: number; bookmarks: number; wantLinks: boolean; wantMarks: boolean }, noText: number, dups: string[] = []): string {
   const parts: string[] = [];
   if (r.wantLinks) parts.push(r.links ? `${plural(r.links, 'link')} on ${plural(r.sheetsWithLinks, 'sheet')}` : 'No links');
   if (r.wantMarks) parts.push(plural(r.bookmarks, 'bookmark'));
   const t = parts.join(', ') + '. Undo removes them.';
-  return [t, noTextLine(noText)].filter(Boolean).join(' ');
+  return [t, dupLine(dups), noTextLine(noText)].filter(Boolean).join(' ');
 }

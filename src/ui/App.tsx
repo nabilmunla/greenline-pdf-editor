@@ -6,7 +6,7 @@ import { UpdateCard, useUpdates } from './Updates';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { gcc, baseName, dirName, joinPath, type AppInfo, type Recovery, type TabMove, type UpdatedInfo } from './api';
 import { startEngines, rendererFor, renderers, mu, editor as editWorker, batcher, muBatch, pinCount, pinLog, type StuckNotice, type MemoryAsk } from './engines';
-import { PdfDoc, onCrash, wasPlannedRestart, wasStuckRestart, plannedRestartLostWork, restartEditingEngine, type Scale } from './doc';
+import { PdfDoc, replaceRecovery, onCrash, wasPlannedRestart, wasStuckRestart, plannedRestartLostWork, restartEditingEngine, type Scale } from './doc';
 import { previewCache, tiles } from './tiles';
 import type { PrintSettings } from './PrintDlg';
 import { Viewer, markClip, type ViewerApi, type ViewerEvent, type SelItem, type Hit, type PlaceItem } from './Viewer';
@@ -660,8 +660,7 @@ export function App() {
     d.path = path; d.name = r.name; d.dirty = true;
     // a recovery copy of its own first: if the app stops again before the next change,
     // the work is still there (the old one goes only once the new one is written)
-    await d.writeRecoveryNow().catch((e) => gcc.log('recovery after restore: ' + e));
-    await gcc.recoveryClear(r.key);
+    await replaceRecovery(d, r.key);
     setRecovery((x) => x.filter((y) => y.key !== r.key));
     return d;
   }
@@ -741,6 +740,15 @@ export function App() {
 
   async function saveDoc(d: PdfDoc, as = false): Promise<boolean> {
     try {
+      // a save of this tab still running (Ctrl+S on a big file, then closing it): waited for, then
+      // saved again only if something is still unsaved - it was skipped with no word, and "Save"
+      // in the close question closed nothing (F26)
+      const inFlight = d.saveRunning;
+      if (inFlight) {
+        await inFlight.catch(() => false);
+        await new Promise((r) => setTimeout(r, 0));   // (its busy mark is let go of first)
+        if (!d.dirty && !as) return true;
+      }
       // (a comment just typed is in the file, and the file is "saved" afterwards, not still changed)
       await settle(d);
       if (!as && d.path && !d.readOnly) {

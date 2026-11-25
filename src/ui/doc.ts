@@ -7,6 +7,7 @@ import { tiles } from './tiles';
 import { offOf } from '../engine/off';
 import { forgetDragged } from './pagedrag';
 import { fileArg, isEngineDown, engineDown, type FileRef } from '../engine/rpc';
+import type { LinkView } from './linkview';
 import type { LockedBig } from '../engine/mu';
 import type { AnnotData, PageInfo, AnnotSpec, Rect, Pt, TBlock, TextStyle, PageMark, MarkContext, SaveOpts, OutNode, LayerInfo } from '../engine/mu';
 
@@ -468,6 +469,7 @@ export class PdfDoc {
     // (nobody waits for a page of a closed file)
     this.releaseLookWaiters();
     await gcc.recoveryClear(this.id).catch(() => {});
+    await this.dropKept();
     await Promise.all([...renderers.map((w) => w.call('close', [this.id]).catch(() => {})), mu('close', this.id).catch(() => {})]);
     if (this.temps.size || this.engineReads.size) await gcc.dropTemp([...this.temps, ...this.engineReads]).catch(() => {});
     gcc.docsClosed();
@@ -1075,7 +1077,7 @@ export class PdfDoc {
     await this.drawReady();
     return renderers[0].call<number[][]>('rangeRects', [this.id, page, start, count]);
   }
-  private linkCache = new Map<string, { rect: number[]; url?: string; page?: number }[]>();
+  private linkCache = new Map<string, { rect: number[]; url?: string; page?: number; view?: LinkView }[]>();
   /** links on a page (asked once per page and content version, not on every scroll) */
   async links(page: number) {
     if (this.gonePage(page)) return [];
@@ -1086,7 +1088,7 @@ export class PdfDoc {
       // (a read that failed - an engine starting afresh - is not kept as "no links": asked again
       // next time the page is shown, sweep S9)
       let ok = true;
-      l = await renderers[0].call<{ rect: number[]; url?: string; page?: number }[]>('links', [this.id, page]).catch(() => { ok = false; return []; });
+      l = await renderers[0].call<{ rect: number[]; url?: string; page?: number; view?: LinkView }[]>('links', [this.id, page]).catch(() => { ok = false; return []; });
       if (ok) this.linkCache.set(k, l);
       if (this.linkCache.size > 200) this.linkCache.delete(this.linkCache.keys().next().value as string);
     }
@@ -1144,7 +1146,25 @@ export class PdfDoc {
   }
 
   /** save to its own file (or `to`); returns false if the user has to pick a place */
-  async save(to?: string, o: SaveOpts = {}): Promise<boolean> {
+  /** the copy a restored tab came from, kept because its own first copy failed (F12): dropped with
+   *  its first good copy, a save or closing - or it was offered once more at the next start */
+  keptRecovery: string | null = null;
+  private async dropKept() {
+    const k = this.keptRecovery;
+    if (!k) return;
+    this.keptRecovery = null;
+    await gcc.recoveryClear(k).catch(() => { this.keptRecovery = k; });
+  }
+  /** the save of this tab that is running: a second save (Ctrl+S on a big file, then "Save" in the
+   *  close question) waits for it instead of being skipped with no word (F26) */
+  private saving: Promise<boolean> | null = null;
+  get saveRunning() { return this.saving; }
+  save(to?: string, o: SaveOpts = {}): Promise<boolean> {
+    const p: Promise<boolean> = this.saveNow(to, o).finally(() => { if (this.saving === p) this.saving = null; });
+    this.saving = p;
+    return p;
+  }
+  private async saveNow(to?: string, o: SaveOpts = {}): Promise<boolean> {
     await this.finishEditing?.().catch(() => {});
     const target = to || this.path;
     if (!target) return false;
@@ -1191,6 +1211,7 @@ export class PdfDoc {
       this.changedSinceRecovery = false;
       this.lastRecovery = null;
       await gcc.recoveryClear(this.id);
+      await this.dropKept();
     }
     if (o.decrypt) {
       // the password is off the saved file, but the open document is still the protected one:
@@ -1199,7 +1220,7 @@ export class PdfDoc {
       this.password = undefined;
       await this.reopenFrom({ path: target });
       const lost = this.changes !== gen;
-      if (this.dirty) { this.dirty = false; this.changedSinceRecovery = false; this.lastRecovery = null; await gcc.recoveryClear(this.id); }
+      if (this.dirty) { this.dirty = false; this.changedSinceRecovery = false; this.lastRecovery = null; await gcc.recoveryClear(this.id); await this.dropKept(); }
       // (as below: a change made while it was saving is not in the file, and what is open now is
       // the file - it went without a word, the file marked saved)
       if (lost) { this.emit(); throw new Error(`The password was removed from ${this.name}, but the changes made while it was saving were not kept (it was opened again from the saved file). Please make them again.`); }
@@ -1209,7 +1230,7 @@ export class PdfDoc {
       // is then exactly the file)
       await this.reopenFrom({ path: target });
       const lost = this.changes !== gen;
-      if (this.dirty) { this.dirty = false; this.changedSinceRecovery = false; this.lastRecovery = null; await gcc.recoveryClear(this.id); }
+      if (this.dirty) { this.dirty = false; this.changedSinceRecovery = false; this.lastRecovery = null; await gcc.recoveryClear(this.id); await this.dropKept(); }
       // a change made while it was saving is not in the file, and what is open now is the file:
       // that change is gone - said so (it vanished without a word, the file marked saved)
       if (lost) { this.emit(); throw new Error(`${this.name} was saved, but another program is holding it, so it was opened again from the saved file - the changes made while it was saving were not kept. Please make them again.`); }
@@ -1261,6 +1282,7 @@ export class PdfDoc {
       await gcc.recoveryMeta(this.id, { path: this.path, name: this.name, base: r.base, fileMtime: this.mtime || undefined });
       this.lastRecovery = { file, base: r.base };
     } catch (e) { this.changedSinceRecovery = true; throw e; }
+    await this.dropKept();
   }
 
   private scheduleRecovery() {
@@ -1268,15 +1290,25 @@ export class PdfDoc {
     this.recTimer = window.setTimeout(async () => {
       this.recTimer = null;
       if (this.closed || !this.dirty || !this.changedSinceRecovery) return;
-      this.changedSinceRecovery = false;
       try {
         // written by the engine straight to disk; for a huge file only the changes
-        const file = await gcc.recoveryPath(this.id);
-        const r = await mu<{ base: { path: string; size: number; mtime: number } | null }>('writeRecovery', this.id, file, 64e6);
-        if (this.closed || !this.dirty) { await gcc.recoveryClear(this.id); return; }
-        await gcc.recoveryMeta(this.id, { path: this.path, name: this.name, base: r.base, fileMtime: this.mtime || undefined });
-        this.lastRecovery = { file, base: r.base };
-      } catch (e) { gcc.log('recovery: ' + e); }
+        await this.writeRecoveryNow();
+        if (this.closed || !this.dirty) await gcc.recoveryClear(this.id);
+      } catch (e) {
+        // (not written - disk full, the folder held, the engine restarting: tried again later, not
+        // only after the next change; the work was otherwise only in memory - F47)
+        gcc.log('recovery: ' + e);
+        if (!this.closed && this.dirty) this.scheduleRecovery();
+      }
     }, this.size > 150e6 ? 120_000 : 45_000);
   }
+}
+
+/** a tab restored from the Start screen: a recovery copy of its own first, and the old copy (key
+ *  `oldKey`) deleted only once the new one is written - it was deleted even when the new one
+ *  failed, and the work then lived only in memory (F12). Says whether the old copy was dropped. */
+export async function replaceRecovery(d: PdfDoc, oldKey: string): Promise<boolean> {
+  try { await d.writeRecoveryNow(); } catch (e) { gcc.log('recovery after restore (the old copy is kept): ' + e); d.keptRecovery = oldKey; return false; }
+  await gcc.recoveryClear(oldKey);
+  return true;
 }

@@ -1,4 +1,17 @@
 {
+  "0.13.2": {
+    "Fixes": [
+      "Saving a very large file (350 MB or more) whose inside is laid out in an unusual way could give a file that would not open again. Files saved from now on open normally.",
+      "When the automatic recovery copy could not be written (disk full, or its folder busy), it is now tried again a little later, not only after your next change. And a tab brought back from the Start screen no longer deletes its earlier recovery copy before the new one is safely written.",
+      "Choosing Save in the \"Save changes?\" question while that file was still being saved did nothing, and the tab stayed open. It now waits for that save, then finishes.",
+      "Print › Save as PDF could replace the open PDF itself with its print version. It now asks for another name.",
+      "Export to Excel: bills of quantities whose headings differ only in their number (BILL No. 4 and BILL No. 5) were put on one sheet. Each now gets its own. Scanned pages are not changed by this fix.",
+      "Link the sheets: callouts near the right or bottom edge of a sheet are now linked (only the title block itself is skipped), and a small set (up to 9 sheets) where two sheets carry the same number is linked again, to the first of the two, with a note naming the number. Clicking a sheet link now shows the whole sheet, not its top-left corner.",
+      "Problem reports never reached the developer: the app sent them to the wrong address, and they were refused. They now arrive.",
+      "What you type in Report a problem now has paths, file names and web links taken out before it is sent, where the app can recognise them; the rest is sent as typed. Before, only your user name and PC name were taken out. (Earlier reports were refused by the server, so the developer never received them.)",
+      "The START HERE file in the test copy now says what the app sends over the internet."
+    ]
+  },
   "0.13.1": {
     "New features": [
       "AI assistant: DeepSeek is a third choice next to Claude and ChatGPT, for questions about a file and for translation. Add your own DeepSeek key under AI keys; DeepSeek bills your own account.",

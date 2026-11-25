@@ -28,6 +28,7 @@ import { AiKeysDialog } from './AiPanel';
 import type { PageMark, StampDesign, RGB, Rect } from '../engine/mu';
 import { APP_NAME } from './brand';
 import { scanPages, planSheets, doneText, noTextLine, NOTHING_FOUND } from './sheetscan';
+import { dupLine } from './sheets';
 
 interface Props {
   dialog: Dialog;
@@ -76,7 +77,7 @@ export function Dialogs(p: Props) {
     case 'redact-search': return <RedactSearchDlg {...p} />;
     case 'props': return <PropsDlg {...p} />;
     case 'counttag': return p.doc ? <CountTagDlg doc={p.doc} page={d.page} style={p.settings.styles?.['m-count']} close={close} toast={p.toast} fail={p.fail} setCountGroup={(g) => p.A.setCounting(g)} showTotals={() => p.A.totals()} /> : null;
-    case 'print': return p.doc ? <PrintDlg doc={p.doc} page={d.page} area={d.area} pageSel={p.pageSel} settings={p.settings.print || {}} save={(s) => p.saveSettings({ print: s })} close={close} toast={p.toast} fail={p.fail} /> : null;
+    case 'print': return p.doc ? <PrintDlg doc={p.doc} openPaths={p.docs.map((x) => x.path).filter((x): x is string => !!x)} page={d.page} area={d.area} pageSel={p.pageSel} settings={p.settings.print || {}} save={(s) => p.saveSettings({ print: s })} close={close} toast={p.toast} fail={p.fail} /> : null;
     case 'settings': return <SettingsDlg {...p} />;
     case 'count': return <CountDlg close={close} fail={p.fail} />;
     case 'moved': return <MovedDlg close={close} />;
@@ -2070,14 +2071,14 @@ function SheetsDlg(p: Props) {
       const nt = noTextLine(plan.noText);
       if (!plan.sheets) { p.setDialog(null); p.toast([NOTHING_FOUND, nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
       const want = links ? plan.links : [];
-      if (!want.length && !marks) { p.setDialog(null); p.toast(['No references between sheets found. Nothing was changed.', nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
+      if (!want.length && !marks) { p.setDialog(null); p.toast(['No references between sheets found. Nothing was changed.', dupLine(plan.dups), nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
       setRun({ done: total, total, writing: true });
       const r = await doc.linkSheets(links ? want : null, marks ? plan.marks : null);
       p.setDialog(null);
       if (!r.pages) { p.toast(['Nothing to link.', nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
       const onPages = new Set(want.map((l) => l.page));
       const sheetsWithLinks = r.touched.filter((x) => onPages.has(x)).length;
-      p.toast(doneText({ links: r.links, sheetsWithLinks, bookmarks: r.bookmarks, wantLinks: links, wantMarks: marks }, plan.noText), 'ok', {
+      p.toast(doneText({ links: r.links, sheetsWithLinks, bookmarks: r.bookmarks, wantLinks: links, wantMarks: marks }, plan.noText, plan.dups), 'ok', {
         label: 'Undo',
         run: () => { if (doc.canUndo && doc.undoName === 'Link the sheets') void doc.undo().catch(p.fail); else p.toast('Other changes were made since. Ctrl+Z steps back through them.', 'info'); },
       }, 15000);

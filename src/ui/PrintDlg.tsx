@@ -14,7 +14,7 @@ import type { FileSpec, PdfDoc } from './doc';
 /** the printer driver's own preferences window exists only on Windows */
 const WINDOWS = /Windows/i.test(navigator.userAgent);
 import { PAPERS, paperName, sheetLayout, PRINT_BIG, printShare, type PrintOpts } from '../engine/printlayout';
-import { parseRanges, toRanges, paperSheets } from './dlgutil';
+import { parseRanges, toRanges, paperSheets, samePath } from './dlgutil';
 
 export interface PrintSettings {
   /** (up to 0.8.5: the printer used last, offered at every start - now only for the run it was
@@ -34,6 +34,8 @@ export interface PrintSettings {
 
 interface Props {
   doc: PdfDoc;
+  /** the files open in this window's tabs: never written over by Save as PDF */
+  openPaths: string[];
   page: number;
   /** an area marked with the Snapshot tool on that page: offered first ("The marked area") */
   area?: Rect | null;
@@ -307,6 +309,9 @@ export function PrintDlg(p: Props) {
     p.save(keep());
     const to = await gcc.saveDialog({ title: 'Save as PDF (as it would print)', name: doc.name.replace(/\.pdf$/i, '') + ' (print).pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] });
     if (!to) return;
+    // (the open PDF itself: replaced by its print version while its tab still held the old one - F16)
+    if (doc.path && samePath(to, doc.path)) { p.toast('That is the PDF itself – choose another name.', 'err'); return; }
+    if (p.openPaths.some((x) => samePath(to, x))) { p.toast('That file is open in another tab – choose another name.', 'err'); return; }
     stop.current = false;
     try {
       step('Making the PDF…');

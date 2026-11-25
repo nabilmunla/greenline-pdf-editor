@@ -62,3 +62,15 @@ test('not a report, too big, too many, a picture that is not a PNG: refused', as
   for (let i = 0; i < 25; i++) last = (await call('/report', { method: 'POST', body: JSON.stringify({ kind: 'crash', version: '1.0.0' }) }, '7.7.7.7')).status;
   assert.equal(last, 429, 'more than 20 an hour from one address: refused');
 });
+
+test('0.12.1 to 0.13.1 post reports to the bare address: still stored; the list still needs the password', async () => {
+  store.clear();   // (the flood test above used up the day's allowance for all addresses)
+  const before = env.REPORTS.m.size;
+  const r = await call('/', { method: 'POST', body: JSON.stringify({ kind: 'problem', version: '0.13.1', text: 'sent to the bare address' }) }, '7.7.7.7');
+  assert.equal(r.status, 200);
+  assert.ok(env.REPORTS.m.size > before, 'stored');
+  assert.equal((await call('/', { method: 'POST', body: JSON.stringify({ kind: 'problem', version: '0.13.1', text: 'no header' }) }, '7.7.7.8', '')).status, 400, 'without the app\'s header: refused, not listed');
+  assert.equal((await call('/')).status, 401, 'GET / still needs the password');
+  const list = await (await call('/', { headers: auth })).text();
+  assert.ok(list.includes('sent to the bare address') && !list.includes('no header'));
+});

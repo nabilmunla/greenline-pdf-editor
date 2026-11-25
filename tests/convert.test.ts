@@ -292,3 +292,26 @@ test('reading pages leaves MuPDF\'s memory intact after garbage collection (line
   const p = doc.loadPage(0);
   assert.ok(p.toPixmap(mupdf.Matrix.identity, mupdf.ColorSpace.DeviceRGB, false, true).getWidth() > 500);
 });
+
+// 13.2.8 (F41): "BILL No. 4 - FINISHES" and "BILL No. 5 - FINISHES" differ only in a digit run, which the
+// bill comparison blanked out, so the two bills went onto one sheet.
+test('two bills whose titles differ only in the bill number -> two sheets, each with its own items', () => {
+  const doc = pdf([bill(ITEMS.slice(0, 2), 'BILL No. 4 - FINISHES', 1), bill(ITEMS.slice(2), 'BILL No. 5 - FINISHES', 2)]);
+  const j = new ExportJob(doc, { format: 'xlsx' });
+  for (let i = 0; i < j.count(); i++) j.read(i);
+  const xlsx = j.finish();
+  const wb = strFromU8(unzipSync(xlsx)['xl/workbook.xml']);
+  assert.equal((wb.match(/<sheet /g) || []).length, 2, wb);
+  assert.ok(wb.includes('BILL No. 4') && wb.includes('BILL No. 5'), 'a sheet named after each bill');
+  const items = (n: number) => sheetValues(xlsx, n).filter(Boolean).filter((r) => /^[A-D]$/.test(String(r[0]))).map((r) => r[0]);
+  assert.deepEqual(items(1), ['A', 'B']);
+  assert.deepEqual(items(2), ['C', 'D']);
+});
+
+test('one bill with its page number in the running header stays one sheet', () => {
+  const doc = pdf([bill(ITEMS.slice(0, 2), 'BILL No. 4 - Page 3', 1), bill(ITEMS.slice(2), 'BILL No. 4 - Page 4', 2)]);
+  const j = new ExportJob(doc, { format: 'xlsx' });
+  for (let i = 0; i < j.count(); i++) j.read(i);
+  const wb = strFromU8(unzipSync(j.finish())['xl/workbook.xml']);
+  assert.equal((wb.match(/<sheet /g) || []).length, 1, wb);
+});
