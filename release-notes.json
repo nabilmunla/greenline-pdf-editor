@@ -1,4 +1,9 @@
 {
+  "0.13.3": {
+    "Fixes": [
+      "Picking one highlight or other text markup after another in the Comments list could freeze the window, so that it had to be closed. The window now keeps working as you pick each one."
+    ]
+  },
   "0.13.2": {
     "Fixes": [
       "Saving a very large file (350 MB or more) whose inside is laid out in an unusual way could give a file that would not open again. Files saved from now on open normally.",

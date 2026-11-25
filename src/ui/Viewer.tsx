@@ -742,15 +742,25 @@ export function Viewer(props: Props) {
   const [edge, setEdge] = useState<{ page: number; id: number; a: number; b: number } | null>(null);
   /** pointer moves while dragging over text: only the newest one's answer counts */
   const moveSeq = useRef(0);
+  // Keyed on what the handles depend on (the one selected text markup's page, id, quads and lock),
+  // not on the identity of the selection or of the markup lists: those get new copies on every
+  // render (a list update React applies again is a new object each time), and a new edge on each
+  // run redrew the view, which ran this again - an endless loop that froze the window (a second
+  // highlight picked from the Comments list, 25 Nov 2026). The same edge is also not set twice.
+  const edgeSel = props.sel.length === 1 ? props.sel[0] : null;
+  const edgeA = edgeSel ? (annots[edgeSel.page] || []).find((x) => x.id === edgeSel.id) : undefined;
+  const edgeKey = edgeSel && edgeA && isTextMarkup(edgeA) && !edgeA.locked ? edgeSel.page + ':' + edgeA.id + ':' + doc.baseRev + ':' + JSON.stringify(edgeA.quads) : '';
+  const edgeARef = useRef(edgeA);
+  edgeARef.current = edgeA;
   useEffect(() => {
-    const s = props.sel;
-    const a = s.length === 1 ? (annots[s[0].page] || []).find((x) => x.id === s[0].id) : undefined;
-    if (!a || !isTextMarkup(a) || a.locked) { setEdge(null); return; }
+    const a = edgeARef.current;
+    const sameEdge = (n: { page: number; id: number; a: number; b: number } | null) => setEdge((cur) => (cur === n || (cur && n && cur.page === n.page && cur.id === n.id && cur.a === n.a && cur.b === n.b) ? cur : n));
+    if (!edgeKey || !a || !edgeSel) { sameEdge(null); return; }
     let gone = false;
-    const page = s[0].page;
-    void charsOf(page).then((c) => { if (gone) return; const r = rangeOfMarkup(c, a); setEdge(r ? { page, id: a.id, a: r[0], b: r[1] } : null); }).catch(() => {});
+    const page = edgeSel.page;
+    void charsOf(page).then((c) => { if (gone) return; const r = rangeOfMarkup(c, a); sameEdge(r ? { page, id: a.id, a: r[0], b: r[1] } : null); }).catch(() => {});
     return () => { gone = true; };
-  }, [props.sel, annots]);
+  }, [edgeKey]);
   /** the ends of chars [lo, hi]: start = left edge of the first char, end = right edge of the last */
   const edgeBars = (page: number, lo: number, hi: number) => {
     const c = charsCache.current[doc.baseRev + ':' + page];
