@@ -1206,13 +1206,7 @@ export class PdfDoc {
     this.mtime = r.mtime;
     this.readOnly = false;
     // a change made while saving is not in the file: it stays unsaved (and in the recovery copy)
-    if (this.changes === gen) {
-      this.dirty = false;
-      this.changedSinceRecovery = false;
-      this.lastRecovery = null;
-      await gcc.recoveryClear(this.id);
-      await this.dropKept();
-    }
+    if (this.changes === gen) await this.savedClean();
     if (o.decrypt) {
       // the password is off the saved file, but the open document is still the protected one:
       // the next save (changes appended to it) put the password back. What is open becomes the
@@ -1220,7 +1214,7 @@ export class PdfDoc {
       this.password = undefined;
       await this.reopenFrom({ path: target });
       const lost = this.changes !== gen;
-      if (this.dirty) { this.dirty = false; this.changedSinceRecovery = false; this.lastRecovery = null; await gcc.recoveryClear(this.id); await this.dropKept(); }
+      if (this.dirty) await this.savedClean();
       // (as below: a change made while it was saving is not in the file, and what is open now is
       // the file - it went without a word, the file marked saved)
       if (lost) { this.emit(); throw new Error(`The password was removed from ${this.name}, but the changes made while it was saving were not kept (it was opened again from the saved file). Please make them again.`); }
@@ -1230,7 +1224,7 @@ export class PdfDoc {
       // is then exactly the file)
       await this.reopenFrom({ path: target });
       const lost = this.changes !== gen;
-      if (this.dirty) { this.dirty = false; this.changedSinceRecovery = false; this.lastRecovery = null; await gcc.recoveryClear(this.id); await this.dropKept(); }
+      if (this.dirty) await this.savedClean();
       // a change made while it was saving is not in the file, and what is open now is the file:
       // that change is gone - said so (it vanished without a word, the file marked saved)
       if (lost) { this.emit(); throw new Error(`${this.name} was saved, but another program is holding it, so it was opened again from the saved file - the changes made while it was saving were not kept. Please make them again.`); }
@@ -1272,14 +1266,31 @@ export class PdfDoc {
 
   /** a recovery copy of unsaved work right now (before a planned engine restart; to move the
    *  file to another window - force: a file with no path of its own yet, even unchanged) */
+  /** a save caught every change: nothing unsaved, no recovery copy (and none still being written
+   *  takes its place - savedEpoch, DeepSeek 0.13.2 #5) */
+  private async savedClean() {
+    this.dirty = false;
+    this.changedSinceRecovery = false;
+    this.lastRecovery = null;
+    this.savedEpoch++;
+    await gcc.recoveryClear(this.id);
+    await this.dropKept();
+  }
+  private savedEpoch = 0;
+
   async writeRecoveryNow(force = false) {
     if (this.closed || (!this.dirty && !force)) return;
     // (cleared before writing: a change made while the copy is written keeps it set)
     this.changedSinceRecovery = false;
+    const epoch = this.savedEpoch;
     try {
       const file = await gcc.recoveryPath(this.id);
       const r = await mu<{ base: { path: string; size: number; mtime: number } | null }>('writeRecovery', this.id, file, 64e6);
+      // (a save landed while this copy was written: the copy is of the state before it - not what a
+      // restarted engine must reopen; the save has cleared the copy away)
+      if (this.savedEpoch !== epoch) { if (!this.dirty) await gcc.recoveryClear(this.id); return; }
       await gcc.recoveryMeta(this.id, { path: this.path, name: this.name, base: r.base, fileMtime: this.mtime || undefined });
+      if (this.savedEpoch !== epoch) { if (!this.dirty) await gcc.recoveryClear(this.id); return; }
       this.lastRecovery = { file, base: r.base };
     } catch (e) { this.changedSinceRecovery = true; throw e; }
     await this.dropKept();

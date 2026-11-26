@@ -82,6 +82,7 @@ const run = async (opts = {}) => {
 };
 const mine2 = (m) => m.procs.filter((x) => x.type === 'Tab' || /PDF Editor (render|edit|batch)/.test(x.name || ''));
 const NONE = 'No sheet numbers found. Nothing was changed.';
+const NONE_WHY = /^No sheet numbers found\. Link the sheets looks for a sheet number such as A-101 in each sheet's title block .*Nothing was changed\.$/;
 
 try {
   // ---------------------------------------------------------------- set C: speed, memory, a click, one Ctrl+Z
@@ -190,7 +191,7 @@ try {
   let q = await run();
   st = await docState();
   console.log('long-spec:', q.ms + ' ms,', JSON.stringify(q.toast));
-  ok(q.toast === NONE, `long-spec: "${q.toast}"`);
+  ok(NONE_WHY.test(q.toast), `long-spec: "${q.toast}"`);
   ok(q.ms < 60000, `long-spec (1,500 pages) read in ${(q.ms / 1000).toFixed(1)} s (under 60 s)`);
   ok(!st.dirty && !st.canUndo, 'long-spec: not changed (no undo step, dirty false)');
   // a scan: no text
@@ -198,7 +199,7 @@ try {
   const nScan = (await docState()).pages;
   q = await run();
   st = await docState();
-  ok(new RegExp(`^${NONE.replace(/\./g, '\\.')} ${nScan} pages? (have|has) no text: OCR (them|it), then run this again\\.$`).test(q.toast), `scan.pdf (${nScan} pages): "${q.toast}"`);
+  ok(nScan === 1 ? /^This file has only one page, so there is nothing to link to\. Nothing was changed\.$/.test(q.toast) : new RegExp(`^${NONE.replace(/\./g, '\\.')} ${nScan} pages? (have|has) no text: OCR (them|it), then run this again\\.$`).test(q.toast), `scan.pdf (${nScan} pages): "${q.toast}"`);
   ok(!st.dirty && !st.canUndo, 'scan.pdf: not changed');
   // mixed: only its 24 sheets
   await openFile(R.mixed, 54);
@@ -220,7 +221,7 @@ try {
   await openFile(R.onePage, 1);
   q = await run();
   st = await docState();
-  ok(q.toast === NONE && !st.dirty && !st.canUndo, `one page: "${q.toast}", not changed`);
+  ok(/^This file has only one page, so there is nothing to link to\. Nothing was changed\.$/.test(q.toast) && !st.dirty && !st.canUndo, `one page: "${q.toast}", not changed`);
   // a cut-short file
   await openFile(R.cutShort);
   q = await run();
@@ -231,7 +232,7 @@ try {
   await openFile(R.password, undefined, PASSWORD);
   q = await run();
   const tP = truthOf(R.password);
-  ok(/^\d+ links on \d+ sheets, \d+ bookmarks\. Undo removes them\.$/.test(q.toast) || q.toast === NONE, `password file (opened with its password): "${q.toast}"`);
+  ok(/^\d+ links on \d+ sheets, \d+ bookmarks\. Undo removes them\.$/.test(q.toast) || NONE_WHY.test(q.toast), `password file (opened with its password): "${q.toast}"`);
   const gp = await groups();
   console.log('password file bookmarks:', JSON.stringify(gp), 'sheets in truth:', tP.pages.filter((x) => x.no).length);
   ok(/^\d+ links/.test(q.toast) ? gp.some((x) => x.title === 'Sheets') : true, 'password file: the group is there when links were made');

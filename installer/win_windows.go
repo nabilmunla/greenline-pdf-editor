@@ -386,7 +386,8 @@ func quoteArgs(args ...string) string {
 // the person) and follows its progress.
 func runElevated(j Job, prog progressFn) error {
 	self, _ := os.Executable()
-	// (a name made at random by this process, not one to guess - the step with admin rights reads it)
+	// (a name made at random by this process: where the step with admin rights reports progress and
+	// the result - the job itself goes on its command line, see jobArg)
 	f, err := os.CreateTemp(os.TempDir(), "pdfed-setup-job-*.json")
 	if err != nil {
 		return err
@@ -400,7 +401,7 @@ func runElevated(j Job, prog progressFn) error {
 	defer func() { _ = os.Remove(jf); _ = os.Remove(jf + ".progress"); _ = os.Remove(jf + ".result") }()
 	done := make(chan error, 1)
 	go func() {
-		_, err := shellExecute("runas", self, quoteArgs("--worker", jf), true)
+		_, err := shellExecute("runas", self, quoteArgs("--worker", jf, "--job", jobArg(j)), true)
 		done <- err
 	}()
 	for {
@@ -682,6 +683,8 @@ const (
 	progID       = "PDFEditor.Document"
 	capsKey      = `Software\PDF Editor\Capabilities`
 	combineKey   = `\SystemFileAssociations\.pdf\shell\PDFEditor.Combine`
+	// a folder's right-click: "Combine PDFs with ..." - all PDFs under it, in Explorer's name order (14.12)
+	combineFolderKey = `\Directory\shell\PDFEditor.CombineFolder`
 )
 
 func rootFor(scope string) registry.Key {
@@ -809,6 +812,11 @@ func registerApp(dir string, ii InstallInfo) error {
 	add(setStr(root, classes+combineKey, "Icon", `"`+exe+`",0`))
 	add(setStr(root, classes+combineKey, "MultiSelectModel", "Player"))
 	add(setStr(root, classes+combineKey+`\command`, "", `"`+exe+`" --combine "%1"`))
+	// a folder (or several) > right-click > "Combine PDFs with ...": every PDF under it, as a tree
+	add(setStr(root, classes+combineFolderKey, "", "Combine PDFs with "+displayName))
+	add(setStr(root, classes+combineFolderKey, "Icon", `"`+exe+`",0`))
+	add(setStr(root, classes+combineFolderKey, "MultiSelectModel", "Player"))
+	add(setStr(root, classes+combineFolderKey+`\command`, "", `"`+exe+`" --combine "%1"`))
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
 	}
@@ -851,6 +859,10 @@ func removeCombine(root registry.Key, dir string) {
 	cmd := strings.ToLower(getStr(root, classes+combineKey+`\command`, ""))
 	if cmd == "" || strings.Contains(cmd, strings.ToLower(dir)) {
 		deleteTree(root, classes+combineKey)
+	}
+	cmd = strings.ToLower(getStr(root, classes+combineFolderKey+`\command`, ""))
+	if cmd == "" || strings.Contains(cmd, strings.ToLower(dir)) {
+		deleteTree(root, classes+combineFolderKey)
 	}
 }
 

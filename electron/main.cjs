@@ -10,6 +10,11 @@ const fsp = fs.promises;
 const { pathToFileURL } = require('url');
 const winprint = require('./winprint.cjs');
 const { spellMenu, labelsOf } = require('./spellmenu.cjs');
+const { gather, nameCompare, flatFiles } = require('./gather.cjs');
+const { stackForLog } = require('./hangstack.cjs');
+const { existsFor } = require('./existsguard.cjs');
+// (the call stack of a hung window can be read - with the page's Document-Policy header, 14.7)
+app.commandLine.appendSwitch('enable-features', 'DocumentPolicyIncludeJSCallStacksInCrashReports');
 
 const VERSION = require('../package.json').version;
 const APP = 'PDF Editor';
@@ -37,6 +42,14 @@ protocol.registerSchemesAsPrivileged([
 /** PDF paths on a command line (Explorer passes the file as an argument) */
 function pdfArgs(argv) {
   return argv.slice(1).filter((a) => !a.startsWith('--') && /\.pdf$/i.test(a) && fs.existsSync(a)).map((a) => path.resolve(a));
+}
+/** a folder on the command line (Explorer's "Combine PDFs with ..." on a folder - 14.12) */
+const isDir = (a) => { try { return fs.statSync(a).isDirectory(); } catch (_) { return false; } };
+/** what a Combine start was given: PDFs and folders */
+function combineArgs(argv) {
+  // (a copy run from its source folder - tests - has the app's own folder on the line: not a folder to combine)
+  const own = path.resolve(__dirname, '..').toLowerCase();
+  return [...pdfArgs(argv), ...argv.slice(1).filter((a) => !a.startsWith('--') && !/\.pdf$/i.test(a) && isDir(a)).map((a) => path.resolve(a)).filter((a) => a.toLowerCase() !== own)];
 }
 
 // Explorer's "Combine with PDF Editor" (several PDFs selected): Windows runs the command once per
@@ -92,7 +105,7 @@ function spoolOwn(files) {
   }
   return false;
 }
-let startFiles = pdfArgs(process.argv);
+let startFiles = process.argv.includes('--combine') ? combineArgs(process.argv) : pdfArgs(process.argv);
 if (process.argv.includes('--combine') && startFiles.length) {
   const r = spoolOwn(startFiles);
   if (r === false) { app.exit(0); return; }
@@ -230,7 +243,7 @@ const wins = new Map(); // BrowserWindow id -> W
 // (tests: the text boxes' right-click menu is recorded on the window record, not shown; the test
 // reads the records through this)
 const NO_MENU_POPUP = process.argv.includes('--no-menu-popup');
-if (NO_MENU_POPUP) globalThis.__pdfedWins = wins;
+if (NO_MENU_POPUP || process.argv.includes('--test-hooks')) globalThis.__pdfedWins = wins;
 const focusOrder = []; // window ids, the one used last at the end
 const W_of = (e) => { try { const w = e && e.sender ? BrowserWindow.fromWebContents(e.sender) : null; return w ? wins.get(w.id) || null : null; } catch (_) { return null; } };
 const live = (W) => !!W && !W.win.isDestroyed();
@@ -312,7 +325,12 @@ function createWindow(opts = {}) {
       if (!tpl) return;
       W.lastMenu = labelsOf(tpl);
       if (NO_MENU_POPUP) return;
-      Menu.buildFromTemplate(tpl).popup({ window: win });
+      const menu = Menu.buildFromTemplate(tpl);
+      // (seen on screen - what the real pop-up test reads, 14.4; a pop-up that fails is logged)
+      menu.once('menu-will-show', () => { W.menuShown = (W.menuShown || 0) + 1; });
+      W.openMenu = menu;
+      menu.once('menu-will-close', () => { if (W.openMenu === menu) W.openMenu = null; });
+      menu.popup({ window: win });
     } catch (err) { log('context menu: ' + (err && err.message)); }
   });
   win.webContents.on('render-process-gone', (_e, d) => {
@@ -327,8 +345,22 @@ function createWindow(opts = {}) {
       .catch(() => {});
   });
   // the window not answering (hung, or crashed): the close button must still work
-  win.on('unresponsive', () => { W.hung = true; log('window not responding'); });
-  win.on('responsive', () => { W.hung = false; });
+  win.on('unresponsive', () => {
+    W.hung = true;
+    log('window not responding');
+    // (once per hang: what the window was running - the call stack names the part of the app that
+    // loops. It never settles when no JavaScript runs (a hang inside drawing), hence the 3 s - 14.7)
+    if (W.stackAsked) return;
+    W.stackAsked = true;
+    let frame = null;
+    try { frame = win.webContents.mainFrame; } catch (_) { /* gone */ }
+    const ask = frame && typeof frame.collectJavaScriptCallStack === 'function' ? frame.collectJavaScriptCallStack().catch(() => null) : Promise.resolve(null);
+    void Promise.race([ask, new Promise((r) => setTimeout(() => r(undefined), 3000))]).then((st) => {
+      const s = stackForLog(st, { user: os.userInfo().username, pc: os.hostname() });
+      log(s ? 'window not responding - it was running:\n' + s : st === undefined ? 'window not responding - no JavaScript running (or no answer in 3 s)' : 'window not responding - no call stack available');
+    });
+  });
+  win.on('responsive', () => { if (W.hung) log('window answering again'); W.hung = false; W.stackAsked = false; });
   win.on('close', (e) => {
     try {
       const b = win.getNormalBounds();
@@ -681,8 +713,30 @@ ipcMain.handle('file:write', async (_e, p, data, opts) => {
   if (!chosenSaves.has(pathKey(p))) { log('write refused (not chosen in a Save dialog): ' + p); throw new Error('Choose where to save it first (Save as).'); }
   try { return await writeSafe(p, Buffer.from(data), !(opts && opts.noBackup)); } catch (e) { log('write ' + p + ': ' + e.message); throw lockedError(e, p); }
 });
-ipcMain.handle('file:exists', (_e, p) => fs.existsSync(p));
+ipcMain.handle('file:exists', (_e, p) => {
+  try { return existsFor(p, chosenPlace, fs.existsSync); } catch (e) { log('exists refused: ' + e.message); throw e; }
+});
 /** PDFs (or pictures: kind 'pictures') in a folder, its sub-folders too when asked */
+// Combine a folder (14.10): the PDFs under a chosen folder, as a tree (gather.cjs: Explorer's name
+// order, links not followed, stops at 5,000) - only a folder the person chose
+ipcMain.handle('file:gather', async (_e, dir) => {
+  if (typeof dir !== 'string' || !chosenDirs.has(fullKey(dir))) { log('gather refused (not chosen): ' + dir); return null; }
+  try {
+    const r = await gather(dir);
+    noteChosen(flatFiles(r.tree));
+    log(`combine: folder added, ${r.count} PDF${r.count === 1 ? '' : 's'}${r.capped ? ' (stopped at the limit)' : ''}`);
+    return r;
+  } catch (e) { log('gather: ' + e.message); return null; }
+});
+// (the date each file was last changed - Combine's "Sort by date"; chosen files only)
+ipcMain.handle('file:times', async (_e, files) => {
+  const out = {};
+  for (const f of Array.isArray(files) ? files.slice(0, 10000) : []) {
+    if (typeof f !== 'string' || !chosenFiles.has(fullKey(f))) continue;
+    try { out[f] = (await fsp.stat(f)).mtimeMs; } catch (_) { /* gone */ }
+  }
+  return out;
+});
 ipcMain.handle('file:list', async (_e, dir, recursive, kind) => {
   if (typeof dir !== 'string' || !chosenDirs.has(fullKey(dir))) { log('list refused (not chosen): ' + dir); return []; }
   const want = kind === 'pictures' ? /\.(jpe?g|jfif|png|tiff?|bmp|gif)$/i : /\.pdf$/i;
@@ -1214,6 +1268,8 @@ async function registerOpenWith() {
  *  Player: offered for up to 100 files (without it Windows hides it above 15; above 100 it is
  *  hidden whatever - a Windows limit for this kind of entry). */
 const COMBINE_KEY = '\\SystemFileAssociations\\.pdf\\shell\\PDFEditor.Combine';
+/** a folder's right-click: "Combine PDFs with ..." - every PDF under it, as a tree (14.12) */
+const COMBINE_FOLDER_KEY = '\\Directory\\shell\\PDFEditor.CombineFolder';
 /** the small program Explorer runs per file (see the top of this file); only when it runs here (an
  *  antivirus could block a program it doesn't know) - else the app itself, as up to 0.8.5 */
 const combineExe = () => path.join(__dirname, '..', 'bin', 'PDF Editor Combine.exe');
@@ -1235,6 +1291,10 @@ async function registerCombine(reg, base, exe) {
     await reg('add', base + COMBINE_KEY, '/v', 'Icon', '/d', '"' + exe + '",0', '/f'),
     await reg('add', base + COMBINE_KEY, '/v', 'MultiSelectModel', '/d', 'Player', '/f'),
     await reg('add', base + COMBINE_KEY + '\\command', '/ve', '/d', cmd, '/f'),
+    await reg('add', base + COMBINE_FOLDER_KEY, '/ve', '/d', 'Combine PDFs with ' + DISPLAY, '/f'),
+    await reg('add', base + COMBINE_FOLDER_KEY, '/v', 'Icon', '/d', '"' + exe + '",0', '/f'),
+    await reg('add', base + COMBINE_FOLDER_KEY, '/v', 'MultiSelectModel', '/d', 'Player', '/f'),
+    await reg('add', base + COMBINE_FOLDER_KEY + '\\command', '/ve', '/d', cmd, '/f'),
   ];
 }
 ipcMain.handle('app:registerOpenWith', () => registerOpenWith());
@@ -1294,7 +1354,9 @@ async function refreshRegistration() {
   const comb = (await query('HKCU\\Software\\Classes' + COMBINE_KEY + '\\command')) || (await query('HKLM\\Software\\Classes' + COMBINE_KEY + '\\command'));
   // (0.8.6: from the app itself to PDF Editor Combine.exe - the entry of 0.8.5 and of the setup
   // is changed at the first start)
-  const combineHere = comb.toLowerCase().includes((await combineCommand(process.execPath)).toLowerCase());
+  const combFolder = (await query('HKCU\\Software\\Classes' + COMBINE_FOLDER_KEY + '\\command')) || (await query('HKLM\\Software\\Classes' + COMBINE_FOLDER_KEY + '\\command'));
+  // (both entries: a copy installed before 0.14 has only the one for files - 14.12)
+  const combineHere = comb.toLowerCase().includes((await combineCommand(process.execPath)).toLowerCase()) && !!combFolder;
   // an installed copy gets Explorer's "Combine with PDF Editor" (per user, no admin) - updated
   // from 0.5.0 by the app update alone, the setup that adds it never ran
   if (updater.snapshot().installed && !combineHere) {
@@ -1818,14 +1880,24 @@ function combineSoon() {
     if (!W || !W.ready) { combineSoon(); return; }
     // (one file alone opens as a tab: a moment longer first - the rest of a selection on a slow PC)
     if (new Set(combine.files).size === 1 && Date.now() - combine.first < 4000) { combineSoon(); return; }
-    const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-    const files = [...new Set(combine.files.splice(0))].sort((a, b) => coll.compare(path.basename(a), path.basename(b)) || coll.compare(a, b));
+    const given = [...new Set(combine.files.splice(0))];
+    const files = given.filter((f) => /\.pdf$/i.test(f)).sort((a, b) => nameCompare(path.basename(a), path.basename(b)) || nameCompare(a, b));
+    const dirs = given.filter((f) => !/\.pdf$/i.test(f)).sort((a, b) => nameCompare(path.basename(a), path.basename(b)) || nameCompare(a, b));
     combine.first = 0;
-    if (!files.length) return;
-    log(`combine: ${files.length} file${files.length === 1 ? '' : 's'} to the window`);
+    if (!files.length && !dirs.length) return;
     if (W.win.isMinimized()) W.win.restore();
     W.win.focus();
-    W.win.webContents.send('app:combine', files);
+    // (folders: every PDF under them, as a tree - the walk reads the share, never writes there)
+    void Promise.all(dirs.map((d) => gather(d).catch((e) => { log('combine: folder not read: ' + e.message); return null; }))).then((got) => {
+      const trees = got.filter(Boolean);
+      for (const t of trees) {
+        noteChosen(flatFiles(t.tree));
+        log(`combine: folder with ${t.count} PDF${t.count === 1 ? '' : 's'}${t.capped ? ' (stopped at the limit)' : ''}${t.unreadable.length ? `, ${t.unreadable.length} folder(s) not readable` : ''}`);
+      }
+      if (!files.length && !trees.some((t) => t.count)) { log('combine: no PDFs in the folder'); if (!W.win.isDestroyed()) W.win.webContents.send('app:combine', [], trees); return; }
+      log(`combine: ${files.length} file${files.length === 1 ? '' : 's'}${trees.length ? ` and ${trees.length} folder${trees.length === 1 ? '' : 's'}` : ''} to the window`);
+      if (!W.win.isDestroyed()) W.win.webContents.send('app:combine', files, trees);
+    });
     // (the next selection starts the app - or knocks - again)
     fsp.rm(combineLock(), { force: true }).catch(() => {});
   }, wait);
@@ -1853,7 +1925,7 @@ async function takeSpool() {
         // (left from a start that never came up: not mixed into a later selection)
         if (now - st.mtimeMs > 60000) { log('combine: old entry dropped: ' + txt); continue; }
         const p = path.resolve(txt.trim());
-        if (/\.pdf$/i.test(p)) got.push({ p, t: st.mtimeMs });
+        if (/\.pdf$/i.test(p) || isDir(p)) got.push({ p, t: st.mtimeMs });
       } else if (n.endsWith('.tmp')) {
         try { if (now - (await fsp.stat(f)).mtimeMs > 60000) await fsp.unlink(f); } catch (_) { /* gone */ }
       } else if (n === 'launch.lock' && !combine.files.length && !combine.timer) {
@@ -1874,7 +1946,7 @@ async function takeSpool() {
   const ok = (await Promise.all(got.map((f) => fsp.access(f).then(() => f, () => { log('combine: not found: ' + f); return ''; })))).filter(Boolean);
   if (!ok.length) return;
   log(`combine: ${ok.length} from the spool`);
-  noteChosen(ok);
+  noteChosen(ok.filter((f) => /\.pdf$/i.test(f)), ok.filter((f) => !/\.pdf$/i.test(f)));
   combine.files.push(...ok);
   spool.fastUntil = Date.now() + 4000;
   combineSoon();
@@ -1890,8 +1962,8 @@ function watchSpool(fast) {
   }, Date.now() < spool.fastUntil ? 150 : 1500);
 }
 app.on('second-instance', (_e, argv, _cwd, extra) => {
-  const files = (extra && extra.files) || pdfArgs(argv);
-  noteChosen(files);
+  const files = (extra && extra.files) || ((extra && extra.combine) || isCombine(argv) ? combineArgs(argv) : pdfArgs(argv));
+  noteChosen(files.filter((f) => /\.pdf$/i.test(f)), files.filter((f) => !/\.pdf$/i.test(f)));
   let W = mainW();
   if ((extra && extra.combine) || isCombine(argv)) {
     if (W) { if (W.win.isMinimized()) W.win.restore(); W.win.focus(); }
@@ -1955,7 +2027,13 @@ app.whenReady().then(() => {
     const f = path.normalize(path.join(root, rel));
     // (inside dist only - a folder beside it whose name starts with "dist" is not)
     if (!f.startsWith(root + path.sep)) return new Response('no', { status: 403 });
-    return net.fetch(pathToFileURL(f).href);
+    if (rel !== 'index.html') return net.fetch(pathToFileURL(f).href);
+    // (the page allows its JavaScript call stack to be read when it hangs - 14.7)
+    return net.fetch(pathToFileURL(f).href).then((r) => {
+      const h = new Headers(r.headers);
+      h.set('Document-Policy', 'include-js-call-stacks-in-crash-reports');
+      return new Response(r.body, { status: r.status, headers: h });
+    });
   });
   createWindow();
   // Explorer's Combine: the files of a selection, in the spool (also any a start that never came up

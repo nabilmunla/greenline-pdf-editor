@@ -242,11 +242,17 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       // heavy pages drawn from merged line work: one more update on top of the copy (display only)
       // (and the layers shown other than the file says: the same kind of update - PLAN 7.7)
       if (mu.displayFiles(id).length || mu.layerStateSet(id)) {
-        const outSize = statOf(out)?.size ?? 0;
-        const len = delta ? r.base + outSize : outSize;
-        const prev = delta && !outSize ? lastXref(tailOf(s!.src.path, r.base)) : lastXref(tailOf(out, outSize));
-        const extra = mu.displayOverlay(id, len, prev, plain);
-        if (extra) src.extra = extra;
+        try {
+          const outSize = statOf(out)?.size ?? 0;
+          const len = delta ? r.base + outSize : outSize;
+          const prev = delta && !outSize ? lastXref(tailOf(s!.src.path, r.base)) : lastXref(tailOf(out, outSize));
+          const extra = mu.displayOverlay(id, len, prev, plain);
+          if (extra) src.extra = extra;
+        } catch (e) {
+          // (a throw here leaves the snapshot made above behind: it goes, as when making it failed)
+          removeTemp([out]);
+          throw e;
+        }
       }
       return src;
     },
@@ -306,7 +312,7 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
       merges.set(job, { st: mu.mergeStart(), spill, fd: fs.openSync(spill, 'w'), size: 0, pages: 0 });
       return true;
     },
-    async mergeAdd(job: string, name: string, src: VFile | Uint8Array, pages?: number[]) {
+    async mergeAdd(job: string, name: string, src: VFile | Uint8Array, pages?: number[], group?: string[]) {
       const m = merges.get(job);
       if (!m) throw new Error('The merge was stopped.');
       // (a stop that came while the engine was between two files)
@@ -318,7 +324,7 @@ export async function editHandlers(): Promise<Record<string, Handler>> {
         for (let w = 0; w < raw.length;) w += fs.writeSync(m.fd, raw, w, Math.min(16 << 20, raw.length - w));
         m.size += raw.length;
         return off;
-      }, pages);
+      }, pages, undefined, group);
       let r = it.next();
       while (!r.done) {
         await new Promise((res) => setImmediate(res));

@@ -14,7 +14,8 @@ import type { FileSpec, PdfDoc } from './doc';
 /** the printer driver's own preferences window exists only on Windows */
 const WINDOWS = /Windows/i.test(navigator.userAgent);
 import { PAPERS, paperName, sheetLayout, PRINT_BIG, printShare, type PrintOpts } from '../engine/printlayout';
-import { parseRanges, toRanges, paperSheets, samePath } from './dlgutil';
+import { toRanges, paperSheets, samePath, pickPages } from './dlgutil';
+import { PagePick } from './PagePick';
 
 export interface PrintSettings {
   /** (up to 0.8.5: the printer used last, offered at every start - now only for the run it was
@@ -101,15 +102,7 @@ export function PrintDlg(p: Props) {
 
   // the pages, in print order
   const pages = useMemo(() => {
-    let l: number[];
-    if (which === 'all') l = [...Array(n).keys()];
-    else if (which === 'current' || which === 'view' || which === 'area') l = [p.page];
-    else if (which === 'selected') l = [...p.pageSel].sort((a, b) => a - b);
-    else l = parseRanges(range, n);
-    if (which !== 'current' && which !== 'view' && which !== 'area') {
-      if (subset === 'odd') l = l.filter((i) => i % 2 === 0);
-      if (subset === 'even') l = l.filter((i) => i % 2 === 1);
-    }
+    const l = pickPages({ which, range, subset, n, current: p.page, selected: p.pageSel });
     return reverse ? l.slice().reverse() : l;
   }, [which, range, subset, reverse, n]);
 
@@ -316,7 +309,7 @@ export function PrintDlg(p: Props) {
     try {
       step('Making the PDF…');
       const m = await make(true);
-      if (!m) { setBusy(null); if (stop.current) p.toast('The print was stopped.', 'info'); return; }
+      if (!m) { setBusy(null); if (stop.current) p.toast('Saving the PDF was stopped.', 'info'); return; }
       await gcc.commit(m.path, to);
       p.close();
       p.toast('Saved.', 'ok', { label: 'Show', run: () => void gcc.showInFolder(to).catch(p.fail) });
@@ -357,24 +350,14 @@ export function PrintDlg(p: Props) {
 
           <section>
             <h4>Pages</h4>
-            {seg<Which>(which, setWhich, [
-              ['all', `All ${n}`],
-              ['current', 'This page', `Page ${p.page + 1}`],
-              ['view', 'What\'s in view', 'Only the part of this page on screen, enlarged to the paper'],
-              ...(p.area ? [['area', 'The marked area', 'Only the area marked with the Snapshot tool, enlarged to the paper'] as [Which, string, string]] : []),
-              ...(p.pageSel.length > 1 ? [['selected', `Selected ${p.pageSel.length}`, 'The pages selected in the Pages panel'] as [Which, string, string]] : []),
-              ['range', 'Pages…'],
-            ])}
-            {which === 'range' && <input className="input" autoFocus placeholder="e.g. 1-5, 8, 11-" value={range} onChange={(e) => setRange(e.target.value)} />}
-            {which === 'view' && !view && <div className="warn small">This page isn't on screen – scroll to it first.</div>}
-            {(which === 'all' || which === 'range' || which === 'selected') && (
-              <div className="pd-row">
-                <select className="input" value={subset} onChange={(e) => setSubset(e.target.value as 'all' | 'odd' | 'even')}>
-                  <option value="all">All of them</option><option value="odd">Odd pages only</option><option value="even">Even pages only</option>
-                </select>
-                <label className="check"><input type="checkbox" checked={reverse} onChange={(e) => setReverse(e.target.checked)} /> Reverse order</label>
-              </div>
-            )}
+            <PagePick which={which} onWhich={setWhich} range={range} onRange={setRange} subset={subset} onSubset={setSubset}
+              n={n} current={p.page} selectedCount={p.pageSel.length}
+              extra={[
+                ['view', 'What\'s in view', 'Only the part of this page on screen, enlarged to the paper'],
+                ...(p.area ? [['area', 'The marked area', 'Only the area marked with the Snapshot tool, enlarged to the paper'] as [Which, string, string]] : []),
+              ]}
+              note={which === 'view' && !view && <div className="warn small">This page isn't on screen – scroll to it first.</div>}
+              rowEnd={<label className="check"><input type="checkbox" checked={reverse} onChange={(e) => setReverse(e.target.checked)} /> Reverse order</label>} />
             <div className="pd-row">
               <label>Print</label>
               {seg<'y' | 'n'>(markups ? 'y' : 'n', (v) => setMarkups(v === 'y'), [['y', 'Document and markups'], ['n', 'Document only', 'Leaves comments and markups out (form fields still print)']])}

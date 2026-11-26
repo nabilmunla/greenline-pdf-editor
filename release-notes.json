@@ -1,4 +1,32 @@
 {
+  "0.14.0": {
+    "New features": [
+      "Combine a whole folder: right-click a folder in Explorer and choose \"Combine PDFs with PDF Editor\" (Windows 11: under \"Show more options\"). Every PDF in it and its sub-folders is gathered, in Explorer's name order. The Merge window shows them as a tree of folders: drag a file, or a whole folder, to a new place, or sort by name or date. The combined file gets a bookmark for each folder and file. \"Add folder\" in the Merge window does the same from inside the app. Up to 5,000 PDFs per folder, and up to 32 folders deep.",
+      "Search in chosen pages only: with \"This file\" chosen, the Search panel can look in all pages, this page, or pages you type (e.g. 1-5, 8, 11-), the same way as Print.",
+      "Rotate pages (Organize › Pages › Rotate…) opens a window to choose which pages to turn: all, this page, the pages selected in the Pages panel, or pages you type, also odd or even pages only. Then choose 90° left, 90° right or 180°.",
+      "Linked text is now marked: every link has a faint blue box, and pointing at one makes it darker and underlined. Turn it off with Edit › Links › Show link marks. The marks are on screen only: never printed or saved."
+    ],
+    "General polishing": [
+      "Right-click on selected text that you can't edit (a reply to a comment, an AI answer, a translation, a table preview) now offers Copy.",
+      "Link the sheets now says why when it finds no sheet numbers: a one-page file has nothing to link to, and a set with text is told what the tool looks for.",
+      "If the window stops responding, the app's log now records what it was busy with, so a problem report says more."
+    ],
+    "Fixes": [
+      "A file saved while its automatic recovery copy was still being written could later be reopened, after an engine restart, in its state before the save. The save now wins.",
+      "Parts of a page could stay white for the rest of the session after a file on a network share or USB stick was briefly out of reach. They are now tried again after 30 seconds, the next time you scroll or zoom.",
+      "Deleting a form field could stop that page's comments and markups from showing. The page now keeps working.",
+      "Flattening a form whose fields calculate from each other left the filled-in values inside the saved file. They are now removed with the fields.",
+      "Setup: when installing for everyone on the PC, or updating a copy in Program Files, the step that runs with admin rights now takes its instructions only from the setup itself, not from a file in your temp folder that other programs could change, and refuses an update package it can't check.",
+      "The app no longer looks at a network location you didn't open or choose when checking whether a file is already there. When it can't check, it asks before replacing.",
+      "Edited or added text in bold italic is now written bold and italic. Before, it came out bold but upright, and fixed-width italic came out upright.",
+      "Export to Word: pictures of drawings or charts on pages printed sideways, and on sheets larger than Word's page (A1, A0), are now cut from the right place.",
+      "Export to Word: a table that runs over several scanned pages no longer repeats its header row at each page break when OCR read the header slightly differently.",
+      "Export to Word: a \"Page X of Y\" footer whose total was in a different font now updates its total too.",
+      "Page numbers and Bates numbers now use the size you choose. Before, anything under 9 pt came out at 9 pt.",
+      "A second bookmark change made while the first was still being saved was silently dropped. The app now says it is still saving the last one.",
+      "Cancelling Print › Save as PDF said \"The print was stopped.\" It now says \"Saving the PDF was stopped.\""
+    ]
+  },
   "0.13.3": {
     "Fixes": [
       "Picking one highlight or other text markup after another in the Comments list could freeze the window, so that it had to be closed. The window now keeps working as you pick each one."

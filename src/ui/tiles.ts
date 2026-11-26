@@ -29,6 +29,9 @@ export interface TileReq {
 
 type Entry = { bmp: ImageBitmap | null; size: number };
 
+/** how long a tile that failed three times is left alone before it is asked for again */
+const GIVE_UP_MS = 30_000;
+
 class TileStore {
   private cache = new Map<string, Entry>();
   private bytes = 0;
@@ -39,6 +42,13 @@ class TileStore {
   private inflightA = 0;
   private listeners = new Set<(key: string) => void>();
   private failed = new Map<string, number>();
+  /** when each given-up tile last failed: asked again GIVE_UP_MS later (a share back after a blip -
+   *  DeepSeek 0.13.2 #9); one try per wait, so a file that stays unreadable is not hammered */
+  private failedAt = new Map<string, number>();
+  private givenUp(key: string) {
+    if ((this.failed.get(key) ?? 0) <= 2) return false;
+    return Date.now() - (this.failedAt.get(key) ?? 0) < GIVE_UP_MS;
+  }
   /** pages (doc|r<rev>) whose drawing was under way when a drawing engine ran out of memory */
   private crashed = new Map<string, number>();
   private crashAt = new Map<string, number>();
@@ -63,7 +73,7 @@ class TileStore {
   tryHeavyAgain(pageKey: string) {
     this.heavy.delete(pageKey);
     this.crashed.delete(pageKey);
-    for (const k of [...this.failed.keys()]) if (k.startsWith(pageKey + '|')) this.failed.delete(k);
+    for (const k of [...this.failed.keys()]) if (k.startsWith(pageKey + '|')) { this.failed.delete(k); this.failedAt.delete(k); }
     for (const f of this.heavyListeners) f();
     this.retry();
   }
@@ -87,6 +97,7 @@ class TileStore {
     this.cache.clear();
     this.bytes = 0;
     this.failed.clear();
+    this.failedAt.clear();
     for (const f of this.resetListeners) f();
     this.retry();
   }
@@ -116,7 +127,7 @@ class TileStore {
     const seen = new Set<string>();
     for (const list of this.wishes.values()) for (const r of list) {
       if (seen.has(r.key) || this.cache.has(r.key) || this.inflight.has(r.key)) continue;
-      if ((this.failed.get(r.key) ?? 0) > 2) continue;
+      if (this.givenUp(r.key)) continue;
       if (this.heavy.size && (r.layer === 'b' || r.layer === 'p') && this.heavy.has(pageOf(r.key))) continue;
       seen.add(r.key);
       all.push(r);
@@ -187,6 +198,7 @@ class TileStore {
   /** an engine came back after a restart: try again what failed (not the pages given up on) */
   retry() {
     this.failed.clear();
+    this.failedAt.clear();
     // (a restarted drawing engine knows no wanted scales: post them again)
     this.sentScales.clear();
     const any = this.wishes.entries().next();
@@ -235,7 +247,7 @@ class TileStore {
     this.bump(doc);
     const pre = doc + '|';
     this.drop(pre);
-    for (const m of [this.failed, this.crashed, this.crashAt]) for (const k of [...m.keys()]) if (k.startsWith(pre)) m.delete(k);
+    for (const m of [this.failed, this.failedAt, this.crashed, this.crashAt]) for (const k of [...m.keys()]) if (k.startsWith(pre)) m.delete(k);
     for (const k of [...this.heavy]) if (k.startsWith(pre)) this.heavy.delete(k);
     previewCache.delete(doc);
     this.gates.delete(doc);
@@ -285,6 +297,7 @@ class TileStore {
       // (not drawn: the view had moved on to another scale - nothing failed)
       if ((e as { stale?: boolean })?.stale) { this.stale++; this.askAgain(r, gen); return; }
       this.failed.set(r.key, (this.failed.get(r.key) ?? 0) + 1);
+      this.failedAt.set(r.key, Date.now());
       // the drawing engine died while drawing this page (out of memory)
       // (only the tile the engine was drawing when it went down counts - the others only waited
       // behind it; once per crash event)
@@ -319,7 +332,7 @@ class TileStore {
    */
   private askAgain(r: TileReq, gen: number) {
     if ((this.gens.get(r.doc) ?? 0) !== gen || this.cache.has(r.key)) return;
-    if ((this.failed.get(r.key) ?? 0) > 2) return;
+    if (this.givenUp(r.key)) return;
     if (this.heavy.size && (r.layer === 'b' || r.layer === 'p') && this.heavy.has(pageOf(r.key))) return;
     if (this.queue.some((q) => q.key === r.key)) return;
     // (the wish itself: its priority follows the scrolling, the finished request's may not)

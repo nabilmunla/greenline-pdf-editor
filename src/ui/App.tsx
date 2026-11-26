@@ -4,7 +4,7 @@ import { loadFonts } from './fontlist';
 import { lockedBigNotice } from './bigLocked';
 import { UpdateCard, useUpdates } from './Updates';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { gcc, baseName, dirName, joinPath, type AppInfo, type Recovery, type TabMove, type UpdatedInfo } from './api';
+import { gcc, baseName, dirName, joinPath, type AppInfo, type Recovery, type TabMove, type UpdatedInfo, type GatherResult } from './api';
 import { startEngines, rendererFor, renderers, mu, editor as editWorker, batcher, muBatch, pinCount, pinLog, type StuckNotice, type MemoryAsk } from './engines';
 import { PdfDoc, replaceRecovery, onCrash, wasPlannedRestart, wasStuckRestart, plannedRestartLostWork, restartEditingEngine, type Scale } from './doc';
 import { previewCache, tiles } from './tiles';
@@ -58,6 +58,8 @@ export interface Settings {
   loupeZoom?: number;
   wheelZoom?: boolean;
   keepTool?: boolean;
+  /** links shown with a faint blue mark (on screen only, never printed or saved) - default on, 14.5 */
+  linkMarks?: boolean;
   /** last print settings */
   print?: PrintSettings;
   /** the markup / tool settings panel on the right (false: closed) */
@@ -77,9 +79,10 @@ export type Dialog =
   | { k: 'stamps'; scan?: ScanSource }
   | { k: 'copypages'; items: SelItem[] }
   | { k: 'signature' }
-  | { k: 'merge'; files?: string[] }
+  | { k: 'merge'; files?: string[]; trees?: GatherResult[] }
   | { k: 'split' }
   | { k: 'extract' }
+  | { k: 'rotate' }
   | { k: 'toPictures' }
   | { k: 'link'; page: number; rect: Rect; edit?: { k: number; uri: string | null; page: number } }
   | { k: 'fromPictures'; files: string[] }
@@ -110,7 +113,7 @@ export type Dialog =
 let toastSeq = 1;
 
 /** dialogs that work on the file in front when they were opened */
-const FOR_THE_FILE = new Set<Dialog['k']>(['calibrate', 'scale', 'viewport', 'copypages', 'split', 'extract', 'toPictures', 'link', 'table', 'insert', 'protect', 'ocr', 'redact-search', 'props', 'print', 'crop', 'export', 'sheets']);
+const FOR_THE_FILE = new Set<Dialog['k']>(['calibrate', 'scale', 'viewport', 'copypages', 'split', 'extract', 'rotate', 'toPictures', 'link', 'table', 'insert', 'protect', 'ocr', 'redact-search', 'props', 'print', 'crop', 'export', 'sheets']);
 const forTheFile = (x: Dialog | null) => !!x && (FOR_THE_FILE.has(x.k) || (x.k === 'marks' && !x.batch));
 
 /** tabs closed whose engine clean-up is still running */
@@ -143,32 +146,40 @@ export function App() {
    *  join an open Merge dialog; another dialog open (a password, a running job) is not replaced -
    *  they wait until it closes. One file on its own just opens. */
   const combineWaiting = useRef<string[]>([]);
+  /** folders from Explorer's "Combine PDFs with ..." (walked: trees) waiting the same way (14.10) */
+  const combineTrees = useRef<GatherResult[]>([]);
   /** to the open Merge dialog - one just opened may not listen yet: asked again for up to 3 s */
-  const toMerge = (files: string[], tries: number) => {
-    if (!files.length) return;
-    if (!window.dispatchEvent(new CustomEvent('gcc-merge-add', { detail: files, cancelable: true }))) return;
-    if (dialogRef.current?.k !== 'merge') combineFiles(files);
-    else if (tries < 20) window.setTimeout(() => toMerge(files, tries + 1), 150);
-    else combineWaiting.current.push(...files);
+  const toMerge = (files: string[], trees: GatherResult[], tries: number) => {
+    if (!files.length && !trees.length) return;
+    if (!window.dispatchEvent(new CustomEvent('gcc-merge-add', { detail: { files, trees }, cancelable: true }))) return;
+    if (dialogRef.current?.k !== 'merge') combineFiles(files, trees);
+    else if (tries < 20) window.setTimeout(() => toMerge(files, trees, tries + 1), 150);
+    else { combineWaiting.current.push(...files); combineTrees.current.push(...trees); }
   };
-  const combineFiles = (files: string[]) => {
+  const combineFiles = (files: string[], trees: GatherResult[] = []) => {
     const d = dialogRef.current;
-    if (d?.k === 'merge') { toMerge(files, 0); return; }
+    const withPdfs = trees.filter((t) => t.count > 0);
+    if (trees.length && !withPdfs.length && !files.length) { toast(trees.length === 1 ? 'No PDFs in that folder (or in its sub-folders).' : 'No PDFs in those folders.', 'info', undefined, 8000); return; }
+    if (d?.k === 'merge') { toMerge(files, withPdfs, 0); return; }
     if (d) {
-      if (files.length) toast(`Combine: ${files.length} file${files.length === 1 ? '' : 's'} from Explorer – the Merge dialog opens when this dialog is closed.`, 'info', undefined, 8000);
+      const n = files.length + withPdfs.reduce((s, t) => s + t.count, 0);
+      if (n) toast(`Combine: ${n} file${n === 1 ? '' : 's'} from Explorer – the Merge dialog opens when this dialog is closed.`, 'info', undefined, 8000);
       combineWaiting.current.push(...files);
+      combineTrees.current.push(...withPdfs);
       return;
     }
     const all = [...new Set([...combineWaiting.current.splice(0), ...files])];
+    const ts = [...combineTrees.current.splice(0), ...withPdfs];
     // (marked open at once: a second batch before the next render joins it, not replaces it)
-    if (all.length > 1) { const nd: Dialog = { k: 'merge', files: all }; dialogRef.current = nd; setDialog(nd); } else void openPaths(all).catch(fail);
+    // (a folder opens the dialog even with one PDF in it: the person asked to combine)
+    if (all.length > 1 || ts.length) { const nd: Dialog = { k: 'merge', files: all, trees: ts }; dialogRef.current = nd; setDialog(nd); } else void openPaths(all).catch(fail);
   };
   useEffect(() => {
     if (dialog) return;
     // the next password-protected file waiting for its prompt
     const w = waitingPw.current.shift();
     if (w) { const d: Dialog = { k: 'password', path: w.path, doc: w.doc }; dialogRef.current = d; setDialog(d); return; }
-    if (combineWaiting.current.length) combineFiles([]);
+    if (combineWaiting.current.length || combineTrees.current.length) combineFiles([]);
   }, [dialog]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const upd = useUpdates();
@@ -294,7 +305,7 @@ export function App() {
     gcc.onAdopt((p) => void adopt(p));
     gcc.onTabHover((on) => setDropHere(on));
     // Explorer > Combine with PDF Editor: the Merge dialog with those files (one file: just open it)
-    gcc.onCombine((files) => combineFiles(files));
+    gcc.onCombine((files, trees) => combineFiles(files, trees || []));
     gcc.ready();
     // the window's close button: with several files open, close just this one or all of them
     // (the graphics memory may have been reset: Windows unlocked or woken up, or a canvas lost and
@@ -967,6 +978,7 @@ export function App() {
     /** centre the view on a point of a page, zoom unchanged (the box on a thumbnail) */
     panTo: (p: number, x: number, y: number) => viewer.current?.goTo(p, [x, y, x, y], true),
     rotate: async (delta: number) => { if (!doc) return; await busy('Rotating…', () => doc.rotate(targetPages(), delta)); },
+    rotateDlg: () => { if (doc) setDialog({ k: 'rotate' }); },
     deletePages: async () => {
       if (!doc) return;
       const ps = targetPages();
@@ -1713,7 +1725,7 @@ export function App() {
               <div className="center">
                 <Viewer
                   key={doc.id} doc={doc} rev={ver} tool={tool} setTool={setTool} style={style} place={place}
-                  countGroup={countGroup} snapOn={snapOn} orthoOn={!!settings.ortho} crossOn={!!settings.cross} loupeOn={!!settings.loupe} loupeZoom={settings.loupeZoom ?? 3} marked={marked && doc && marked.docId === doc.id ? { page: marked.page, rect: marked.rect } : null} wheelZoom={!!settings.wheelZoom} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
+                  countGroup={countGroup} snapOn={snapOn} orthoOn={!!settings.ortho} crossOn={!!settings.cross} loupeOn={!!settings.loupe} loupeZoom={settings.loupeZoom ?? 3} marked={marked && doc && marked.docId === doc.id ? { page: marked.page, rect: marked.rect } : null} wheelZoom={!!settings.wheelZoom} linkMarks={settings.linkMarks ?? true} keepTool={!!settings.keepTool || ['highlight', 'underline', 'strike', 'squiggly', 'pencil', 'm-count', 'redact-area', 'redact-text', 'area-highlight', 'm-length', 'm-polylength', 'm-area', 'm-rectarea', 'm-perimeter', 'm-angle', 'edit-text'].includes(tool)}
                   sel={sel} setSel={setSel} hits={hits} hitIndex={hitIndex} onEvent={(e) => void onViewerEvent(e).catch(fail)} apiRef={viewer} readOnly={false}
                   how={settings.measureHow || 'points'}
                 />

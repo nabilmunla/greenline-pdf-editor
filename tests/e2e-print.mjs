@@ -185,7 +185,7 @@ await E(() => {
   window.__stoppedNotes = 0;
   // (each time the note comes up on the screen counts once)
   let up = false;
-  new MutationObserver(() => { const has = document.body.innerText.includes('The print was stopped.'); if (has && !up) window.__stoppedNotes++; up = has; }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  new MutationObserver(() => { const has = document.body.innerText.includes('Saving the PDF was stopped.'); if (has && !up) window.__stoppedNotes++; up = has; }).observe(document.body, { childList: true, subtree: true, characterData: true });
 });
 await win.keyboard.press('Control+p');
 await win.waitForSelector('.printdlg', { timeout: 10000 }).catch(() => {});
@@ -221,7 +221,7 @@ ok(!!usableAt && usableAt - cancelAt <= 3000, `the dialog is usable again within
 await sleep(1500);
 ok(!existsSync(cancelOut), 'no file was saved by the cancelled print');
 const notes = await E(() => window.__stoppedNotes);
-ok(notes === 1, `"The print was stopped." shown once (${notes} times)`);
+ok(notes === 1, `"Saving the PDF was stopped." shown once (${notes} times)`);
 const left0 = allFiles().filter((f) => !filesBeforeCancel.includes(f));
 ok(left0.length === 0, `no print file or piece left in the work folder (${left0.map((f) => f.split(/[\\/]/).slice(-2).join('/')).join(', ') || 'none'})`);
 // the next print of the same pages goes through

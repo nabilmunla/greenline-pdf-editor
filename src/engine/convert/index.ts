@@ -74,13 +74,30 @@ export class ExportJob {
     if (this.opts.dropStamps !== false) dropStampText(done);
     const layouts: PageLayout[] = done.map((pm) => analyzePage(pm, word));
     markRunning(layouts);
-    return word ? toWord(layouts, this.fonts.list, this.opts, (i, box) => regionPicture(this.doc, i, box, 200)) : toExcel(layouts, this.fonts.list, this.opts);
+    return word ? toWord(layouts, this.fonts.list, this.opts, (i, box) => regionPicture(this.doc, i, unturn(this.pages[i], unscale(this.pages[i], box)), 200)) : toExcel(layouts, this.fonts.list, this.opts);
   }
+}
+
+/** a box in a page read turned (see readPage) as the page itself draws it (the turn undone) */
+/** a figure box back on the real sheet: the model of a sheet bigger (or smaller) than Word's page was
+ *  scaled, the sheet the picture is cut from was not (A0 drawings: the wrong corner) */
+function unscale(pm: PageModel | undefined, box: number[]): number[] {
+  const k = pm?.scaled;
+  return k && k !== 1 ? box.map((v) => v / k) : box;
+}
+function unturn(pm: PageModel | undefined, box: number[]): number[] {
+  const tn = pm?.turned;
+  if (!tn) return box;
+  // (the turn read the page with was x,y -> y,w-x for a quarter, h-y,x for three quarters, w-x,h-y for a half: this is its inverse)
+  const U = tn.turn === 1 ? (x: number, y: number) => [tn.w - y, x] : tn.turn === 3 ? (x: number, y: number) => [y, tn.h - x] : (x: number, y: number) => [tn.w - x, tn.h - y];
+  const [a, b] = U(box[0], box[1]), [c, d] = U(box[2], box[3]);
+  return [Math.min(a, c), Math.min(b, d), Math.max(a, c), Math.max(b, d)];
 }
 
 /** a page model at k times its size (coordinates, sizes, lines) */
 export function scalePage(pm: PageModel, k: number) {
   const b = (x: number[]) => { for (let i = 0; i < 4; i++) x[i] *= k; };
+  pm.scaled = (pm.scaled ?? 1) * k;
   pm.w *= k; pm.h *= k; pm.bodySize *= k;
   for (const w of pm.words) {
     w.x0 *= k; w.y0 *= k; w.x1 *= k; w.y1 *= k; w.base *= k; w.size *= k;

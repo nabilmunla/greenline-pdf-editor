@@ -91,6 +91,8 @@ export interface PageModel {
   /** the page was printed sideways and is read turned (see readPage): the quarter turns and the
    *  page's size as shown - a box drawn on the page as shown is turned the same way */
   turned?: { turn: 1 | 2 | 3; w: number; h: number };
+  /** the model was scaled by this to fit Word's page (scalePage): the sheet itself was not */
+  scaled?: number;
 }
 
 /** options the window passes in */

@@ -184,6 +184,26 @@ test('BUG-73: a page\'s old markup pictures go when it gets new ones (other page
   await d.close();
 });
 
+test('DeepSeek 0.13.2 #9: a tile given up after three failures is asked for again once the file can be read (30 s later)', async () => {
+  const d = await opened();
+  let fail = true, asked = 0;
+  draw.viewTile = () => { asked++; return fail ? Promise.reject(new Error('UNKNOWN: unknown error, read')) : Promise.resolve(fakeBmp()); };
+  const req = { key: `${d.id}|r-1|b|1.0000|0|0`, layer: 'b' as const, doc: d.id, page: 0, scale: 1, x: 0, y: 0, w: 512, h: 512, prio: 0 };
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    for (let i = 0; i < 5; i++) { tiles.need('t9', [req]); await tick(); await tick(); }
+    assert.equal(asked, 3, 'three tries, then given up (as before)');
+    fail = false;                       // the share is back
+    tiles.need('t9', [req]); await tick(); await tick();
+    assert.equal(asked, 3, 'not hammered at once');
+    now += 31_000;                      // later
+    tiles.need('t9', [req]); await tick(); await tick();
+    assert.ok(asked >= 4 && tiles.has(req.key), 'asked again and drawn: the white patch goes');
+  } finally { Date.now = realNow; tiles.forget('t9'); await d.close(); }
+});
+
 // ---------------------------------------------------------------- saving
 
 test('BUG-221: Ctrl+S on a file renamed / moved away asks where to save', async () => {

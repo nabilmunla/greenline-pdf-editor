@@ -3,7 +3,7 @@
 import type { Box, ExportOpts, FontInfo, Pic, Word } from './model';
 import { clamp, median, minOf, maxOf, pushAll } from './model';
 import type { PageLayout } from './analyze';
-import { rowText } from './analyze';
+import { rowText, similar } from './analyze';
 import type { Cell, Table } from './tables';
 import { readingOrder, type Row } from './rows';
 import { figures, markHeadings, pageFlow, paragraphs, type Block, type Para, type PageFlow, type PLine } from './flow';
@@ -177,10 +177,20 @@ export function toWord(pages: PageLayout[], fonts: FontInfo[], o: ExportOpts, re
 }
 
 /** rows of b (its repeated header left out) added under a */
-function joinTables(a: Table, b: Table): Table {
+export function joinTables(a: Table, b: Table): Table {
   const txt = (t: Table, r: number) => t.cells.filter((c) => c.r === r).map((c) => c.words.map((w) => w.text).join(' ')).join('|');
-  let skip = 0;
-  while (skip < b.rows.length && b.rows[skip].head && skip < a.rows.length && txt(b, skip) === txt(a, skip)) skip++;
+  const letters = (s: string) => s.toLowerCase().replace(/[^a-z\u0600-\u06ff]+/g, '');
+  // (a scan's OCR reads the repeated heading a little differently each time: like the Excel join, a
+  // heading row that looks enough like the first page's counts, and so does a "(CONT'D)" line)
+  let skip = 0, h = 0;
+  while (skip < b.rows.length) {
+    const r = b.rows[skip];
+    if (r.kind === 'heading' && /cont'?d|continued/i.test(txt(b, skip))) { skip++; continue; }
+    if (!(r.head || skip < 3) || !a.rows[h]?.head) break;
+    const x = letters(txt(b, skip)), y = letters(txt(a, h));
+    if (!(txt(b, skip) === txt(a, h) || (x && y && similar(x, y) > 0.6))) break;
+    skip++; h++;
+  }
   const off = a.rows.length - skip;
   return {
     ...a,
@@ -430,13 +440,14 @@ function hfXml(rows: Row[], pl: PageLayout, counter: number | undefined, total: 
       wordsRuns(s, fonts, r.size, defFont, null, parts);
       // the page number -> a field
       if (pl.pageNo.has(r)) {
+        // (once for the whole line: the total can sit in another run than the page number)
+        let used = false;
         for (let i = before; i < parts.length; i++) {
           const p = parts[i];
           const m = /\d+/g;
           let last = 0;
           const repl: RunPart[] = [];
           let hit: RegExpExecArray | null;
-          let used = false;
           while ((hit = m.exec(p.text))) {
             const n = Number(hit[0]);
             const field = counter !== undefined && !used && n === counter ? 'PAGE' : n === total && total > 1 && used ? 'NUMPAGES' : null;

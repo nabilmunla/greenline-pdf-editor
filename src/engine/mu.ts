@@ -558,6 +558,17 @@ function freePage(p: mupdf.PDFPage) {
   annotIndex.delete(p);
   try { p.destroy?.(); } catch { /* gone */ }
 }
+/** a deleted markup was a form field */
+function isWidget(a: mupdf.PDFAnnotation) {
+  try { return a.getObject().get('Subtype').asName() === 'Widget'; } catch { return false; }
+}
+/** let go of one cached page object */
+function dropPage(o: Open, i: number) {
+  const p = o.pages.get(i);
+  if (!p) return;
+  o.pages.delete(i);
+  freePage(p);
+}
 /** forget cached page objects (after anything that moves pages around) */
 function resetPages(o: Open) {
   const all = [...o.pages.values()];
@@ -3547,8 +3558,13 @@ export function deleteAnnots(id: string, items: { page: number; id: number }[]):
       if (replies.some((r) => r.getFlags() & LOCKED)) continue;
       for (const r of replies) { noteDropped(o, r); forget(p, r); p.deleteAnnotation(r); }
       noteDropped(o, a);
+      const field = isWidget(a);
       forget(p, a);
       p.deleteAnnotation(a);
+      // (MuPDF's page keeps its own list of fields, which deleting does not touch: the dead field
+      // went on answering - its page's markup layer stopped drawing. The page object is let go, the
+      // next look builds a fresh one - DeepSeek 0.13.2 engine #6)
+      if (field) dropPage(o, page);
       n++;
     }
     return n;
@@ -3851,8 +3867,15 @@ export function flatten(id: string, items: { page: number; id: number }[] | null
 /** form fields whose widgets are all gone (object numbers in `gone`) taken off the form's list */
 function pruneFields(o: Open, gone: Set<number>) {
   if (!gone.size) return;
-  const fields = o.doc.getTrailer().get('Root', 'AcroForm', 'Fields');
-  if (!fields.isArray()) return;
+  const form = o.doc.getTrailer().get('Root', 'AcroForm');
+  const fields = form.get('Fields');
+  if (fields.isArray()) pruneFieldList(fields, gone);
+  // (the calculation order lists fields too: left there, a flattened field - its value and widgets
+  // - stayed in the saved file, as dropFields says - DeepSeek 0.13.2 engine #8)
+  const co = form.get('CO');
+  if (co.isArray()) for (let j = co.length - 1; j >= 0; j--) { const f = co.get(j); if (f.isIndirect() && gone.has(f.asIndirect())) co.delete(j); }
+}
+function pruneFieldList(fields: mupdf.PDFObject, gone: Set<number>) {
   const prune = (list: mupdf.PDFObject, depth: number) => {
     for (let i = list.length - 1; i >= 0; i--) {
       const k = list.get(i);
@@ -4092,7 +4115,7 @@ export function rotatePages(id: string, pages: number[], delta: number): PageInf
       let r = 0;
       try { r = po.getInheritable('Rotate').asNumber() || 0; } catch { /* none */ }
       po.put('Rotate', (((r + delta) % 360) + 360) % 360);
-      o.pages.delete(i);
+      dropPage(o, i);
       followPage(o, i, C0, delta);
     }
     resetPages(o);
@@ -4729,7 +4752,7 @@ export function mergeAddFile(st: MergeState, name: string, bytes: In, spill: (ra
  * `from`: a file's bytes, or a document open here (Extract, PLAN 10.3b - read, not closed);
  * `more`: what else is copied through the pages' graft map before it is let go.
  */
-export function* mergeFileSteps(st: MergeState, name: string, from: In | mupdf.PDFDocument, spill: (raw: Uint8Array) => number, pages?: number[], more?: (gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument) => void): Generator<void, number> {
+export function* mergeFileSteps(st: MergeState, name: string, from: In | mupdf.PDFDocument, spill: (raw: Uint8Array) => number, pages?: number[], more?: (gm: mupdf.PDFGraftMap, src: mupdf.PDFDocument) => void, group?: string[]): Generator<void, number> {
   const { out } = st;
   const own = !(from instanceof mupdf.PDFDocument);
   const src = own ? openOther(from as In) : (from as mupdf.PDFDocument);
@@ -4750,7 +4773,7 @@ export function* mergeFileSteps(st: MergeState, name: string, from: In | mupdf.P
       carryLayers(out, gm, src);
       more?.(gm, src);
       carryScales(out, src, list.map((sp, k) => [sp, first + k]));
-      if (list.length) st.marks.push({ title: name.replace(/\.pdf$/i, ''), page: first, children: keepMarks(readOutline(src), map) });
+      if (list.length) groupMarks(st, group, first).push({ title: name.replace(/\.pdf$/i, ''), page: first, children: keepMarks(readOutline(src), map) });
       // (a graft map keeps both files alive in the engine's memory until it is let go - also when
       // grafting failed)
     } finally { gm.destroy?.(); }
@@ -4841,6 +4864,24 @@ export function mergeDrop(st: MergeState) { try { st.out.destroy?.(); } catch { 
 
 /** a bookmark for a new file: its page there (0-based) and the ones under it */
 interface OutItem { title: string; page: number; children: OutItem[] }
+/** the bookmark folder entries made by groupMarks (Combine a folder, 14.11) - a file entry with the
+ *  same name as a folder is never taken for one */
+const folderMarks = new WeakSet<OutItem>();
+/** where a file's entry goes: under its folders (Folder > sub-folder), made as needed at the
+ *  current end of the list - a folder met again after another one starts a new entry, as the files
+ *  of one folder come one after another; each folder entry opens at its first page */
+function groupMarks(st: MergeState, group: string[] | undefined, page: number): OutItem[] {
+  let list = st.marks;
+  for (const name of group || []) {
+    const last = list[list.length - 1];
+    if (last && folderMarks.has(last) && last.title === name) { list = last.children; continue; }
+    const f: OutItem = { title: name, page, children: [] };
+    folderMarks.add(f);
+    list.push(f);
+    list = f.children;
+  }
+  return list;
+}
 
 /** a bookmark that opens another file or a web page ("file:A-101.pdf#page=1"): MuPDF gives it page 0,
  *  and it was taken for page 1 of this file (the panel went there; Extract / Merge rewrote it so) */
@@ -5481,10 +5522,10 @@ export function ocrState(id: string, page: number): 'none' | 'ours' | 'text' {
 
 export interface TextStyle { size: number; color: RGB; bold?: boolean; italic?: boolean; family?: 'sans' | 'serif' | 'mono' }
 
-function baseFontFor(s: TextStyle): 'Helvetica' | 'Helvetica-Bold' | 'Times-Roman' | 'Times-Bold' | 'Courier' | 'Courier-Bold' | 'Helvetica-Oblique' | 'Times-Italic' {
-  if (s.family === 'serif') return s.bold ? 'Times-Bold' : s.italic ? 'Times-Italic' : 'Times-Roman';
-  if (s.family === 'mono') return s.bold ? 'Courier-Bold' : 'Courier';
-  return s.bold ? 'Helvetica-Bold' : s.italic ? 'Helvetica-Oblique' : 'Helvetica';
+function baseFontFor(s: TextStyle): string {
+  // (the built-in fonts' bold / italic versions: regular, bold, italic, bold italic)
+  const v = BASE_VARIANT[s.family === 'serif' ? 'TiRo' : s.family === 'mono' ? 'Cour' : 'Helv'];
+  return v[(s.bold ? 1 : 0) + (s.italic ? 2 : 0)];
 }
 
 const WIN_EXTRA = new Set([0x20ac, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2122]);
@@ -6833,7 +6874,11 @@ function* printSteps(src: mupdf.PDFDocument, opts: PrintOpts, layerShow: Map<num
     pd.bake(true, true);
     if (onLayer.length) {
       const po = { doc: pd } as unknown as Open;
-      for (const { k, d } of onLayer) bakeDict(po, pd.loadPage(k) as mupdf.PDFPage, d, opacityOf(d));
+      for (const { k, d } of onLayer) {
+        // (loadPage makes a new page object each time: let go of it)
+        const lp = pd.loadPage(k) as mupdf.PDFPage;
+        try { bakeDict(po, lp, d, opacityOf(d)); } finally { lp.destroy?.(); }
+      }
     }
     yield opts.pages.length;
     // which sheets go as pictures (decided on the page as it is in the file, before it is

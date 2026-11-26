@@ -58,7 +58,7 @@ export class EngineClient {
   constructor(public name: string) {}
 
   /** when the engine was last restarted (calls failing just after that are part of it) */
-  private restartedAt = 0;
+  private restartedAt = -Infinity;
   attach(port: MessagePort, restarted: boolean, code = 0) {
     this.gone = null;
     this.answeredAt = performance.now();

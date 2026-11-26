@@ -1198,6 +1198,38 @@ function formPdf(extra?: (d: mupdf.PDFDocument) => void): Uint8Array {
   return d.saveToBuffer('').asUint8Array().slice();
 }
 
+test('DeepSeek 0.13.2 engine #6: deleting a form field leaves no dead field behind (markup layer still draws, other fields still edit)', () => {
+  mu.open('fdel', formPdf());
+  const w = () => mu.annots('fdel', 0).filter((a) => a.type === 'Widget');
+  const T1 = w().find((a) => a.field!.name === 'T1')!;
+  const before = w().length;
+  assert.equal(mu.deleteAnnots('fdel', [{ page: 0, id: T1.id }]), 1);
+  assert.equal(w().length, before - 1, 'gone from the list');
+  assert.doesNotThrow(() => mu.renderAnnots('fdel', 0, 1, 0, 0, 512, 512, [], 'rest'), 'the page\'s markup layer still draws');
+  assert.throws(() => mu.updateAnnots('fdel', [{ page: 0, id: T1.id, patch: { contents: 'x' } }]), (e: Error) => !/not bound/.test(e.message), 'the deleted field is not found - no dead field answering');
+  const C1 = w().find((a) => a.field!.name === 'C1')!;
+  mu.setField('fdel', 0, C1.id, 'First option');
+  assert.equal(w().find((a) => a.field!.name === 'C1')!.field!.value, 'First option', 'the others still edit');
+  mu.undo('fdel');
+  mu.undo('fdel');
+  assert.equal(w().length, before, 'undo brings it back');
+  mu.close('fdel');
+});
+
+test('DeepSeek 0.13.2 engine #8: flattening fields takes them off the calculation order too (their values do not stay in the saved file)', () => {
+  // (/CO lists every field of the form, as a form with calculated fields has it)
+  mu.open('fco', formPdf((d) => { const f = d.getTrailer().get('Root', 'AcroForm'); const co = d.newArray(); const fl = f.get('Fields'); for (let k = 0; k < fl.length; k++) co.push(fl.get(k)); f.put('CO', co); }));
+  mu.flatten('fco', null, { widgets: true, types: ['Widget'] });
+  const out = mu.save('fco');
+  const form = new mupdf.PDFDocument(out).getTrailer().get('Root', 'AcroForm');
+  const fields = form.get('Fields'), co = form.get('CO');
+  const inFields = new Set<number>(); for (let k = 0; k < fields.length; k++) inFields.add(fields.get(k).asIndirect());
+  for (let k = 0; k < co.length; k++) assert.ok(inFields.has(co.get(k).asIndirect()), 'every field in /CO is still a field of the form');
+  assert.ok(co.length <= fields.length);
+  assert.ok(!Buffer.from(out).toString('latin1').includes('hello world'), 'the flattened text field\'s value is not left behind in the file as a field value');
+  mu.close('fco');
+});
+
 test('form fields: a radio option\'s own state, export values, multi-select lists, MaxLen, flattening fields without a drawing', () => {
   mu.open('form', formPdf());
   const w = () => mu.annots('form', 0).filter((a) => a.type === 'Widget');
@@ -2473,4 +2505,24 @@ test('pictures to PDF: a memory failure at close, or at the final buffer, gives 
     const r = countPictureOpens(() => mu.picturesToPdf(files, { size: 'picture' }));
     assert.match(String(r.err?.message), tooManyText);
   } finally { bproto.asUint8Array = realAsU8; }
+});
+
+test('text added bold and italic keeps both (sans, serif and mono each have a bold-oblique face)', () => {
+  const want: Record<string, string> = { sans: 'Helvetica-BoldOblique', serif: 'Times-BoldItalic', mono: 'Courier-BoldOblique' };
+  const wantItalic: Record<string, string> = { sans: 'Helvetica-Oblique', serif: 'Times-Italic', mono: 'Courier-Oblique' };
+  const fontsOf = (id: string) => {
+    const d = new mupdf.PDFDocument(mu.save(id));
+    const names: string[] = [];
+    d.countObjects();
+    for (let i = 1; i < d.countObjects(); i++) { const b = d.newIndirect(i, 0).get('BaseFont'); if (b.isName()) names.push(b.asName()); }
+    return names;
+  };
+  for (const fam of ['sans', 'serif', 'mono'] as const) {
+    mu.open('bi-' + fam, blankPdf());
+    mu.addText('bi-' + fam, 0, 'Bold italic', [100, 300], { size: 20, color: [0, 0, 0], bold: true, italic: true, family: fam });
+    assert.ok(fontsOf('bi-' + fam).includes(want[fam]), fam + ' bold italic -> ' + want[fam]);
+    mu.open('i-' + fam, blankPdf());
+    mu.addText('i-' + fam, 0, 'Italic', [100, 300], { size: 20, color: [0, 0, 0], italic: true, family: fam });
+    assert.ok(fontsOf('i-' + fam).includes(wantItalic[fam]), fam + ' italic -> ' + wantItalic[fam]);
+  }
 });

@@ -163,3 +163,19 @@ test('"Reduce size" of a file opened with its password: works with it, stays pro
   assert.equal(back.needsPassword(), true, 'still needs its password');
   assert.ok(back.authenticatePassword('abc'));
 });
+
+test('Numbers & headers: page and Bates numbers are drawn at the size chosen (no 9 pt floor)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/ui/Dialogs.tsx', import.meta.url), 'utf8');
+  const fn = src.slice(src.indexOf('function buildMarks'), src.indexOf('if (f.wm && f.wmText.trim())'));
+  assert.doesNotMatch(fn, /Math\.max\(f\.hfSize/);
+  assert.match(fn, /if \(f\.numbers\) t\(f\.numFormat, f\.numPos\);/);
+  assert.match(fn, /t\('\{bates\}', f\.batesPos, f\.hfSize,/);
+});
+
+test('Bookmarks: a change made while the last one is still being written says so instead of being dropped silently', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/ui/Side.tsx', import.meta.url), 'utf8');
+  const fn = src.slice(src.indexOf('const apply = async (t: OutNode[]'), src.indexOf('working.current = true;'));
+  assert.match(fn, /if \(working\.current\) \{[^}]*p\.toast\(/);
+});

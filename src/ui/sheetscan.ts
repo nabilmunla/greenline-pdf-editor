@@ -93,7 +93,7 @@ export function planSheets(pages: PageToks[]): SheetPlan {
 const plural = (n: number, one: string, many = one + 's') => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`;
 /** "38 pages have no text: OCR them, then run this again." ('' when every page has text) */
 export const noTextLine = (n: number) => (n > 0 ? (n === 1 ? '1 page has no text: OCR it, then run this again.' : `${n.toLocaleString('en-GB')} pages have no text: OCR them, then run this again.`) : '');
-export const NOTHING_FOUND = 'No sheet numbers found. Nothing was changed.';
+export { nothingFoundText } from './sheets';
 
 /** the closing message; the first line says what was written */
 export function doneText(r: { links: number; sheetsWithLinks: number; bookmarks: number; wantLinks: boolean; wantMarks: boolean }, noText: number, dups: string[] = []): string {

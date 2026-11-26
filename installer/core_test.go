@@ -276,7 +276,10 @@ func TestReplaceKeepsOldOnFailure(t *testing.T) {
 	if err == nil || read(t, filepath.Join(dir, "a")) != "old" || fileExists(dir+".new") {
 		t.Error("a failed fill must keep the old folder")
 	}
-	err = replaceDir(dir, func(tmp string) error { os.MkdirAll(tmp, 0o755); return os.WriteFile(filepath.Join(tmp, "b"), []byte("new"), 0o644) }, []string{"a"})
+	err = replaceDir(dir, func(tmp string) error {
+		os.MkdirAll(tmp, 0o755)
+		return os.WriteFile(filepath.Join(tmp, "b"), []byte("new"), 0o644)
+	}, []string{"a"})
 	if err != nil || read(t, filepath.Join(dir, "b")) != "new" || read(t, filepath.Join(dir, "a")) != "old" {
 		t.Errorf("replace with keep: %v", err)
 	}
@@ -633,6 +636,12 @@ func TestEditionsShareTheNamesWindowsKnows(t *testing.T) {
 	has(win, "(?m)^\\s*capsKey\\s*=\\s*`Software\\\\PDF Editor\\\\Capabilities`", "win_windows.go capsKey")
 	has(win, "(?m)^\\s*combineKey\\s*=\\s*`\\\\SystemFileAssociations\\\\\\.pdf\\\\shell\\\\PDFEditor\\.Combine`", "win_windows.go combineKey")
 	has(win, `(?m)^const aumid = "pdfeditor\.app"`, "win_windows.go aumid")
+	// 14.12: "Combine PDFs in this folder" on a folder's right-click - the setup's entry and the app's
+	// per-user copy use the same key; it is added with the file entry and removed with it
+	has(win, "(?m)^\\s*combineFolderKey\\s*=\\s*`\\\\Directory\\\\shell\\\\PDFEditor\\.CombineFolder`", "win_windows.go combineFolderKey")
+	has(win, `add\(setStr\(root, classes\+combineFolderKey\+`+"`\\\\command`"+`, "", `, "win_windows.go combineFolderKey command")
+	has(win, `deleteTree\(root, classes\+combineFolderKey\)`, "win_windows.go removes combineFolderKey")
+	has(src("../electron/main.cjs"), `(?m)^const COMBINE_FOLDER_KEY = '\\\\Directory\\\\shell\\\\PDFEditor\.CombineFolder';`, "main.cjs COMBINE_FOLDER_KEY")
 	// the name under HKCU\Software\RegisteredApplications is appName (not displayName), pointing at capsKey
 	has(win, `setStr\(root, `+"`Software\\\\RegisteredApplications`"+`, appName, capsKey\)`, "win_windows.go RegisteredApplications value name")
 	// the app: user data and local data folders are named by APP; the packed package.json keeps productName
@@ -649,4 +658,34 @@ func TestEditionsShareTheNamesWindowsKnows(t *testing.T) {
 		t.Error("export-public.py changes productName")
 	}
 	has(src("../scripts/pack.py"), `'productName': pkg\['productName'\]`, "pack.py productName")
+}
+
+// DeepSeek 0.13.2 #1: the job the elevated step runs travels on its command line (fixed when
+// Windows asks the person), not in the temp file a program of the same user could rewrite
+// meanwhile; an apply without the package's checksum is refused.
+func TestWorkerJobComesFromItsCommandLine(t *testing.T) {
+	d := t.TempDir()
+	jf := filepath.Join(d, "pdfed-setup-job-1.json")
+	want := Job{Kind: "apply", Dir: `C:\Program Files\PDF Editor`, Zip: `C:\t\app.zip`, Sha: "ab12", Version: "0.14.0"}
+	arg := jobArg(want)
+	// (the temp file rewritten while the prompt is open)
+	if err := writeJSON(jf, Job{Kind: "apply", Dir: want.Dir, Zip: `C:\evil.zip`, Sha: ""}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := workerJob(jf, arg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Zip != want.Zip || got.Sha != want.Sha || got.Dir != want.Dir || got.Kind != want.Kind {
+		t.Fatalf("got %+v, want the command line's %+v", got, want)
+	}
+	if _, err := workerJob(jf, ""); err == nil {
+		t.Fatal("a worker started without its job on the command line must refuse")
+	}
+	if _, err := workerJob(jf, jobArg(Job{Kind: "apply", Dir: want.Dir, Zip: want.Zip})); err == nil {
+		t.Fatal("an apply without the package's checksum must refuse")
+	}
+	if _, err := workerJob(jf, "!!not base64"); err == nil {
+		t.Fatal("garbage must refuse")
+	}
 }

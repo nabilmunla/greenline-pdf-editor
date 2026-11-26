@@ -12,6 +12,8 @@ import { analyzePage, markRunning } from '../src/engine/convert/analyze';
 import { parseNumber, fixOcrNumber } from '../src/engine/convert/text';
 import { readingOrder } from '../src/engine/convert/rows';
 import type { Glyph } from '../src/engine/convert/model';
+import { joinTables } from '../src/engine/convert/toWord';
+import type { Table } from '../src/engine/convert/tables';
 
 const T = (f: string, s: number, x: number, y: number, t: string) => `BT /${f} ${s} Tf ${x} ${y} Td (${t}) Tj ET `;
 function pdf(pages: ((d: mupdf.PDFDocument, f: { F1: unknown; F2: unknown }) => string)[], w = 595, h = 842): mupdf.Document {
@@ -314,4 +316,81 @@ test('one bill with its page number in the running header stays one sheet', () =
   for (let i = 0; i < j.count(); i++) j.read(i);
   const wb = strFromU8(unzipSync(j.finish())['xl/workbook.xml']);
   assert.equal((wb.match(/<sheet /g) || []).length, 1, wb);
+});
+
+test('Word: a vector figure on a page printed sideways is cut from the right spot', () => {
+  // a portrait page whose text runs up the sheet (so it is read turned) with a red triangle near the
+  // top-right; the picture put in the .docx has to show the triangle, not the blank page beside it
+  // (up the sheet and down the sheet: two different turns)
+  for (const [tm, y0] of [['0 1 -1 0', 150], ['0 -1 1 0', 650]] as const) {
+  const d = new mupdf.PDFDocument();
+  const F1 = d.addSimpleFont(new mupdf.Font('Helvetica'));
+  let c = '1 0 0 rg 420 700 m 520 700 l 470 790 l f 0 g ';
+  for (let k = 0; k < 24; k++) c += `BT /F1 10 Tf ${tm} ${80 + k * 14} ${y0} Tm (Sideways words number ${k}) Tj ET `;
+  d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, d.addObject({ Font: { F1 } }), c));
+  const doc = mupdf.Document.openDocument(d.saveToBuffer('').asUint8Array().slice(), 'application/pdf');
+  const j = new ExportJob(doc, { format: 'docx' });
+  j.read(0);
+  assert.ok(j.pages[0].turned, 'the page was read turned');
+  const z = unzipSync(j.finish());
+  const png = Object.keys(z).filter((k) => /^word\/media\/.*\.png$/.test(k));
+  assert.equal(png.length, 1, 'one figure picture');
+  const img = new mupdf.Image(z[png[0]]);
+  const px = img.toPixmap();
+  const n = px.getNumberOfComponents(), data = px.getPixels();
+  let red = 0;
+  for (let i = 0; i < data.length; i += n) if (data[i] > 200 && data[i + 1] < 80 && data[i + 2] < 80) red++;
+  assert.ok(red > (px.getWidth() * px.getHeight()) * 0.25, 'the picture is the triangle, text matrix ' + tm + ' (red share ' + (red / (px.getWidth() * px.getHeight())).toFixed(2) + ')');
+  }
+});
+
+test('Word: a table carried over a page break leaves out the repeated header even when OCR read it differently', () => {
+  const mk = (rows: { head?: boolean; kind?: 'heading'; text: string[] }[]): Table => ({
+    box: [50, 100, 560, 700], xs: [50, 300, 560], size: 9, page: 0, ruled: 'grid',
+    rows: rows.map((r, k) => ({ y0: 100 + k * 20, y1: 118 + k * 20, head: r.head, kind: r.kind })),
+    cells: rows.flatMap((r, k) => r.text.map((t, c) => ({ r: k, c, rs: 1, cs: 1, words: [{ text: t } as never], lines: [], bd: [1, 1, 1, 1] as [number, number, number, number] }))),
+  });
+  const rowsOf = (t: Table) => t.rows.map((_, r) => t.cells.filter((c) => c.r === r).map((c) => c.words[0].text).join('|'));
+  const a = mk([{ head: true, text: ['ITEM DESCRIPTION', 'AMOUNT'] }, { text: ['1 Excavation', '100.00'] }]);
+  // OCR read the heading a little differently, with a "(CONT'D)" line above it
+  const b = mk([{ kind: 'heading', text: ["BILL 2 (CONT'D)", ''] }, { head: true, text: ['ITEM DESCRlPTION', 'AMOUNT'] }, { text: ['2 Backfill', '200.00'] }]);
+  assert.deepEqual(rowsOf(joinTables(a, b)), ['ITEM DESCRIPTION|AMOUNT', '1 Excavation|100.00', '2 Backfill|200.00']);
+  // exactly the same heading still goes; a data row that is not like the heading stays
+  const c = mk([{ head: true, text: ['ITEM DESCRIPTION', 'AMOUNT'] }, { text: ['3 Concrete', '300.00'] }]);
+  assert.deepEqual(rowsOf(joinTables(a, c)), ['ITEM DESCRIPTION|AMOUNT', '1 Excavation|100.00', '3 Concrete|300.00']);
+});
+
+test('Word: the page total in another font than the page number still becomes a NUMPAGES field', () => {
+  const doc = pdf([1, 2].map((n) => () => {
+    let c = T('F1', 9, 50, 810, 'Tender Addendum No. 2') + T('F1', 8, 280, 30, `Page ${n} of`) + T('F2', 8, 280 + 40, 30, '2');
+    c += T('F2', 16, 50, 760, n === 1 ? 'GENERAL NOTES' : 'MORE NOTES');
+    for (let k = 0; k < 6; k++) c += T('F1', 10, 50, 730 - k * 13, `This is line ${k + 1} of the paragraph on page ${n}, it runs on.`);
+    return c;
+  }));
+  const j = new ExportJob(doc, { format: 'docx', title: 'notes' });
+  for (let i = 0; i < j.count(); i++) j.read(i);
+  const z = unzipSync(j.finish());
+  const footer = strFromU8(z[Object.keys(z).find((k) => /word\/footer\d\.xml/.test(k))!]);
+  assert.ok(footer.includes('PAGE'), 'page number field');
+  assert.ok(footer.includes('NUMPAGES'), 'total field');
+});
+
+test('Word: a figure on a sheet bigger than Word\'s page (A0) is cut from the right spot', () => {
+  // (Word's page is at most 22 in: the sheet's model is scaled down, the picture is cut from the real sheet)
+  const d = new mupdf.PDFDocument();
+  const F1 = d.addSimpleFont(new mupdf.Font('Helvetica'));
+  let c = '1 0 0 rg 1800 2600 m 2300 2600 l 2050 3100 l f 0 g ';
+  for (let k = 0; k < 24; k++) c += `BT /F1 30 Tf 200 ${2900 - k * 60} Td (Plain words on a big sheet number ${k}) Tj ET `;
+  d.insertPage(-1, d.addPage([0, 0, 2384, 3370], 0, d.addObject({ Font: { F1 } }), c));
+  const doc = mupdf.Document.openDocument(d.saveToBuffer('').asUint8Array().slice(), 'application/pdf');
+  const j = new ExportJob(doc, { format: 'docx' });
+  j.read(0);
+  const z = unzipSync(j.finish());
+  const png = Object.keys(z).filter((k) => /^word\/media\/.*\.png$/.test(k));
+  assert.equal(png.length, 1, 'one figure picture: ' + Object.keys(z).join(', '));
+  const px = new mupdf.Image(z[png[0]]).toPixmap();
+  const n = px.getNumberOfComponents(), data = px.getPixels();
+  let red = 0;
+  for (let i = 0; i < data.length; i += n) if (data[i] > 200 && data[i + 1] < 80 && data[i + 2] < 80) red++;
+  assert.ok(red > px.getWidth() * px.getHeight() * 0.25, 'the picture is the triangle (red share ' + (red / (px.getWidth() * px.getHeight())).toFixed(2) + ')');
 });

@@ -19,6 +19,39 @@ export function parseRanges(s: string, n: number): number[] {
   return out;
 }
 
+export type PickWhich = 'all' | 'current' | 'view' | 'area' | 'selected' | 'range';
+export type PickSubset = 'all' | 'odd' | 'even';
+
+/**
+ * The pages a page picker choice means (Print, Search, Rotate), zero-based, in page order (for
+ * "Pages…": in the order typed). Odd / even (page numbers, so page 1 is odd) apply to all, selected and
+ * typed pages - never to the one page on screen.
+ */
+export function pickPages(o: { which: PickWhich; range: string; subset: PickSubset; n: number; current: number; selected: number[] }): number[] {
+  const { which, n } = o;
+  let l: number[];
+  if (which === 'all') l = [...Array(Math.max(0, n)).keys()];
+  else if (which === 'current' || which === 'view' || which === 'area') return [o.current];
+  else if (which === 'selected') l = [...o.selected].sort((a, b) => a - b);
+  else l = parseRanges(o.range, n);
+  if (o.subset === 'odd') l = l.filter((i) => i % 2 === 0);
+  if (o.subset === 'even') l = l.filter((i) => i % 2 === 1);
+  return l;
+}
+
+/** pages (zero-based) as runs of consecutive pages [from, to), at most `max` each - what the
+ *  engine's find takes (search in chosen pages, 14.2) */
+export function piecesOf(pages: number[], max = 40): [number, number][] {
+  const a = [...new Set(pages)].sort((x, y) => x - y);
+  const out: [number, number][] = [];
+  for (const p of a) {
+    const last = out[out.length - 1];
+    if (last && last[1] === p && last[1] - last[0] < max) last[1] = p + 1;
+    else out.push([p, p + 1]);
+  }
+  return out;
+}
+
 /** [0,1,2,5] -> "1-3, 6" */
 export const toRanges = (ps: number[]) => {
   const a = [...new Set(ps)].sort((x, y) => x - y), out: string[] = [];

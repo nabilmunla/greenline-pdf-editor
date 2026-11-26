@@ -10,6 +10,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -265,15 +267,44 @@ func runJob(p *Payload, j Job, prog progressFn) error {
 	return fmt.Errorf("unknown job %q", j.Kind)
 }
 
-// runWorker is the elevated side: does the job, reports progress and the result in files.
-func runWorker(p *Payload, jobFile string) int {
+// jobArg is the job as the elevated step's command line carries it. The command line is fixed when
+// Windows asks the person; the temp folder's job file could be rewritten by any program of the same
+// user while the prompt is open - its package then installed with admin rights (DeepSeek 0.13.2 #1).
+func jobArg(j Job) string {
+	b, _ := json.Marshal(j)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// workerJob is the job the elevated step runs: its command line's, never the file's (the file's
+// name only says where progress and the result go).
+func workerJob(jobFile, arg string) (Job, error) {
 	var j Job
-	if err := readJSON(jobFile, &j); err != nil {
+	if arg == "" {
+		return j, fmt.Errorf("no job on the command line (%s not trusted)", filepath.Base(jobFile))
+	}
+	b, err := base64.RawURLEncoding.DecodeString(arg)
+	if err != nil {
+		return j, fmt.Errorf("job: %v", err)
+	}
+	if err := json.Unmarshal(b, &j); err != nil {
+		return j, fmt.Errorf("job: %v", err)
+	}
+	// (the package is checked against this with admin rights - an apply without it is not run)
+	if j.Kind == "apply" && j.Sha == "" {
+		return j, errors.New("job: an update without its package's checksum")
+	}
+	return j, nil
+}
+
+// runWorker is the elevated side: does the job, reports progress and the result in files.
+func runWorker(p *Payload, jobFile, arg string) int {
+	j, err := workerJob(jobFile, arg)
+	if err != nil {
 		logf("worker: %v", err)
 		return 2
 	}
 	progFile := jobFile + ".progress"
-	err := runJob(p, j, func(pct float64, stage string) {
+	err = runJob(p, j, func(pct float64, stage string) {
 		_ = os.WriteFile(progFile, []byte(fmt.Sprintf("%.4f|%s", pct, stage)), 0o644)
 	})
 	res := jobResult{OK: err == nil}
@@ -331,6 +362,7 @@ func main() {
 		wait      = fs.Int("wait", 0, "")
 		relaunch  = fs.Bool("relaunch", false, "")
 		worker    = fs.String("worker", "", "")
+		jobB64    = fs.String("job", "", "")
 		tempCopy  = fs.Bool("temp-copy", false, "")
 		plain     = fs.Bool("plain", false, "")
 	)
@@ -342,7 +374,7 @@ func main() {
 	cleanTemp(self)
 	switch {
 	case *worker != "":
-		os.Exit(runWorker(p, *worker))
+		os.Exit(runWorker(p, *worker, *jobB64))
 	case *apply != "":
 		os.Exit(cmdApply(p, *apply, *sha, *ver, *dir, *wait, *relaunch))
 	case *rollback:

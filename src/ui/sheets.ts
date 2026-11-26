@@ -471,3 +471,12 @@ export async function unlessStopped(work: Promise<void>, stopped: () => boolean)
   try { await Promise.race([work, new Promise<void>((r) => { t = setInterval(() => { if (stopped()) r(); }, 200); })]); }
   finally { clearInterval(t); }
 }
+
+/** Link the sheets found no sheet numbers: why, in plain words (14.6 - "No sheet numbers found"
+ *  alone left people guessing on a small set) */
+export function nothingFoundText(o: { pages: number; withText: number }): string {
+  if (o.pages <= 1) return 'This file has only one page, so there is nothing to link to. Nothing was changed.';
+  // (the line after it says the pages have no text and to OCR them)
+  if (o.withText === 0) return 'No sheet numbers found. Nothing was changed.';
+  return "No sheet numbers found. Link the sheets looks for a sheet number such as A-101 in each sheet's title block (the box at the bottom or right of a drawing). Nothing was changed.";
+}

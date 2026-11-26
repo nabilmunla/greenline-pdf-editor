@@ -29,3 +29,10 @@ test('(review) and refuses a file open in another tab too', () => {
   const dlg = readFileSync(new URL('../src/ui/Dialogs.tsx', import.meta.url), 'utf8');
   assert.match(dlg, /<PrintDlg [^>]*openPaths=\{/, 'Dialogs passes the open tabs');
 });
+
+test('Print › cancelling Save as PDF says the PDF was stopped, not the print', () => {
+  const src = readFileSync(new URL('../src/ui/PrintDlg.tsx', import.meta.url), 'utf8');
+  const fn = src.slice(src.indexOf('const savePdf = async'), src.indexOf('gcc.commit(m.path, to)'));
+  assert.doesNotMatch(fn, /The print was stopped/);
+  assert.match(fn, /Saving the PDF was stopped\./);
+});

@@ -115,6 +115,8 @@ interface Props {
   /** an area marked with the Snapshot tool: shown (dashed) until unmarked - right-click it to print, copy or save it */
   marked?: { page: number; rect: Rect } | null;
   wheelZoom: boolean;
+  /** a faint mark on every link (on screen only) - 14.5 */
+  linkMarks?: boolean;
   keepTool: boolean;
   sel: SelItem[];
   setSel(s: SelItem[]): void;
@@ -190,6 +192,8 @@ export function Viewer(props: Props) {
   const annotsNow = useRef(annots);
   annotsNow.current = annots;
   const [links, setLinks] = useState<Record<number, { rect: number[]; url?: string; page?: number; view?: LinkView }[]>>({});
+  /** the link under the pointer (its mark gets stronger and underlined) */
+  const [linkHover, setLinkHover] = useState<{ page: number; i: number } | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [textSel, setTextSel] = useState<{ page: number; a: number; b: number } | null>(null);
@@ -1927,7 +1931,9 @@ export function Viewer(props: Props) {
     const hovering = tool === 'select' ? hitList(annots[page] || [], p, 5 / z) : null;
     const hv = hovering && !editor && !props.sel.some((x) => x.id === hovering.id) ? { page, id: hovering.id } : null;
     if ((hv?.id ?? -1) !== (hover?.id ?? -1)) setHover(hv);
-    const overLink = (tool === 'select' || tool === 'hand') && !hovering && (links[page] || []).some((x) => inRect(p, x.rect as Rect));
+    const li = (tool === 'select' || tool === 'hand') && !hovering ? (links[page] || []).findIndex((x) => inRect(p, x.rect as Rect)) : -1;
+    const overLink = li >= 0;
+    if ((linkHover?.page ?? -1) !== (overLink ? page : -1) || (linkHover?.i ?? -1) !== li) setLinkHover(overLink ? { page, i: li } : null);
     el.dataset.cursor = space ? 'grab' : tool === 'hand' ? (overLink ? 'pointer' : 'grab') : overLink ? 'pointer' : hovering ? (hovering.type === 'Widget' ? 'text' : hovering.locked ? 'default' : NO_MOVE.has(hovering.type, hovering) ? 'pointer' : 'move') : tool === 'select' ? 'auto' : tool === 'edit-text' ? 'text' : 'crosshair';
     if (tool === 'select' && !space && edgeAt(page, p)) { el.dataset.cursor = 'col-resize'; return; }
     if (tool === 'select' && !hovering && !overLink) {
@@ -2569,6 +2575,20 @@ export function Viewer(props: Props) {
     const k = (s: string) => page + ':' + s;
     // the Link tool: every link on the page shown (to click and change)
     if (props.tool === 'link') (links[page] || []).forEach((l, i) => out.push(<rect key={k('lk' + i)} x={l.rect[0]} y={l.rect[1]} width={l.rect[2] - l.rect[0]} height={l.rect[3] - l.rect[1]} className="linkbox" style={{ strokeWidth: 1.5 * sw }}><title>{l.url || (l.page != null && l.page >= 0 ? 'Page ' + (l.page + 1) : '')}</title></rect>));
+    // every other time: a faint mark on each link, so linked and plain text can be told apart -
+    // all of a page's links in ONE path (a drawing set can hold thousands); the link under the
+    // pointer a little stronger, underlined. On screen only: never printed or saved (14.5)
+    else if (props.linkMarks !== false && (links[page] || []).length) {
+      const ls = links[page]!;
+      let d = '';
+      for (const l of ls) d += `M${l.rect[0]} ${l.rect[1]}H${l.rect[2]}V${l.rect[3]}H${l.rect[0]}Z`;
+      out.push(<path key={k('lm')} d={d} className="linkmark" />);
+      const h = linkHover && linkHover.page === page ? ls[linkHover.i] : null;
+      if (h) {
+        out.push(<rect key={k('lmh')} x={h.rect[0]} y={h.rect[1]} width={h.rect[2] - h.rect[0]} height={h.rect[3] - h.rect[1]} className="linkhover" />);
+        out.push(<line key={k('lmu')} x1={h.rect[0]} x2={h.rect[2]} y1={h.rect[3]} y2={h.rect[3]} className="linkunder" strokeWidth={1.2 * sw} />);
+      }
+    }
     // search hits
     props.hits.forEach((h, i) => {
       if (h.page !== page) return;

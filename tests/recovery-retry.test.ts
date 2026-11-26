@@ -134,3 +134,23 @@ test('F47 (review): a change made while a copy is being written gets a copy of i
     assert.equal(writes, 2, 'the change made during the write is copied too');
   } finally { mock.timers.reset(); }
 });
+
+test('DeepSeek 0.13.2 #5: a recovery copy that finishes after a save does not become the tab\'s reopen source', async () => {
+  let release: (v: unknown) => void = () => {};
+  stub(editor, {
+    open: () => ({ pages: [page(0)], needsPassword: false, repaired: false, hasForms: false, size: 100, look: true }),
+    getData: () => ({}), history: () => ({ undo: [], redo: [] }), close: () => true, noteChange: () => true,
+    heavyCandidates: () => ({ candidates: [], shown: [] }), sourceOf: () => ({ path: '/doc.pdf' }),
+    writeRecovery: () => new Promise((r) => { release = r; }),
+  });
+  const d = new PdfDoc('/doc.pdf');
+  await d.load({ path: '/doc.pdf' });
+  (d as unknown as { changed(): void }).changed();
+  const writing = d.writeRecoveryNow();                    // the copy starts (a big file: slow)
+  await settle();
+  await (d as unknown as { savedClean(): Promise<void> }).savedClean(); // Ctrl+S lands meanwhile
+  release({ base: null });                                 // then the copy finishes
+  await writing;
+  assert.equal(d.lastRecovery, null, 'the pre-save copy is not what a restarted engine reopens');
+  assert.ok(cleared.filter((k) => k === d.id).length >= 2, 'and the copy written after the save is cleared away too');
+});

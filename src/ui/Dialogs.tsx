@@ -4,7 +4,7 @@ import { NumIn } from './numin';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, type Toast } from './Modal';
 import { Ico } from './icons';
-import { gcc, baseName, dirName, joinPath, type AppInfo } from './api';
+import { gcc, baseName, dirName, joinPath, type AppInfo, type GatherResult } from './api';
 import { mu, muBatch, muBatchCancel, muBatchFile, renderers, onEngineRestart } from './engines';
 import { fileArg, type FileRef } from '../engine/rpc';
 import { orientScale, type PdfDoc, type Scale, type Viewport } from './doc';
@@ -17,7 +17,9 @@ import { css, hex, fromHex, PALETTE, toolStyle } from './tools';
 import { writeXlsx } from './xlsxwrite';
 import { excelCell } from './table';
 import { ocrPages, ocrLangOf, type OcrLang } from './ocr';
-import { parseRanges, toRanges, planOutputs, uniqueNames, typedNumber, pdfDate, type OutMode, type OutPlan } from './dlgutil';
+import { parseRanges, toRanges, planOutputs, uniqueNames, typedNumber, pdfDate, pickPages, type OutMode, type OutPlan, type PickWhich, type PickSubset } from './dlgutil';
+import { PagePick } from './PagePick';
+import { fromFiles, fromGather, addFiles, addFolder, filePaths, hasFolders, sortTree, flatten, moveNode, removeNode, findNode, visibleRows, nameCompare, type MFolder, type MRow, type SortBy } from './mergetree';
 import { CountDlg, PrivacyRow } from './Count';
 import { MovedDlg } from './Moved';
 import { UpdatesSection, ReportsRow, WhatsNew, notesOf, noteVersions } from './Updates';
@@ -27,7 +29,7 @@ import { ExportDlg, exportArea } from './ExportDlg';
 import { AiKeysDialog } from './AiPanel';
 import type { PageMark, StampDesign, RGB, Rect } from '../engine/mu';
 import { APP_NAME } from './brand';
-import { scanPages, planSheets, doneText, noTextLine, NOTHING_FOUND } from './sheetscan';
+import { scanPages, planSheets, doneText, noTextLine, nothingFoundText } from './sheetscan';
 import { dupLine } from './sheets';
 
 interface Props {
@@ -61,9 +63,10 @@ export function Dialogs(p: Props) {
     case 'stamps': return <StampsDlg {...p} scan0={d.scan} />;
     case 'copypages': return <CopyPagesDlg {...p} items={d.items} />;
     case 'signature': return <SignatureDlg {...p} />;
-    case 'merge': return <MergeDlg key={(d.files || []).join('|')} {...p} files={d.files} />;
+    case 'merge': return <MergeDlg key={(d.files || []).join('|') + '|' + (d.trees || []).map((t) => t.root).join('|')} {...p} files={d.files} trees={d.trees} />;
     case 'split': return <SplitDlg {...p} />;
     case 'extract': return <ExtractDlg {...p} />;
+    case 'rotate': return p.doc ? <RotateDlg {...p} /> : null;
     case 'toPictures': return p.doc ? <ToPicturesDlg {...p} /> : null;
     case 'link': return p.doc ? <LinkDlg {...p} page={d.page} rect={d.rect} edit={d.edit} /> : null;
     case 'fromPictures': return <FromPicturesDlg {...p} files={d.files} />;
@@ -187,7 +190,8 @@ const planFor = (p: Props, files: string[], mode: OutMode, suffix: string, folde
  *  the originals" backs up): asked once, for all of them, before anything is written */
 async function okToReplace(targets: string[]): Promise<boolean> {
   const there: string[] = [];
-  for (const t of targets) if (await gcc.exists(t).catch(() => false)) there.push(t);
+  // (a place the app may not look at reads as "there": asked, never replaced unasked)
+  for (const t of targets) if (await gcc.exists(t).catch(() => true)) there.push(t);
   if (!there.length) return true;
   const r = await gcc.confirm({
     message: there.length === 1 ? `“${baseName(there[0])}” is already there` : `${there.length} of the new files are already there`,
@@ -733,36 +737,72 @@ function SignatureDlg(p: Props) {
 
 // ---------------------------------------------------------------- merge
 
-function MergeDlg(p: Props & { files?: string[] }) {
-  // (from Explorer's Combine: those files; otherwise the files open now)
-  const [files, setFiles] = useState<string[]>(() => p.files?.length ? p.files : p.docs.filter((d) => d.path).map((d) => d.path!));
+function MergeDlg(p: Props & { files?: string[]; trees?: GatherResult[] }) {
+  // (from Explorer's Combine: those files and folders; otherwise the files open now)
+  const [tree, setTree] = useState<MFolder>(() => {
+    const given = !!(p.files?.length || p.trees?.length);
+    // (one folder alone: its contents at the top - the folder itself is the whole job)
+    if (!p.files?.length && p.trees?.length === 1) return fromGather(p.trees[0].tree);
+    let t = fromFiles(given ? p.files || [] : p.docs.filter((d) => d.path).map((d) => d.path!));
+    for (const g of p.trees || []) t = addFolder(t, g.tree);
+    return t;
+  });
+  const files = useMemo(() => filePaths(tree), [tree]);
+  const folders = hasFolders(tree);
+  const [folded, setFolded] = useState<Set<string>>(() => new Set());
+  const [sortBy, setSortBy] = useState<SortBy | ''>('');
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [marks, setMarks] = useState(true);
   /** a merge under way: the list can't change under it (files added then were left out, silently) */
   const busyRef = useRef(false);
   const later = (n: number) => p.toast(`${n} file${n === 1 ? '' : 's'} not added – a merge is running. Add ${n === 1 ? 'it' : 'them'} when it has finished.`, 'info', undefined, 7000);
-  useDropFiles((f) => { if (busyRef.current) { later(f.length); return; } setFiles((x) => [...x, ...f.filter((y) => !x.includes(y))]); }, undefined, (t) => p.toast(t, 'info', undefined, 7000));
-  // more files from Explorer's Combine while this is open (the rest of a selection on a slow PC):
-  // a list still in name order stays in name order, one put in an order of its own gets them at
-  // the end
+  const sayCapped = (gs: GatherResult[]) => {
+    const capped = gs.filter((g) => g.capped), unread = gs.reduce((n, g) => n + g.unreadable.length, 0);
+    if (capped.length) p.toast(`Only the first ${MAX_GATHER.toLocaleString('en-GB')} PDFs of a folder were taken (or it went more than 32 folders deep) – combine its sub-folders one at a time for the rest.`, 'info', undefined, 12000);
+    if (unread) p.toast(`${unread} folder${unread === 1 ? '' : 's'} could not be read and ${unread === 1 ? 'was' : 'were'} left out.`, 'info', undefined, 9000);
+  };
+  useEffect(() => { if (p.trees?.length) sayCapped(p.trees); }, []);
+  useDropFiles((f) => { if (busyRef.current) { later(f.length); return; } setTree((t) => addFiles(t, f)); setSortBy(''); }, undefined, (t) => p.toast(t, 'info', undefined, 7000));
+  // more files (and folders) from Explorer's Combine while this is open: at the end of the list
   useEffect(() => {
-    const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-    const byName = (l: string[]) => l.slice().sort((a, b) => coll.compare(baseName(a), baseName(b)) || coll.compare(a, b));
     const add = (e: Event) => {
       e.preventDefault(); // (heard: App doesn't send them again)
-      const f = (e as CustomEvent<string[]>).detail || [];
-      if (busyRef.current) { later(f.length); return; }
-      setFiles((x) => {
-        const l = [...x, ...f.filter((y, i) => !x.includes(y) && f.indexOf(y) === i)];
-        return byName(x).every((y, i) => y === x[i]) ? byName(l) : l;
+      const d = (e as CustomEvent<string[] | { files: string[]; trees: GatherResult[] }>).detail;
+      const f = Array.isArray(d) ? d : d?.files || [];
+      const ts = Array.isArray(d) ? [] : d?.trees || [];
+      if (busyRef.current) { later(f.length + ts.reduce((n, g) => n + g.count, 0)); return; }
+      setTree((t) => {
+        // (a flat list still in name order stays in name order; anything else gets them at the end)
+        const inOrder = !hasFolders(t) && files.every((x, i, a) => i === 0 || nameCompare(baseName(a[i - 1]), baseName(x)) <= 0);
+        let n = addFiles(t, f);
+        if (inOrder && !ts.length) n = sortTree(n, 'name');
+        for (const g of ts) n = addFolder(n, g.tree);
+        return n;
       });
+      if (ts.length) sayCapped(ts);
     };
     window.addEventListener('gcc-merge-add', add);
     return () => window.removeEventListener('gcc-merge-add', add);
-  }, []);
+  }, [files]);
   useEffect(() => {
     for (const f of files) if (counts[f] == null) void muBatch<number>('pageCountOf', fileArg(f)).then((n) => setCounts((c) => ({ ...c, [f]: n }))).catch((e) => setCounts((c) => ({ ...c, [f]: /\d GB or more/.test(String((e as Error)?.message)) ? -3 : -2 })));
   }, [files]);
+  const addFolderPicked = async () => {
+    const d = await gcc.dirDialog({ title: 'Choose a folder – its PDFs and those in its sub-folders' });
+    if (!d) return;
+    const g = await gcc.gatherFolder(d);
+    if (!g) { p.toast('That folder could not be read.', 'err'); return; }
+    if (!g.count) { p.toast('No PDFs in that folder (or in its sub-folders).', 'info'); return; }
+    if (busyRef.current) { later(g.count); return; }
+    setTree((t) => addFolder(t, g.tree));
+    sayCapped([g]);
+  };
+  const sortNow = async (by: SortBy | '') => {
+    setSortBy(by);
+    if (!by) return;
+    const dates = by === 'date' ? new Map(Object.entries(await gcc.fileTimes(files))) : undefined;
+    setTree((t) => sortTree(t, by, dates));
+  };
   // the merge runs a file at a time (the engine writes the result to disk as it goes - a big set
   // of volumes no longer runs it out of memory), with its progress here and a Stop
   const [run, setRun] = useState<{ k: number; name: string; pages: number; phase: 'file' | 'write' | 'open' } | null>(null);
@@ -777,14 +817,15 @@ function MergeDlg(p: Props & { files?: string[] }) {
     const job = 'merge-' + Date.now().toString(36);
     jobRef.current = job;
     const temps: string[] = [];
-    const list = files.slice();
+    // (each file with the folders above it: its bookmark goes under theirs - 14.11)
+    const list = flatten(tree);
     let done = 0;
-    setRun({ k: 0, name: baseName(list[0]), pages: 0, phase: 'file' });
+    setRun({ k: 0, name: baseName(list[0].path), pages: 0, phase: 'file' });
     try {
       await muBatch('mergeBegin', job);
       for (let k = 0; k < list.length; k++) {
         if (stop.current) break;
-        const f = list[k];
+        const f = list[k].path;
         setRun({ k, name: baseName(f), pages: done, phase: 'file' });
         // a file open here with unsaved changes goes in as it is now (its markups and marks), not
         // as on disk; a protected one as an unprotected copy (from disk, or still locked, the
@@ -794,7 +835,7 @@ function MergeDlg(p: Props & { files?: string[] }) {
         if (open) temps.push(src);
         let r: { pages: number; total: number };
         // (Stop made the engine give up inside this file: "The merge was stopped." - not an error)
-        try { r = await muBatch<{ pages: number; total: number }>('mergeAdd', job, baseName(f), fileArg(src)); } catch (e) { if (stop.current) break; throw e; }
+        try { r = await muBatch<{ pages: number; total: number }>('mergeAdd', job, baseName(f), fileArg(src), undefined, list[k].group.length ? list[k].group : undefined); } catch (e) { if (stop.current) break; throw e; }
         done = r.total;
       }
       if (stop.current) { void muBatch('mergeEnd', job).catch(() => {}); p.toast('Merge stopped – no file was made.', 'info'); return; }
@@ -836,22 +877,101 @@ function MergeDlg(p: Props & { files?: string[] }) {
   busyRef.current = !!run;
   // (a click beside the dialog or Escape never stops a merge under way - Stop does)
   const close = () => { if (run) return; stop.current = true; p.setDialog(null); };
+  const extra = (f: string) => <span className={(counts[f] ?? 0) < 0 ? 'err' : 'faint'}>{counts[f] == null ? '…' : counts[f] === -1 ? 'password' : counts[f] < 0 ? 'unreadable' : counts[f] + ' p'}</span>;
   return (
-    <Modal title="Merge files" wide onClose={close} sub="In this order, into one new PDF (opens in a new tab). Markups come along."
-      actions={<><label className="check" style={{ marginRight: 'auto' }}><input type="checkbox" checked={marks} disabled={!!run} onChange={(e) => setMarks(e.target.checked)} /> A bookmark for each file</label>
+    <Modal title="Merge files" wide onClose={close} sub={folders ? 'In this order, into one new PDF (opens in a new tab). Drag a folder to move it with everything in it. Markups come along.' : 'In this order, into one new PDF (opens in a new tab). Markups come along.'}
+      actions={<><label className="check" style={{ marginRight: 'auto' }}><input type="checkbox" checked={marks} disabled={!!run} onChange={(e) => setMarks(e.target.checked)} /> {folders ? 'Bookmarks for each folder and file' : 'A bookmark for each file'}</label>
         {run
           ? <button className="btn" onClick={() => { stop.current = true; if (jobRef.current) muBatchCancel(jobRef.current); }} disabled={run.phase !== 'file'}>Stop</button>
           : <button className="btn" onClick={close}>Cancel</button>}
         <button className="btn primary" disabled={!!run || files.length < 2 || bad.length > 0} onClick={() => void go()}>{run ? 'Merging…' : `Merge ${files.length} ${files.length === 1 ? 'file' : 'files'} (${total} pages)`}</button></>}>
-      {bad.length > 0 && <p className="err">{bad.map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is too big for ' + APP_NAME + ' (4 GB or more)' : "can't be read as a PDF"}`).join('; ')}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}
+      {bad.length > 0 && <p className="err">{bad.slice(0, 8).map((f) => `“${baseName(f)}” ${counts[f] === -1 ? 'needs a password to open (open it, Protect > Remove password, save, then merge)' : counts[f] === -3 ? 'is too big for ' + APP_NAME + ' (4 GB or more)' : "can't be read as a PDF"}`).join('; ')}{bad.length > 8 ? ` and ${bad.length - 8} more` : ''}. Remove {bad.length === 1 ? 'it' : 'them'} (×) to merge the rest.</p>}
       {run && (
         <div className="mprog">
           <div className="bar"><i style={{ width: `${Math.round(((run.phase === 'file' ? run.k : files.length) + (run.phase === 'open' ? 1 : run.phase === 'write' ? 0.5 : 0)) / (files.length + 1) * 100)}%` }} /></div>
           <div className="faint">{run.phase === 'file' ? `File ${run.k + 1} of ${files.length}: ${run.name}${run.pages ? ` – ${run.pages.toLocaleString('en-GB')} pages so far` : ''}…` : run.phase === 'write' ? `Writing the merged file (${run.pages.toLocaleString('en-GB')} pages)…` : 'Opening it…'}</div>
         </div>
       )}
-      <FileList files={files} setFiles={setFiles} locked={!!run} extra={(f) => <span className={(counts[f] ?? 0) < 0 ? 'err' : 'faint'}>{counts[f] == null ? '…' : counts[f] === -1 ? 'password' : counts[f] < 0 ? 'unreadable' : counts[f] + ' p'}</span>} />
+      <div className="flist">
+        <div className="flist-tools">
+          <button className="btn sm" disabled={!!run} onClick={async () => { const f = await pickPdfs(); if (f.length) { setTree((t) => addFiles(t, f)); setSortBy(''); } }}><Ico n="plus" size={14} /> Add files</button>
+          <button className="btn sm" disabled={!!run} onClick={() => void addFolderPicked().catch(p.fail)} title="A folder and its sub-folders: kept as folders here, and as bookmarks in the merged file"><Ico n="folder" size={14} /> Add folder</button>
+          <label className="faint sm">Sort by <select className="input sm" disabled={!!run || files.length < 2} value={sortBy} onChange={(e) => void sortNow(e.target.value as SortBy | '').catch(p.fail)}>
+            <option value="">(your order)</option><option value="name">Name</option><option value="date">Date modified</option>{folders && <option value="found">As in the folders</option>}
+          </select></label>
+          <span className="grow" />
+          <span className="faint">{files.length} file{files.length === 1 ? '' : 's'}</span>
+          {files.length > 0 && <button className="btn sm ghost" disabled={!!run} onClick={() => { setTree(fromFiles([])); setSortBy(''); }}>Clear</button>}
+        </div>
+        <MergeRows tree={tree} setTree={(t) => { setTree(t); setSortBy(''); }} folded={folded} setFolded={setFolded} locked={!!run} extra={extra} />
+      </div>
     </Modal>
+  );
+}
+
+/** most PDFs one folder gives (electron/gather.cjs) */
+const MAX_GATHER = 5000;
+/** the Combine list as rows: folders fold and move whole (drag, or ↑ ↓), files move within and
+ *  between folders; past 300 rows only the rows in view are made (a folder of thousands) */
+function MergeRows({ tree, setTree, folded, setFolded, locked, extra }: { tree: MFolder; setTree(t: MFolder): void; folded: Set<string>; setFolded(f: Set<string>): void; locked: boolean; extra(f: string): React.ReactNode }) {
+  const rows = useMemo(() => visibleRows(tree, folded), [tree, folded]);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [over, setOver] = useState<{ id: string; into: boolean } | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const [top, setTop] = useState(0);
+  const ROW = 30, many = rows.length > 300;
+  const viewH = box.current?.clientHeight || 420;
+  const first = many ? Math.max(0, Math.floor(top / ROW) - 10) : 0;
+  const last = many ? Math.min(rows.length, Math.ceil((top + viewH) / ROW) + 10) : rows.length;
+  const move = (r: MRow, d: number) => setTree(moveNode(tree, r.node.id, r.parentId, r.index + d));
+  const drop = (target: MRow | null, into: boolean) => {
+    if (!dragId || locked) return;
+    if (!target) setTree(moveNode(tree, dragId, tree.id, 1e9));
+    else if (into && target.node.kind === 'folder') setTree(moveNode(tree, dragId, target.node.id, 1e9));
+    else {
+      // before the target, in its folder (the index counted without the moved row)
+      const parent = findNode(tree, target.parentId);
+      const without = parent && parent.kind === 'folder' ? parent.children.filter((c) => c.id !== dragId) : [];
+      const at = without.findIndex((c) => c.id === target.node.id);
+      setTree(moveNode(tree, dragId, target.parentId, at < 0 ? target.index : at));
+    }
+    setDragId(null);
+    setOver(null);
+  };
+  return (
+    <div className="flist-rows mrows" ref={box} onScroll={(e) => many && setTop((e.target as HTMLDivElement).scrollTop)}
+      onDragOver={(e) => { if (dragId) e.preventDefault(); }} onDrop={(e) => { if ((e.target as HTMLElement) === box.current) { e.preventDefault(); drop(null, false); } }}>
+      {rows.length === 0 && <div className="faint pad">No files yet – add files or a whole folder. You can also drop PDFs here.</div>}
+      {many && <div style={{ height: first * ROW }} />}
+      {rows.slice(first, last).map((r) => {
+        const n = r.node;
+        const siblings = (findNode(tree, r.parentId) as MFolder | null)?.children.length ?? 0;
+        const cls = 'frow' + (n.kind === 'folder' ? ' mfolder' : '') + (dragId === n.id ? ' dragging' : '') + (over?.id === n.id ? (over.into ? ' drop-into' : ' drop-before') : '');
+        return (
+          <div key={n.id} className={cls} style={{ paddingLeft: 6 + r.depth * 18, height: many ? ROW : undefined }} draggable={!locked}
+            onDragStart={(e) => { setDragId(n.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', n.name); }}
+            onDragEnd={() => { setDragId(null); setOver(null); }}
+            onDragOver={(e) => { if (!dragId || dragId === n.id) return; e.preventDefault(); const b = (e.currentTarget as HTMLElement).getBoundingClientRect(); const into = n.kind === 'folder' && e.clientY > b.top + b.height * 0.3; if (over?.id !== n.id || over.into !== into) setOver({ id: n.id, into }); }}
+            onDrop={(e) => { e.preventDefault(); e.stopPropagation(); drop(r, !!over?.into); }}>
+            {n.kind === 'folder'
+              ? <>
+                  <button className="btn sm icon ghost mfold" title={folded.has(n.id) ? 'Show what is in it' : 'Fold'} onClick={() => { const s = new Set(folded); if (s.has(n.id)) s.delete(n.id); else s.add(n.id); setFolded(s); }}><Ico n={folded.has(n.id) ? 'chevr' : 'chev'} size={12} /></button>
+                  <Ico n="folder" size={14} />
+                  <span className="grow fn" title={n.path}>{n.name}<span className="faint"> · {r.files} file{r.files === 1 ? '' : 's'}</span></span>
+                </>
+              : <>
+                  <span className="fi">{r.num}</span>
+                  <span className="grow fn" title={n.path}>{n.name}{r.depth === 0 && <span className="faint"> · {dirName(n.path)}</span>}</span>
+                  {extra(n.path)}
+                </>}
+            <button className="btn sm icon ghost" title="Up" disabled={locked || r.index === 0} onClick={() => move(r, -1)}>↑</button>
+            <button className="btn sm icon ghost" title="Down" disabled={locked || r.index >= siblings - 1} onClick={() => move(r, 1)}>↓</button>
+            <button className="btn sm icon ghost" title={n.kind === 'folder' ? 'Remove the folder and everything in it' : 'Remove'} disabled={locked} onClick={() => setTree(removeNode(tree, n.id))}>×</button>
+          </div>
+        );
+      })}
+      {many && <div style={{ height: (rows.length - last) * ROW }} />}
+    </div>
   );
 }
 
@@ -922,6 +1042,44 @@ function ExtractDlg(p: Props) {
         <label className="check"><input type="radio" checked={then === 'tab'} onChange={() => setThen('tab')} /> Open it as a new tab (save it later)</label>
       </div>
       <label className="check"><input type="checkbox" checked={remove} onChange={(e) => setRemove(e.target.checked)} /> Remove these pages from this file afterwards (Ctrl+Z puts them back)</label>
+    </Modal>
+  );
+}
+
+/** Rotate pages (14.3): which pages - as in Print - and which way; one Ctrl+Z puts them all back */
+function RotateDlg(p: Props) {
+  const doc = p.doc!;
+  const n = doc.pages.length;
+  const remembered = (() => { try { return JSON.parse(localStorage.getItem('rotate-dlg') || '{}') as { delta?: number }; } catch { return {}; } })();
+  const [which, setWhich] = useState<PickWhich>(p.pageSel.length > 1 ? 'selected' : 'current');
+  const [range, setRange] = useState('');
+  const [subset, setSubset] = useState<PickSubset>('all');
+  const [delta, setDelta] = useState<number>([90, 180, 270].includes(remembered.delta ?? 0) ? remembered.delta! : 90);
+  const [running, setRunning] = useState(false);
+  const current = p.A.currentPage?.() ?? 0;
+  const ps = pickPages({ which, range, subset, n, current, selected: p.pageSel });
+  const problem = which === 'range' && !range.trim() ? 'Type the pages, e.g. 1-3, 5, 8-10.' : !ps.length ? `None of those pages are in this file (it has ${n}).` : '';
+  const go = async () => {
+    if (problem || running) return;
+    try { localStorage.setItem('rotate-dlg', JSON.stringify({ delta })); } catch { /* fine */ }
+    setRunning(true);
+    try {
+      await p.busy('Rotating…', () => doc.rotate(ps, delta));
+      p.setDialog(null);
+    } finally { setRunning(false); }
+  };
+  const dirs: [number, string, string][] = [[270, '90° left', 'Anticlockwise'], [90, '90° right', 'Clockwise'], [180, '180°', 'Upside down']];
+  return (
+    <Modal title="Rotate pages" sub="Turns the pages themselves: saved with the file, printed turned." onClose={() => { if (!running) p.setDialog(null); }}
+      actions={<><button className="btn" disabled={running} onClick={() => p.setDialog(null)}>Cancel</button><button className="btn primary" disabled={!!problem || running} onClick={() => void go().catch(p.fail)}>Rotate {ps.length} {ps.length === 1 ? 'page' : 'pages'}</button></>}>
+      <div className="rotate-dlg">
+        <h4>Pages</h4>
+        <PagePick which={which} onWhich={setWhich} range={range} onRange={setRange} subset={subset} onSubset={setSubset}
+          n={n} current={current} selectedCount={p.pageSel.length} />
+        <h4>Turn</h4>
+        <div className="seg full">{dirs.map(([d, label, title]) => <button key={d} title={title} className={delta === d ? 'on' : ''} onClick={() => setDelta(d)}>{label}</button>)}</div>
+        <p className={'hint' + (problem ? ' err' : '')}>{problem || (ps.length === 1 ? 'Page ' + (ps[0] + 1) : `${ps.length} pages: ${toRanges(ps)}`)} · Ctrl+Z puts them back</p>
+      </div>
     </Modal>
   );
 }
@@ -1219,7 +1377,7 @@ function ToPicturesDlg(p: Props) {
       folder = d;
       targets = ps.map((i) => joinPath(d, nameOf(i)));
       const there: string[] = [];
-      for (const t of targets) if (await gcc.exists(t)) there.push(t);
+      for (const t of targets) if (await gcc.exists(t).catch(() => true)) there.push(t);
       if (there.length) {
         const r = await gcc.confirm({ message: `${there.length} of these pictures ${there.length === 1 ? 'is' : 'are'} in that folder already`, detail: there.slice(0, 6).map((t) => baseName(t)).join('\n') + (there.length > 6 ? `\n…and ${there.length - 6} more` : '') + '\n\nReplace them?', buttons: ['Replace', 'Cancel'], type: 'warning' });
         if (r !== 0) return;
@@ -1416,8 +1574,8 @@ function buildMarks(f: MarkForm, stamps: StampDef[]): PageMark[] {
   const t = (text: string, pos: PageMark['pos'], size = f.hfSize, extra: Partial<PageMark> = {}) => text.trim() && m.push({ kind: 'text', text, pos, size, color: f.hfColor, mx: f.margin, my: f.margin * 0.7, ...extra });
   (['tl', 'tc', 'tr'] as const).forEach((pos, i) => t(f.header[i], pos));
   (['bl', 'bc', 'br'] as const).forEach((pos, i) => t(f.footer[i], pos));
-  if (f.numbers) t(f.numFormat, f.numPos, Math.max(f.hfSize, 9));
-  if (f.bates) t('{bates}', f.batesPos, Math.max(f.hfSize, 9), { bold: true, color: [0, 0, 0] });
+  if (f.numbers) t(f.numFormat, f.numPos);
+  if (f.bates) t('{bates}', f.batesPos, f.hfSize, { bold: true, color: [0, 0, 0] });
   if (f.wm && f.wmText.trim()) m.push({ kind: 'text', text: f.wmText, pos: 'mc', size: f.wmSize, angle: f.wmAngle, opacity: f.wmOpacity, color: f.wmColor, bold: true, under: f.wmUnder });
   const st = stamps.find((s) => s.id === f.stamp);
   if (st?.design) m.push({ kind: 'stamp', design: st.design, pos: f.stampPos, width: f.stampWidth, mx: f.margin, my: f.margin });
@@ -2069,7 +2227,8 @@ function SheetsDlg(p: Props) {
       // (for the tests: what was read and found)
       (window as unknown as { __gccSheets?: unknown }).__gccSheets = { read: scan.pages.filter(Boolean).length, withText: scan.pages.filter((x) => x && x.text).length, sizes: [...new Set(scan.pages.filter(Boolean).map((x) => `${Math.round(x.w)}x${Math.round(x.h)}`))], marks: plan.marks.map((m) => m.page) };
       const nt = noTextLine(plan.noText);
-      if (!plan.sheets) { p.setDialog(null); p.toast([NOTHING_FOUND, nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
+      // (one page: nothing to link to, whatever OCR would read on it)
+      if (!plan.sheets) { p.setDialog(null); p.toast([nothingFoundText({ pages: total, withText: scan.pages.filter((x) => x && x.text).length }), total > 1 ? nt : ''].filter(Boolean).join(' '), 'info', undefined, 10000); return; }
       const want = links ? plan.links : [];
       if (!want.length && !marks) { p.setDialog(null); p.toast(['No references between sheets found. Nothing was changed.', dupLine(plan.dups), nt].filter(Boolean).join(' '), 'info', undefined, 8000); return; }
       setRun({ done: total, total, writing: true });

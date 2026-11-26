@@ -81,3 +81,21 @@ func TestOursByImageName(t *testing.T) {
 		}
 	}
 }
+
+// 14.12: Explorer's folder entry runs this program with a folder: it goes to the spool as it is
+// (the app walks it) - a folder name with no ".pdf" is not dropped here
+func TestSpoolTakesAFolder(t *testing.T) {
+	dir := t.TempDir()
+	folder := `\\server\Tenders\T01 Drawings`
+	if err := spool(dir, folder, 0); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := filepath.Glob(filepath.Join(dir, "*.path"))
+	if len(m) != 1 {
+		t.Fatalf("want 1 entry, got %v", m)
+	}
+	b, _ := os.ReadFile(m[0])
+	if string(b) != folder {
+		t.Fatalf("entry holds %q", b)
+	}
+}

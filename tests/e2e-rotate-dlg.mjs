@@ -1,0 +1,55 @@
+// 14.3: Rotate pages - choose the pages (as in Print) and the way; one Ctrl+Z puts them all back.
+// xvfb-run -a node tests/e2e-rotate-dlg.mjs
+import { _electron as electron } from 'playwright';
+import { resolve, join } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import * as mupdf from 'mupdf';
+
+const TMP = resolve('tests/tmp-rotate-dlg');
+rmSync(TMP, { recursive: true, force: true });
+mkdirSync(TMP, { recursive: true });
+const d = new mupdf.PDFDocument();
+for (let p = 0; p < 6; p++) d.insertPage(-1, d.addPage([0, 0, 595, 842], 0, {}, ''));
+const FILE = join(TMP, 'six.pdf');
+writeFileSync(FILE, d.saveToBuffer('').asUint8Array());
+rmSync(join(process.env.HOME, '.config', 'PDF Editor', 'profile-rotdlg'), { recursive: true, force: true });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let fails = 0;
+const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) fails++; return c; };
+const app = await electron.launch({ executablePath: resolve('node_modules/electron/dist/electron'), args: [resolve('.'), '--no-sandbox', '--profile=rotdlg', FILE] });
+const win = await app.firstWindow();
+await win.setViewportSize({ width: 1600, height: 1000 }).catch(() => {});
+await win.waitForFunction(() => window.__gcc?.active()?.pages.length === 6, null, { timeout: 60000 });
+await sleep(1200);
+const off = win.locator('.modal button', { hasText: 'Turn it off' });
+if (await off.count()) { await off.first().click(); await sleep(300); }
+const rots = () => win.evaluate(() => window.__gcc.active().pages.map((p) => p.rot ?? p.rotate ?? 0));
+const open = async () => { await win.locator('.rtab', { hasText: /^Organize$/ }).click(); await win.locator('button', { hasText: 'Rotate…' }).first().click(); await win.locator('.modal .rotate-dlg').waitFor(); };
+const dlg = win.locator('.modal');
+ok(JSON.stringify(await rots()) === '[0,0,0,0,0,0]', 'six upright pages: ' + JSON.stringify(await rots()));
+await open();
+await dlg.locator('.seg button', { hasText: /^All 6$/ }).click();
+await dlg.locator('select').selectOption('even');
+await dlg.locator('.seg button', { hasText: '90° right' }).click();
+ok(/Rotate 3 pages/.test(await dlg.locator('.btn.primary').innerText()), 'Even of all: the button says 3 pages');
+await dlg.locator('.btn.primary').click();
+await sleep(1500);
+ok(JSON.stringify(await rots()) === '[0,90,0,90,0,90]', 'pages 2, 4, 6 turned right: ' + JSON.stringify(await rots()));
+await win.keyboard.press('Control+z');
+await sleep(1500);
+ok(JSON.stringify(await rots()) === '[0,0,0,0,0,0]', 'one Ctrl+Z puts all three back: ' + JSON.stringify(await rots()));
+await open();
+await dlg.locator('.seg button', { hasText: 'Pages…' }).click();
+await dlg.locator('input.input').fill('1-2');
+await dlg.locator('.seg button', { hasText: '180°' }).click();
+await dlg.locator('.btn.primary').click();
+await sleep(1500);
+ok(JSON.stringify(await rots()) === '[180,180,0,0,0,0]', '"1-2" turned 180°: ' + JSON.stringify(await rots()));
+await open();
+await dlg.locator('.seg button', { hasText: 'Pages…' }).click();
+await dlg.locator('input.input').fill('9');
+ok(await dlg.locator('.btn.primary').isDisabled() && /None of those pages/.test(await dlg.locator('.hint').innerText()), 'pages that are not there: the button is off and the dialog says why');
+await app.evaluate(({ app: a }) => a.exit(0)).catch(() => {});
+rmSync(TMP, { recursive: true, force: true });
+console.log(fails ? `${fails} FAILED` : 'ALL PASS');
+process.exit(fails ? 1 : 0);

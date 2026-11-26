@@ -256,7 +256,8 @@ export function Ribbon(p: Props) {
       body = (
         <>
           <Group label="Text">{T('edit-text', 'edittext', 'Edit text')}{T('typewriter', 'typewriter', 'Add text')}{B('image', 'Add image', A.image)}</Group>
-          <Group label="Links">{T('link', 'link', 'Link')}{B('linksheets', 'Link the sheets', A.linkSheets, { title: 'For a drawing set: links every "see A-301" to that sheet and adds a Sheets group of bookmarks. One Ctrl+Z takes it all out again' })}</Group>
+          <Group label="Links">{T('link', 'link', 'Link')}{B('linksheets', 'Link the sheets', A.linkSheets, { title: 'For a drawing set: links every "see A-301" to that sheet and adds a Sheets group of bookmarks. One Ctrl+Z takes it all out again' })}
+            <label className="rchk" title="A faint blue mark on every link, so you can see what is linked. On screen only: never printed or saved."><input type="checkbox" checked={p.settings.linkMarks ?? true} onChange={(e) => p.saveSettings({ linkMarks: e.target.checked })} /> Show link marks</label></Group>
           <Group label="Redact">{T('redact-area', 'redact', 'Mark area')}{T('redact-text', 'redacttext', 'Mark text')}{B('search', 'Find & mark', A.redactSearch, { title: 'Find words (names, amounts…) and mark them all for redaction' })}{B('apply', 'Apply', A.applyRedactions, { title: 'Remove everything under the redaction marks for good' })}</Group>
           <Group label="Page marks">{B('number', 'Numbers & headers', () => A.marks(false), { title: 'Page numbers, headers/footers, Bates numbers, watermark or stamp on every page' })}</Group>
           <Group label="Flatten"><FlattenButton A={A} disabled={dis} hasSel={p.sel.length > 0} /></Group>
@@ -267,7 +268,7 @@ export function Ribbon(p: Props) {
       body = (
         <>
           <Group label="Insert">{B('insert', 'From file', A.insertFile, { title: 'Pages of another open file, or of a file on disk' })}{B('replace', 'Replace', A.replacePages, { title: 'Swap pages of this file for pages of another (revised sheets): bookmarks and links keep pointing at them' })}{B('blank', 'Blank page', A.insertBlank)}{B('duplicate', 'Duplicate', A.duplicate)}</Group>
-          <Group label="Pages">{B('rotl', 'Rotate left', () => A.rotate(270))}{B('rotr', 'Rotate right', () => A.rotate(90))}{B('delete', 'Delete', A.deletePages)}{B('crop', 'Crop', A.crop)}</Group>
+          <Group label="Pages">{B('rotl', 'Rotate left', () => A.rotate(270))}{B('rotr', 'Rotate right', () => A.rotate(90))}{B('rotr', 'Rotate…', () => A.rotateDlg(), { title: 'Choose the pages to turn (all, this page, odd, even or typed) and which way' })}{B('delete', 'Delete', A.deletePages)}{B('crop', 'Crop', A.crop)}</Group>
           <Group label="Out">{B('extract', 'Extract', A.extract, { title: 'Save the selected pages (or this page) as a new PDF' })}{B('split', 'Split', A.split)}{B('snapshot', 'Pictures', A.toPictures, { title: 'Save pages as PNG or JPG pictures' })}</Group>
           <Group label="Combine">{B('merge', 'Merge files', A.merge, { disabled: false })}</Group>
           <div className="rnote">Select pages in the Pages panel (Ctrl/Shift+click) to work on several at once; drag them to reorder.</div>

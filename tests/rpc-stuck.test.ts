@@ -2,7 +2,7 @@
 // kind of call gets (`hangLimit`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EngineClient, hangLimit } from '../src/engine/rpc';
+import { EngineClient, hangLimit, isEngineDown } from '../src/engine/rpc';
 
 const fakePort = () => ({ posted: [] as any[], onmessage: null as any, postMessage(m: any) { this.posted.push(m); }, start() {}, close() {} }) as any;
 
@@ -47,4 +47,20 @@ test('stuck: a short call that went ahead is the one running', () => {
   assert.equal(c.stuck()!.method, 'chars');
   port.onmessage({ data: { id: 2, ok: true, value: 1 } });
   assert.equal(c.stuck()!.method, 'viewTile');
+});
+
+test('"Document is not open" is only part of a restart after a restart, not in the first 30 s of the window', async () => {
+  const c = new EngineClient('Editing engine');
+  const port = fakePort();
+  c.attach(port, false);
+  const p1 = c.call('tile').catch((e: unknown) => e);
+  port.onmessage({ data: { id: c.stuck()!.id, ok: false, error: 'Document is not open' } });
+  assert.equal(isEngineDown(await p1), false, 'no restart happened: a genuine failure');
+  // (after a restart the same answer is part of it)
+  c.attach(fakePort(), true);
+  const port2 = fakePort();
+  c.attach(port2, false);
+  const p2 = c.call('tile').catch((e: unknown) => e);
+  port2.onmessage({ data: { id: c.stuck()!.id, ok: false, error: 'Document is not open' } });
+  assert.equal(isEngineDown(await p2), true);
 });

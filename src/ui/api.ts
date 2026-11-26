@@ -1,4 +1,7 @@
 // The PC side (Electron preload). Typed access.
+import type { GatherFolder } from './mergetree';
+/** a folder walked for Combine (electron/gather.cjs) */
+export interface GatherResult { root: string; tree: GatherFolder; count: number; capped: boolean; cancelled: boolean; unreadable: string[] }
 /** a file moving to another window: where it is (the file, or the copy of its unsaved work), its name and page */
 export interface TabMove {
   path: string | null;
@@ -70,6 +73,10 @@ export interface GccApi {
   exists(p: string): Promise<boolean>;
   /** PDFs in a folder (kind 'pictures': JPG, PNG, TIFF, BMP, GIF) */
   listPdfs(dir: string, recursive?: boolean, kind?: 'pdf' | 'pictures'): Promise<string[]>;
+  /** Combine a folder (14.10): the PDFs under a chosen folder as a tree; null if refused / unreadable */
+  gatherFolder(dir: string): Promise<GatherResult | null>;
+  /** when each (chosen) file was last changed, ms - Combine's Sort by date */
+  fileTimes(files: string[]): Promise<Record<string, number>>;
   systemFont(name: string): Promise<Uint8Array | null>;
   cacheGet(k: string): Promise<Uint8Array | null>;
   cachePut(k: string, data: Uint8Array): Promise<boolean>;
@@ -133,8 +140,8 @@ export interface GccApi {
   registerOpenWith(): Promise<{ ok: boolean; msg?: string }>;
   pathOf(f: File): string;
   onOpen(cb: (files: string[]) => void): void;
-  /** PDFs picked in Explorer > Combine with PDF Editor */
-  onCombine(cb: (files: string[]) => void): void;
+  /** PDFs (and folders, walked: trees) picked in Explorer > Combine with PDF Editor */
+  onCombine(cb: (files: string[], trees: GatherResult[]) => void): void;
   onClosing(cb: (o: { restart?: boolean }) => void): void;
   /** the pages must be drawn again (Windows unlocked / woken, graphics process restarted) */
   onRedraw?(cb: (why: string) => void): void;

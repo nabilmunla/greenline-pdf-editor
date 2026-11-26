@@ -13,6 +13,8 @@ import { writeXlsx } from './xlsxwrite';
 import { measureNumber, perimeterNumber, KIND_NAME, KIND_ORDER, commentRow, headRow, COMMENT_HEAD, COMMENT_WIDTHS } from './measurexl';
 import { prepare, dragIcon, dropPages } from './pagedrag';
 import { pageRange } from './pagesel';
+import { PagePick } from './PagePick';
+import { pickPages, piecesOf, toRanges, type PickWhich } from './dlgutil';
 
 export type SideKind = 'pages' | 'bookmarks' | 'comments' | 'totals' | 'search' | 'layers';
 
@@ -525,7 +527,8 @@ function Bookmarks(p: Props) {
   const isOpen = (k: string, m: OutNode, d: number) => shown.get(k) ?? (m.open || d === 0);
   const expand = (k: string) => setShown((s) => { const n = new Map(s); for (let q = pOf(k); q.length; q = q.slice(0, -1)) n.set(pkey(q), true); return n; });
   const apply = async (t: OutNode[], label: string, select?: BPath, edit = false) => {
-    if (working.current) return;
+    // (the change was worked out from the list as it was: it can't go in while the last one is still being written)
+    if (working.current) { p.toast('Still saving the last bookmark change – try again in a moment.', 'info'); return; }
     working.current = true;
     const id = doc.id;
     setMarks(t);
@@ -1217,29 +1220,32 @@ const HIT_CAP = 5000;
  * Every hit in one file: pieces of 40 pages searched by all drawing engines at once; `piece` hears
  * of the hits in page order as soon as every piece before them is in. Stops at `cap` hits.
  */
-async function searchDoc(doc: PdfDoc, q: string, mc: boolean, ww: boolean, cap: number, piece: (all: FoundHit[], donePages: number) => void, stopped: () => boolean): Promise<FoundHit[]> {
+async function searchDoc(doc: PdfDoc, q: string, mc: boolean, ww: boolean, cap: number, piece: (all: FoundHit[], donePages: number) => void, stopped: () => boolean, only?: number[]): Promise<FoundHit[]> {
   await doc.drawReady();
   const all: FoundHit[] = [];
-  const step = 40, n = doc.pages.length;
-  const pieces: number[] = [];
-  for (let i = 0; i < n; i += step) pieces.push(i);
-  const got: (FoundHit[] | undefined)[] = new Array(pieces.length);
+  const n = doc.pages.length;
+  // (runs of up to 40 pages: the whole file, or the pages chosen - 14.2)
+  const runs = piecesOf((only ?? [...Array(n).keys()]).filter((i) => i >= 0 && i < n), 40);
+  const doneAfter: number[] = [];
+  runs.reduce((t, [a, b], k) => (doneAfter[k] = t + b - a), 0);
+  const got: (FoundHit[] | undefined)[] = new Array(runs.length);
   let next = 0, shown = 0, found = 0, stop = false;
   const publish = () => {
     const before = shown;
-    while (shown < pieces.length && got[shown] && all.length < cap) all.push(...got[shown++]!);
+    while (shown < runs.length && got[shown] && all.length < cap) all.push(...got[shown++]!);
     // (pieces still under way when the cap was reached land too: the list stops at the cap)
     if (all.length > cap) all.length = cap;
     if (shown === before || stopped()) return;
-    piece(all, Math.min(n, pieces[shown - 1] + step));
+    piece(all, doneAfter[shown - 1]);
   };
   await Promise.all(renderers.map(async (eng) => {
-    while (!stop && next < pieces.length) {
+    while (!stop && next < runs.length) {
       if (stopped()) { stop = true; return; }
       const k = next++;
+      const [from, to] = runs[k];
       // (heavy pages looked at first: PLAN 3.2)
-      await doc.ensurePages(Array.from({ length: Math.min(n, pieces[k] + step) - pieces[k] }, (_, i) => pieces[k] + i));
-      got[k] = await eng.call<FoundHit[]>('find', [doc.id, q, pieces[k], pieces[k] + step, mc, ww]).catch(() => []);
+      await doc.ensurePages(Array.from({ length: to - from }, (_, i) => from + i));
+      got[k] = await eng.call<FoundHit[]>('find', [doc.id, q, from, to, mc, ww]).catch(() => []);
       found += got[k]!.length;
       if (found > cap) stop = true;
       publish();
@@ -1282,6 +1288,11 @@ function Search(p: Props) {
   const setScope = (v: 'file' | 'all') => { setScopeState(v); try { localStorage.setItem('search-scope', v); } catch { /* fine */ } };
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState<number | null>(null);
+  // (which pages of this file: all, the one on screen, or typed - back to all on another tab, 14.2)
+  const [pw, setPw] = useState<PickWhich>('all');
+  const [prange, setPrange] = useState('');
+  const only = pw === 'all' ? undefined : pickPages({ which: pw, range: prange, subset: 'all', n: doc.pages.length, current: p.page ?? 0, selected: [] });
+  const [searched, setSearched] = useState<{ n: number; label: string } | null>(null);
   const [snips, setSnips] = useState<Record<number, string>>({});
   const [, tick] = useState(0);
   const [folded, setFolded] = useState<Set<string>>(() => new Set());
@@ -1294,9 +1305,11 @@ function Search(p: Props) {
   // ---- this file
   const go = async () => {
     const id = ++run.current;
-    last.current = q + '\u0000' + mc + ww;
+    last.current = q + '\u0000' + mc + ww + '\u0000' + pw + prange;
     p.setHits([]);
     setSnips({});
+    setSearched(only ? { n: only.length, label: toRanges(only) } : null);
+    if (only && !only.length) { setRunning(false); setDone(0); return; }
     // (the box emptied while a search ran: that search stops, so the panel must not stay on "Searching…")
     if (!q.trim()) { setRunning(false); setDone(null); return; }
     setRunning(true);
@@ -1306,7 +1319,7 @@ function Search(p: Props) {
       p.setHits([...list]);
       if (list.length && first) { first = false; p.setHitIndex(0); }
       setDone(pagesDone);
-    }, () => run.current !== id);
+    }, () => run.current !== id, only);
     if (run.current !== id) return;
     // (stopped at 5,000 hits: what came in after a gap is dropped, the list stays in page order)
     setRunning(false);
@@ -1394,8 +1407,9 @@ function Search(p: Props) {
   // (not when more hits come in while searching: the list would jump back while being read)
   useEffect(() => { listRef.current?.querySelector('.cm-item.on')?.scrollIntoView({ block: 'nearest' }); }, [p.hitIndex, across.cur?.id, across.cur?.i]);
   // another tab: a search of this file still going is for the other file - stop it, start fresh (same words)
-  useEffect(() => { run.current++; setRunning(false); setDone(null); setSnips({}); last.current = ''; }, [doc.id]);
+  useEffect(() => { run.current++; setRunning(false); setDone(null); setSnips({}); last.current = ''; setPw('all'); setSearched(null); }, [doc.id]);
   const key = q + '\u0000' + mc + ww;
+  const fileKey = key + '\u0000' + pw + prange;
   const enter = (e: React.KeyboardEvent) => {
     if (e.key !== 'Enter') return;
     if (scope === 'all') {
@@ -1410,7 +1424,7 @@ function Search(p: Props) {
       } else void goAll().catch((er) => p.toast(String((er as Error)?.message || er), 'err'));
       return;
     }
-    if (p.hits.length && !running && done !== null && last.current === key) p.setHitIndex((p.hitIndex + (e.shiftKey ? p.hits.length - 1 : 1)) % p.hits.length); else void go().catch((er) => p.toast(String((er as Error)?.message || er), 'err'));
+    if (p.hits.length && !running && done !== null && last.current === fileKey) p.setHitIndex((p.hitIndex + (e.shiftKey ? p.hits.length - 1 : 1)) % p.hits.length); else void go().catch((er) => p.toast(String((er as Error)?.message || er), 'err'));
   };
   const totalAll = across.files.reduce((n, f) => n + f.hits.length, 0);
   const shownFiles = across.files.filter((f) => p.docs.some((d) => d.id === f.id));
@@ -1429,8 +1443,14 @@ function Search(p: Props) {
             ? <button className="btn sm" onClick={() => { across.stop = true; across.running = false; across.emit(); }}>Stop</button>
             : <button className="btn sm primary" onClick={() => void (scope === 'all' ? goAll() : go()).catch((er) => p.toast(String((er as Error)?.message || er), 'err'))}>Find</button>}
         </div>
+        {scope === 'file' && (
+          <div className="search-pages">
+            <PagePick which={pw} onWhich={setPw} range={prange} onRange={setPrange} subset="all" onSubset={() => {}} noSubset
+              n={doc.pages.length} current={p.page ?? 0} selectedCount={0} rangeLabel="Pages…" />
+          </div>
+        )}
         {scope === 'file'
-          ? <div className="faint">{running ? `Searching… page ${done} of ${doc.pages.length}` : done !== null ? `${p.hits.length} found${p.hits.length >= HIT_CAP ? ' (first 5000)' : ''} · Enter / F3 = next` : 'Scanned pages without text: run OCR first.'}</div>
+          ? <div className="faint">{running ? `Searching… page ${done} of ${searched ? searched.n : doc.pages.length}` : done !== null ? `${p.hits.length} found${searched ? ` in ${searched.n === 1 ? 'page' : 'pages'} ${searched.label}` : ''}${p.hits.length >= HIT_CAP ? ' (first 5000)' : ''} · Enter / F3 = next` : 'Scanned pages without text: run OCR first.'}</div>
           : <div className="faint">{across.running ? `Searching ${across.at}…` : across.files.length ? `${totalAll} found in ${shownFiles.filter((f) => f.hits.length).length} of ${shownFiles.length} files${totalAll >= HIT_CAP ? ' (first 5000)' : ''}${across.stop ? ' – stopped' : ''} · Enter = next` : 'Searches every open file. Scanned pages without text: run OCR first.'}
             {shownFiles.filter((f) => f.hits.length).length > 1 && <> · <button className="link sm" onClick={() => setFolded(folded.size ? new Set() : new Set(shownFiles.map((f) => f.id)))}>{folded.size ? 'Open all' : 'Fold all'}</button></>}</div>}
       </div>

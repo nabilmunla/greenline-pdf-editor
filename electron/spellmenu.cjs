@@ -7,13 +7,16 @@
 const MAX_SUGGESTIONS = 5;
 
 /**
- * @param {{ isEditable?: boolean, misspelledWord?: string, dictionarySuggestions?: string[],
+ * @param {{ isEditable?: boolean, selectionText?: string, misspelledWord?: string, dictionarySuggestions?: string[],
  *           editFlags?: { canCut?: boolean, canCopy?: boolean, canPaste?: boolean, canSelectAll?: boolean } }} params
  * @param {{ replace: (word: string) => void, addWord: (word: string) => void }} act
  * @returns {Array<Record<string, unknown>> | null}
  */
 function spellMenu(params, act) {
-  if (!params || !params.isEditable) return null;
+  if (!params) return null;
+  // (text selected where it can't be typed in - a label, a panel, a message: Copy alone. The page
+  // itself never asks: the viewer keeps its own right-click menus - 14.4)
+  if (!params.isEditable) return params.selectionText && String(params.selectionText).trim() ? [{ label: 'Copy', role: 'copy' }] : null;
   const flags = params.editFlags || {};
   const items = [];
   const word = params.misspelledWord || '';

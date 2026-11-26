@@ -45,9 +45,17 @@ test('a misspelled word with no suggestions: a greyed "No suggestions", then the
   assert.notEqual(t[1].enabled, false);
 });
 
-test('not editable: no menu at all', () => {
+test('not editable and nothing selected: no menu at all', () => {
   assert.equal(spellMenu({ isEditable: false, misspelledWord: 'teh', dictionarySuggestions: ['the'], editFlags: flags }, fake().act), null);
+  assert.equal(spellMenu({ isEditable: false, selectionText: '   ' }, fake().act), null);
   assert.equal(spellMenu({}, fake().act), null);
+});
+
+test('not editable but text selected (a label, a panel, a message): Copy alone (14.4)', () => {
+  const t = spellMenu({ isEditable: false, selectionText: 'Sheet A-101', editFlags: { canCopy: true } }, fake().act)!;
+  assert.deepEqual(labelsOf(t), ['Copy']);
+  assert.equal(t[0].role, 'copy');
+  assert.notEqual(t[0].enabled, false);
 });
 
 test('the edit items follow the edit flags (nothing to paste: Paste greyed)', () => {
