@@ -3,8 +3,9 @@
 // behind them:
 //  - a short call (the text of a page, a snap point, its links): it now goes ahead of the tiles
 //    queued (never ahead of anything else - an open, a close or an edit keeps its place);
-//  - tiles of a view already left (zoomed away): the window says which scales it still wants for
-//    a document, and a view tile at another scale is answered "stale" instead of being drawn.
+//  - tiles of a view already left (zoomed away, or scrolled / paged away at the same zoom): the
+//    window says which scales and pages it still wants for a document, and a view tile at another
+//    scale or of another page is answered "stale" instead of being drawn (a running one gives way).
 
 /** calls that answer quickly and may go ahead of queued tiles */
 export const SHORT = new Set(['chars', 'charsIn', 'rangeRects', 'links', 'snap', 'heap']);
@@ -18,6 +19,12 @@ export interface QCall { method: string; args: unknown[]; seq: number }
 export class CallQueue<C extends QCall> {
   readonly items: C[] = [];
   private want = new Map<string, Set<number>>();
+  /** the pages in view per document (none given: any page) - a tile of a page scrolled or paged
+   *  away from at the same zoom was drawn all the same */
+  private wantPages = new Map<string, Set<number>>();
+  /** the (page, scale) pairs in view: a page left whose small preview still shows (Pages panel)
+   *  keeps the preview's scale only, not the sharp one (scales and pages pooled kept both) */
+  private wantPairs = new Map<string, Set<string>>();
   /** view tiles answered "stale" without being drawn */
   stale = 0;
 
@@ -30,9 +37,13 @@ export class CallQueue<C extends QCall> {
   }
 
   /** the scales of view tiles the window still wants for a document (null: forget the document) */
-  wantScales(doc: string, scales: number[] | null) {
+  wantScales(doc: string, scales: number[] | null, pages?: number[] | null, pairs?: [number, number][] | null) {
     if (scales) this.want.set(doc, new Set(scales));
     else this.want.delete(doc);
+    if (scales && pages) this.wantPages.set(doc, new Set(pages));
+    else this.wantPages.delete(doc);
+    if (scales && pairs) this.wantPairs.set(doc, new Set(pairs.map(([p, k]) => p + '@' + k)));
+    else this.wantPairs.delete(doc);
   }
 
   /** (PLAN 7.5) the short call at the front, taken to run in a tile's pause - only at the front:
@@ -43,8 +54,13 @@ export class CallQueue<C extends QCall> {
 
   isStale(c: C) {
     if (c.method !== VIEW_TILE) return false;
-    const w = this.want.get(String(c.args[0]));
-    return !!w && !w.has(Number(c.args[2]));
+    const doc = String(c.args[0]);
+    const w = this.want.get(doc);
+    if (w && !w.has(Number(c.args[2]))) return true;
+    const pg = this.wantPages.get(doc);
+    if (pg && !pg.has(Number(c.args[1]))) return true;
+    const pr = this.wantPairs.get(doc);
+    return !!pr && !pr.has(Number(c.args[1]) + '@' + Number(c.args[2]));
   }
 
   /** the next call to run, and the view tiles found stale ahead of it (to be answered so) */

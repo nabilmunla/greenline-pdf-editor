@@ -315,5 +315,12 @@ with zipfile.ZipFile(tester, 'w') as z:
     z.write(os.path.join(ROOT, 'README.txt'), folder + 'README.txt', compress_type=zipfile.ZIP_DEFLATED)
     z.writestr(folder + 'START HERE.txt', note.replace('\n', '\r\n'), compress_type=zipfile.ZIP_DEFLATED)
     z.write(os.path.join(out, f'source-v{ver}.zip'), folder + f'source-v{ver}.zip', compress_type=zipfile.ZIP_STORED)
+# nothing shipped holds this machine's paths (its home folder names the account);
+# zips are read entry by entry (a setup with its package appended is read as one)
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+import buildpaths
+shipped = [os.path.join(out, f) for f in sorted(os.listdir(out)) if f.endswith(('.zip', '.exe'))]
+if buildpaths.main(shipped):
+    die('build paths found in the files above - not for release')
 print('\n'.join(f'{f}  {os.path.getsize(os.path.join(out, f)) // 1024} KB' for f in sorted(os.listdir(out))))
 print(tester, os.path.getsize(tester) // 1024, 'KB')

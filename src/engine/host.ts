@@ -635,13 +635,13 @@ function serve(port: PortMain) {
   ports.push(port);
   port.on('close', () => { const k = ports.indexOf(port); if (k >= 0) ports.splice(k, 1); });
   port.on('message', (e) => {
-    const d = e.data as { id: number; method: string; args: unknown[]; out?: boolean | string; want?: { doc: string; scales: number[] | null }; cancel?: string };
+    const d = e.data as { id: number; method: string; args: unknown[]; out?: boolean | string; want?: { doc: string; scales: number[] | null; pages?: number[]; pairs?: [number, number][] }; cancel?: string };
     // (a job to stop: taken at once like `want` - the engine is inside that job's call)
     // (the most recent 64 kept: a Stop that comes after its job ended is never removed by the job -
     // sweep 0.13)
     if (d.cancel !== undefined) { cancelled.delete(d.cancel); cancelled.add(d.cancel); while (cancelled.size > 64) cancelled.delete(cancelled.values().next().value!); return; }
     // (the scales the window still wants for a document: taken at once, not queued)
-    if (d.want) { queue.wantScales(d.want.doc, d.want.scales); return; }
+    if (d.want) { queue.wantScales(d.want.doc, d.want.scales, d.want.pages, d.want.pairs); return; }
     queue.push({ port, id: d.id, method: d.method, args: d.args, out: d.out, seq: arrived++ });
     pump();
   });

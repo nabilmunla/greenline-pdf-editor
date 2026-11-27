@@ -1,4 +1,9 @@
 {
+  "0.14.1": {
+    "Fixes": [
+      "Scrolling or paging to another page of a heavy drawing at the same zoom could leave the new page waiting while the page you left finished drawing. The page you left now stops, so the new page starts sooner. A page still being opened can't be stopped part-way, so the first look at a very heavy page can still take a moment."
+    ]
+  },
   "0.14.0": {
     "New features": [
       "Combine a whole folder: right-click a folder in Explorer and choose \"Combine PDFs with PDF Editor\" (Windows 11: under \"Show more options\"). Every PDF in it and its sub-folders is gathered, in Explorer's name order. The Merge window shows them as a tree of folders: drag a file, or a whole folder, to a new place, or sort by name or date. The combined file gets a bookmark for each folder and file. \"Add folder\" in the Merge window does the same from inside the app. Up to 5,000 PDFs per folder, and up to 32 folders deep.",

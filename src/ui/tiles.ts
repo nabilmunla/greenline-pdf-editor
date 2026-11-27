@@ -142,18 +142,24 @@ class TileStore {
    *  engines: tiles queued there at other scales are dropped unrun (PLAN 3.9) */
   private sentScales = new Map<string, string>();
   private sendScales() {
-    const by = new Map<string, Set<number>>();
+    const by = new Map<string, { s: Set<number>; p: Set<number>; pr: Map<string, [number, number]> }>();
     for (const l of this.wishes.values()) for (const r of l) {
       if (r.layer !== 'b' && r.layer !== 'p') continue;
       let s = by.get(r.doc);
-      if (!s) by.set(r.doc, (s = new Set()));
-      s.add(r.scale);
+      if (!s) by.set(r.doc, (s = { s: new Set(), p: new Set(), pr: new Map() }));
+      s.s.add(r.scale);
+      s.p.add(r.page);
+      s.pr.set(r.page + '@' + r.scale, [r.page, r.scale]);
     }
     for (const [doc, s] of by) {
-      const scales = [...s].sort((a, b) => a - b), sig = scales.join(',');
+      // (and the pages: a tile of a page scrolled or paged away from at the same zoom is dropped,
+      // or stops between its slices - the new page no longer waits behind it)
+      const scales = [...s.s].sort((a, b) => a - b), pages = [...s.p].sort((a, b) => a - b);
+      const pairs = [...s.pr.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const sig = scales.join(',') + '|' + pairs.map((x) => x.join('@')).join(',');
       if (this.sentScales.get(doc) === sig) continue;
       this.sentScales.set(doc, sig);
-      for (const e of renderers) e.want(doc, scales);
+      for (const e of renderers) e.want(doc, scales, pages, pairs);
     }
   }
   forget(tag: string) { this.wishes.delete(tag); this.base.delete(tag); this.canvases.delete(tag); this.recount(); }

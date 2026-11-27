@@ -185,8 +185,8 @@ export class EngineClient {
 
   /** the scales of view tiles still wanted for a document (null: none any more); queued view
    *  tiles at other scales are answered "stale" instead of drawn (PLAN 3.9) */
-  want(doc: string, scales: number[] | null) {
-    try { this.port?.postMessage({ want: { doc, scales } }); } catch { /* a port going away: its queue goes with it */ }
+  want(doc: string, scales: number[] | null, pages?: number[], pairs?: [number, number][]) {
+    try { this.port?.postMessage({ want: pages ? (pairs ? { doc, scales, pages, pairs } : { doc, scales, pages }) : { doc, scales } }); } catch { /* a port going away: its queue goes with it */ }
   }
 
   /** stop a long job (a merge) that the engine is running: taken at once, ahead of the queue, and
